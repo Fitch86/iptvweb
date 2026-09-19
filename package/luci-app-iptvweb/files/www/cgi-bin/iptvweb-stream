@@ -1,29 +1,47 @@
 #!/bin/sh
-# Same-origin MPEG-TS proxy for udpxy. Avoids browser CORS restrictions.
-# Only proxies the configured udpxy host/port and a validated multicast address/port.
+# Same-origin MPEG-TS proxy for udpxy. This avoids browser CORS restrictions.
+# Only configured udpxy host/port and IPv4 multicast destinations are accepted.
 
-printf 'Content-Type: video/mp2t\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\n\r\n'
+printf 'Content-Type: video/mp2t\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\n\r\n'
 
 qs="${QUERY_STRING:-}"
 group="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^group=//p' | head -n1)"
 port="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^port=//p' | head -n1)"
 
-# The values are expected to be IPv4 multicast and a numeric UDP port.
-# No arbitrary destination URL is accepted, avoiding an open proxy/SSRF.
+# URL-decode the group value (the UI sends encodeURIComponent()).
+group="$(printf '%s' "$group" | sed 's/+/ /g; s/%/\\x/g' | xargs printf '%b' 2>/dev/null || true)"
+
 udpxy="$(uci -q get iptvweb.main.udpxy 2>/dev/null || true)"
 [ -n "$udpxy" ] || exit 1
 
+# udpxy is configured as host:port; permit only a simple IPv4/hostname form.
 case "$udpxy" in
     *[!A-Za-z0-9.:-]*) exit 1 ;;
 esac
 
+# Destination must be IPv4 multicast 224.0.0.0/4.
+oldIFS="$IFS"; IFS=.; set -- $group; IFS="$oldIFS"
+[ "$#" = 4 ] || exit 1
+for octet in "$@"; do
+    case "$octet" in ''|*[!0-9]*) exit 1;; esac
+    [ "$octet" -le 255 ] 2>/dev/null || exit 1
+done
+first="$1"
+[ "$first" -ge 224 ] 2>/dev/null || exit 1
+[ "$first" -le 239 ] 2>/dev/null || exit 1
+
+case "$port" in ''|*[!0-9]*) exit 1;; esac
+[ "$port" -ge 1 ] 2>/dev/null || exit 1
+[ "$port" -le 65535 ] 2>/dev/null || exit 1
+
 url="http://${udpxy}/udp/${group}:${port}"
 
-# Prefer wget because BusyBox wget streams the response to stdout.
-if command -v wget >/dev/null 2>&1; then
-    exec wget -q -O - "$url"
-elif command -v uclient-fetch >/dev/null 2>&1; then
+# BusyBox wget/uclient-fetch stream the response to stdout. Do not use -q on
+# some builds if it suppresses useful diagnostics; stderr is not sent to CGI.
+if command -v uclient-fetch >/dev/null 2>&1; then
     exec uclient-fetch -q -O - "$url"
+elif command -v wget >/dev/null 2>&1; then
+    exec wget -q -O - "$url"
 else
     exit 1
 fi
