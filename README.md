@@ -26,3 +26,16 @@ LuCI -> Services -> IPTV Web:
 Player: `http://192.168.1.1/iptv/`
 
 The server-side proxy only accepts IPv4 multicast destinations (224.0.0.0/4) and uses the configured udpxy endpoint.
+
+
+## rev3.2 A/B 延迟播放测试
+
+- 保持 isLive=false、Worker 配置不变。
+- stashInitialSize 固定为 1MB（根据 rev3.1 实测选择）。
+- 播放器顶部“启动缓冲”可选择 0/1/2/3/5 秒。
+- 0 秒：立即 play()，作为基线。
+- 1/2/3/5 秒：等待 video.buffered 的 bufferAhead 达到目标后才首次调用 player.play()。
+- 每次切换目标后重新选择 CCTV1，使一次测试只对应一个启动阈值。
+- 日志会记录 `DELAY play` 轮询、实际 `start play()` 时的 bufferAhead，以及后续 waiting。
+
+建议测试顺序：0s → 1s → 2s → 3s → 5s；每档至少重复 2-3 次。重点比较首次 waiting 是否消失，以及首次 play 到 firstFrame/playing 的总时间。
