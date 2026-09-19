@@ -13,11 +13,11 @@ main{flex:1;min-width:0;min-height:0;padding:12px;display:flex;flex-direction:co
 </style>
 </head>
 <body>
-<header><h1>OpenWrt IPTV <span class="small">rev3 诊断版</span></h1><button id="refresh">刷新</button><button id="jumpLive">跳到最新帧</button><button id="reinit">重新初始化</button><button id="clearLog">清空日志</button><label class="small"><input id="videoOnly" type="checkbox" checked> 视频-only测试</label><span id="status" class="small"></span></header>
-<div class="layout"><aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside><main><div class="player"><video id="video" controls autoplay playsinline></video></div><div class="now" id="now">选择频道开始播放<div class="hint">rev3 保持 isLive=false。诊断重点：视频/音频是否已建立、buffered 是否持续增长、currentTime 是否推进、以及卡顿结束前后状态变化。默认视频-only；取消后恢复音频。</div><pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre><pre id="log" class="hint" style="white-space:pre-wrap;margin:6px 0 0;max-height:240px;overflow:auto;background:#0b0b0b;padding:8px;border-radius:5px;font-size:11px"></pre></div></main></div>
+<header><h1>OpenWrt IPTV <span class="small">rev3.1 诊断版</span></h1><button id="refresh">刷新</button><button id="jumpLive">跳到最新帧</button><button id="reinit">重新初始化</button><button id="clearLog">清空日志</button><label class="small"><input id="videoOnly" type="checkbox" checked> 视频-only测试</label><span id="status" class="small"></span></header>
+<div class="layout"><aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside><main><div class="player"><video id="video" controls autoplay playsinline></video></div><div class="now" id="now">选择频道开始播放<div class="hint">rev3.1 保持 isLive=false。重点记录初始化阶段 waiting/stalled 持续时间、buffer ahead、首帧/首次 playing、MSE/播放器事件。默认视频-only；取消后恢复音频。</div><pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre><pre id="log" class="hint" style="white-space:pre-wrap;margin:6px 0 0;max-height:240px;overflow:auto;background:#0b0b0b;padding:8px;border-radius:5px;font-size:11px"></pre></div></main></div>
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
 <script>
-const state={items:[],groups:[],active:'',current:null,player:null,seq:0,playStarted:0,firstFrameAt:0,firstPlayingAt:0,last:{t:0,wall:0},stats:{},log:[]};
+const state={items:[],groups:[],active:'',current:null,player:null,seq:0,playStarted:0,firstFrameAt:0,firstPlayingAt:0,last:{t:0,wall:0},stats:{},log:[],waitingStart:0,stallStart:0,waitingCount:0,stallCount:0};
 const $=id=>document.getElementById(id);
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function attr(line,name){const re=new RegExp(name+'="([^"]*)"','i'),m=line.match(re);return m?m[1]:''}
@@ -46,27 +46,36 @@ function getInternalSourceBuffers(){
   }catch(e){return 'ERR:'+e.message}
   return '-';
 }
+function bufferAhead(v){try{if(!v.buffered.length)return 0;const t=v.currentTime;for(let i=0;i<v.buffered.length;i++){if(t>=v.buffered.start(i)-0.05&&t<=v.buffered.end(i)+0.05)return Math.max(0,v.buffered.end(i)-t)}return 0}catch(e){return 0}}
 function updateDiag(){
  const v=$('video'); let b='-',s='-';try{b=rangeText(v.buffered);s=rangeText(v.seekable)}catch(e){}
  const now=performance.now(), dt=state.last.wall?(now-state.last.wall)/1000:0, rate=state.last.wall?(v.currentTime-state.last.t)/Math.max(dt,0.001):0;state.last={t:v.currentTime,wall:now};
+ const ahead=bufferAhead(v);
  const err=v.error?(' code='+v.error.code+' msg='+(v.error.message||'')):'';
  $('diag').textContent=
   'currentTime='+(isFinite(v.currentTime)?v.currentTime.toFixed(3):'NaN')+' | buffered='+b+' | seekable='+s+'\n'+
   'readyState='+v.readyState+' | networkState='+v.networkState+' | paused='+v.paused+' | ended='+v.ended+' | duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+' | playbackRate='+v.playbackRate+'\n'+
-  'currentTime Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | videoWidth='+v.videoWidth+'x'+v.videoHeight+' | muted='+v.muted+' | volume='+v.volume+'\n'+
+  'currentTime Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | bufferAhead='+(isFinite(ahead)?ahead.toFixed(3):'-')+'s | videoWidth='+v.videoWidth+'x'+v.videoHeight+' | muted='+v.muted+' | volume='+v.volume+'\n'+
   'audioTracks='+(v.audioTracks?v.audioTracks.length:'n/a')+' | videoTracks='+(v.videoTracks?v.videoTracks.length:'n/a')+' | error='+err+'\n'+
   'MSE内部SourceBuffer='+getInternalSourceBuffers()+'\n'+
-  '首帧='+(state.firstFrameAt?(state.firstFrameAt-state.playStarted).toFixed(3)+'s':'-')+' | 首次playing='+(state.firstPlayingAt?(state.firstPlayingAt-state.playStarted).toFixed(3)+'s':'-');
+  '首帧='+(state.firstFrameAt?(state.firstFrameAt-state.playStarted).toFixed(3)+'s':'-')+' | 首次playing='+(state.firstPlayingAt?(state.firstPlayingAt-state.playStarted).toFixed(3)+'s':'-')+' | waiting次数='+state.waitingCount+' | stalled次数='+state.stallCount+'\n'+
+  'waiting中='+(state.waitingStart?((performance.now()-state.waitingStart)/1000).toFixed(3)+'s':'否')+' | stalled中='+(state.stallStart?((performance.now()-state.stallStart)/1000).toFixed(3)+'s':'否')+' | mpegtsStats='+JSON.stringify(state.stats||{});
 }
 function attachVideoDiagnostics(v,seq){
  ['loadstart','durationchange','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','suspend','progress','seeking','seeked','timeupdate','ratechange','volumechange','ended','emptied','error'].forEach(ev=>v.addEventListener(ev,()=>{
-   if(seq!==state.seq)return; let extra=''; if(ev==='error'&&v.error)extra=' code='+v.error.code+' '+(v.error.message||''); log('video.'+ev+extra); if(ev==='playing'&&!state.firstPlayingAt)state.firstPlayingAt=performance.now(); updateDiag();
+   if(seq!==state.seq)return; const now=performance.now(); let extra='';
+   if(ev==='waiting'){state.waitingCount++;if(!state.waitingStart)state.waitingStart=now;extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';}
+   if(ev==='playing'&&state.waitingStart){extra=' waitingRecovered='+((now-state.waitingStart)/1000).toFixed(3)+'s current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';state.waitingStart=0;}
+   if(ev==='stalled'){state.stallCount++;if(!state.stallStart)state.stallStart=now;extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';}
+   if(ev==='progress')extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
+   if(ev==='error'&&v.error)extra=' code='+v.error.code+' '+(v.error.message||'');
+   log('video.'+ev+extra); if(ev==='playing'&&!state.firstPlayingAt)state.firstPlayingAt=now; updateDiag();
  }));
  if('requestVideoFrameCallback' in v){const cb=(now,meta)=>{if(seq!==state.seq)return;if(!state.firstFrameAt){state.firstFrameAt=performance.now();log('video.firstFrame rVFC mediaTime='+(meta.mediaTime??'?')+' presentedFrames='+(meta.presentedFrames??'?'));}v.requestVideoFrameCallback(cb)};v.requestVideoFrameCallback(cb)}
 }
 function jumpToLatest(){const v=$('video');try{if(!v.buffered.length){log('JUMP: 无 buffered');return}const end=v.buffered.end(v.buffered.length-1);const target=Math.max(v.buffered.start(v.buffered.length-1),end-0.5);log('JUMP: bufferedEnd='+end.toFixed(3)+' target='+target.toFixed(3));v.currentTime=target;const p=v.play();if(p&&p.catch)p.catch(e=>log('JUMP play rejected '+e.name+': '+e.message));}catch(e){log('JUMP error '+e.message)}}
 function reinit(){if(!state.current){log('REINIT: 没有当前频道');return}const ch=state.current;log('REINIT: '+ch.name);play(ch)}
-function play(ch){const seq=++state.seq;state.current=ch;state.active=ch.group;renderGroups();stopPlayer();const v=$('video');try{v.pause()}catch(e){}v.removeAttribute('src');v.load();state.playStarted=performance.now();state.firstFrameAt=0;state.firstPlayingAt=0;state.last={t:0,wall:0};state.log=[];$('log').textContent='';$('now').firstChild.textContent=ch.name;const url=streamUrl(ch);log('PLAY '+ch.name);log('URL '+url);log('isLive=false');log('videoOnly='+$('videoOnly').checked);if(!window.mpegts||!mpegts.isSupported()){setStatus('浏览器不支持 MSE MPEG-TS');log('mpegts.isSupported=false');return}const config={enableWorker:true,enableWorkerForMSE:false,enableStashBuffer:true,stashInitialSize:384*1024,lazyLoad:true,deferLoadAfterSourceOpen:true,autoCleanupSourceBuffer:false,liveBufferLatencyChasing:false,liveBufferLatencyChasingOnPaused:false,liveSync:false,fixAudioTimestampGap:false,accurateSeek:false};createPlayer(ch,url,seq,config,$('videoOnly').checked)}
+function play(ch){const seq=++state.seq;state.current=ch;state.active=ch.group;renderGroups();stopPlayer();const v=$('video');try{v.pause()}catch(e){}v.removeAttribute('src');v.load();state.playStarted=performance.now();state.firstFrameAt=0;state.firstPlayingAt=0;state.last={t:0,wall:0};state.waitingStart=0;state.stallStart=0;state.waitingCount=0;state.stallCount=0;state.stats={};state.log=[];$('log').textContent='';$('now').firstChild.textContent=ch.name;const url=streamUrl(ch);log('PLAY '+ch.name);log('URL '+url);log('isLive=false');log('videoOnly='+$('videoOnly').checked);if(!window.mpegts||!mpegts.isSupported()){setStatus('浏览器不支持 MSE MPEG-TS');log('mpegts.isSupported=false');return}const config={enableWorker:true,enableWorkerForMSE:false,enableStashBuffer:true,stashInitialSize:384*1024,lazyLoad:true,deferLoadAfterSourceOpen:true,autoCleanupSourceBuffer:false,liveBufferLatencyChasing:false,liveBufferLatencyChasingOnPaused:false,liveSync:false,fixAudioTimestampGap:false,accurateSeek:false};createPlayer(ch,url,seq,config,$('videoOnly').checked)}
 function createPlayer(ch,url,seq,config,videoOnly){if(seq!==state.seq)return;const v=$('video');attachVideoDiagnostics(v,seq);const ds={type:'mpegts',url:url,isLive:false};if(videoOnly)ds.hasAudio=false;let p;try{p=mpegts.createPlayer(ds,config)}catch(e){console.error(e);setStatus('播放器创建失败');log('createPlayer error '+e.stack);return}state.player=p;
  p.on(mpegts.Events.ERROR,(type,details,info)=>{if(seq!==state.seq)return;console.error('[mpegts]',type,details,info);log('mpegts.ERROR type='+type+' details='+details+' info='+JSON.stringify(info||{}));setStatus('播放错误：'+details)});
  p.on(mpegts.Events.MEDIA_INFO,info=>{if(seq!==state.seq)return;log('MEDIA_INFO '+JSON.stringify(info));const vc=info&&info.videoCodec?info.videoCodec:'';const ac=info&&info.audioCodec?info.audioCodec:'';setStatus((videoOnly?'视频-only · ':'播放中 · ')+(vc||'')+(ac?' · '+ac:''))});
