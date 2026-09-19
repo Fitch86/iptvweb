@@ -1,3 +1,3 @@
-# luci-app-iptvweb 0.2.2-rev4.2
+# luci-app-iptvweb 0.2.2-rev4.3
 
-rev3.3 的实用稳定版：默认启动前等待约 2 秒可播放缓冲，正常音视频模式，保持 `isLive=false` 和 1MB stash；HTML5 autoplay 已关闭。仍可选择 0/1/2/3/5 秒用于低延迟或排障测试。
+rev4.3 修复 rev4.2 频道列表脚本崩溃，并提供 CCTV1 初始化 waiting 的单变量实验控件。核心播放参数保持 `isLive=false`、stash 384KB、默认 `fixAudioTimestampGap=false`。

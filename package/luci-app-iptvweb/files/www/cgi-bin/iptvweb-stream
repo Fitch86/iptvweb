@@ -1,9 +1,7 @@
 #!/bin/sh
 # Same-origin long-lived MPEG-TS proxy for udpxy.
-# rev3.8: keep the browser-side HTTP response alive across udpxy upstream
-# disconnects. This is intentionally a byte relay; MPEG-TS continuity is left
-# to mpegts.js. The CGI itself must also be allowed to run longer than uhttpd's
-# default 60-second script timeout (handled by install.sh below).
+# Keep the browser HTTP response alive across udpxy upstream disconnects.
+# Exit promptly if the client is gone so script_timeout=86400 cannot leak CGIs.
 
 printf 'Content-Type: video/mp2t\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\nConnection: keep-alive\r\n\r\n'
 
@@ -31,10 +29,8 @@ case "$port" in ''|*[!0-9]*) exit 1;; esac
 
 url="http://${udpxy}/udp/${group}:${port}"
 
-# Do not close the downstream CGI response just because udpxy closes one
-# upstream HTTP session. Reconnect and continue feeding TS bytes to the same
-# browser connection. A short delay prevents a tight reconnect loop if the
-# multicast source is temporarily unavailable.
+trap 'exit 0' PIPE HUP TERM INT
+
 fetch_once() {
     if command -v uclient-fetch >/dev/null 2>&1; then
         uclient-fetch -q -O - "$url"
@@ -45,9 +41,15 @@ fetch_once() {
     fi
 }
 
-# Keep the CGI alive until the browser closes the connection or uhttpd kills
-# the request. stderr is deliberately discarded so CGI output remains pure TS.
+# Reconnect udpxy blips, but do not spin until script_timeout if the browser
+# already closed the pipe (writes then fail immediately with EPIPE).
+fails=0
 while :; do
-    fetch_once >/dev/stdout 2>/dev/null || true
-    sleep 0.20
- done
+    if fetch_once 2>/dev/null; then
+        fails=0
+    else
+        fails=$((fails + 1))
+        [ "$fails" -ge 40 ] && exit 0
+        sleep 0.2 2>/dev/null || sleep 1
+    fi
+done
