@@ -1,18 +1,28 @@
-# luci-app-iptvweb
+# luci-app-iptvweb 0.2.2
 
-A lightweight OpenWrt 25.12 LuCI IPTV web player for LAN clients.
+OpenWrt 25.12+ LAN IPTV web player for an existing udpxy service.
 
-Features:
-- Configure an M3U URL and udpxy address in LuCI.
-- Fetches the M3U server-side, so browser CORS is not required.
-- Replaces `{{your_udpxy_address}}` with the configured udpxy address.
-- Groups channels by `group-title`, displays logos.
-- Uses mpegts.js in the browser to play udpxy MPEG-TS streams without transcoding.
-- Optional EPG URL is read from `x-tvg-url`; the first version exposes it as a link and keeps the M3U metadata intact.
+## 0.2.2 changes
+- Uses mpegts.js 1.8.0 **locally at runtime**. `install.sh` downloads the full minified distribution once during installation; the browser never loads jsDelivr/unpkg.
+- Disables `liveBufferLatencyChasing` and `liveSync`, avoiding aggressive live-position chasing that can cause freezes/jumps on some MPEG-TS live streams.
+- Keeps the IO stash buffer and raises the initial stash to 512 KiB.
+- Enables the mpegts.js worker paths on modern browsers.
+- Enables `fixAudioTimestampGap` and conservative SourceBuffer cleanup.
+- Cleans up the previous player before channel switching and avoids the old `play()`/`pause()` race as much as possible.
+- On Safari, if the first MSE attempt reports a media-source/format error, retries once as video-only. This is useful for streams whose audio codec cannot be put into Safari's MSE SourceBuffer.
+- H.265/HEVC remains dependent on browser/OS codec support. Chrome/Safari may play channels that Edge cannot.
 
-Target: OpenWrt 25.12+ / LuCI.
+## Install
 
-Install a locally built APK on OpenWrt 25.12 with:
-    apk add --allow-untrusted /tmp/luci-app-iptvweb_0.1.0-r1_all.apk
+The router needs Internet access **once** while running `install.sh`, because the complete mpegts.js 1.8.0 file is downloaded into `/www/luci-static/resources/iptvweb/mpegts.min.js`.
 
-For development/building, use an OpenWrt 25.12 SDK or buildroot. See package/luci-app-iptvweb/Makefile.
+The runtime player does not contact a CDN.
+
+## Configuration
+LuCI -> Services -> IPTV Web:
+- M3U playlist URL
+- udpxy address, e.g. `192.168.1.1:4022`
+
+Player: `http://192.168.1.1/iptv/`
+
+The server-side proxy only accepts IPv4 multicast destinations (224.0.0.0/4) and uses the configured udpxy endpoint.
