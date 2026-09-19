@@ -1,0 +1,29 @@
+#!/bin/sh
+# Same-origin MPEG-TS proxy for udpxy. Avoids browser CORS restrictions.
+# Only proxies the configured udpxy host/port and a validated multicast address/port.
+
+printf 'Content-Type: video/mp2t\r\nCache-Control: no-cache\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\n\r\n'
+
+qs="${QUERY_STRING:-}"
+group="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^group=//p' | head -n1)"
+port="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^port=//p' | head -n1)"
+
+# The values are expected to be IPv4 multicast and a numeric UDP port.
+# No arbitrary destination URL is accepted, avoiding an open proxy/SSRF.
+udpxy="$(uci -q get iptvweb.main.udpxy 2>/dev/null || true)"
+[ -n "$udpxy" ] || exit 1
+
+case "$udpxy" in
+    *[!A-Za-z0-9.:-]*) exit 1 ;;
+esac
+
+url="http://${udpxy}/udp/${group}:${port}"
+
+# Prefer wget because BusyBox wget streams the response to stdout.
+if command -v wget >/dev/null 2>&1; then
+    exec wget -q -O - "$url"
+elif command -v uclient-fetch >/dev/null 2>&1; then
+    exec uclient-fetch -q -O - "$url"
+else
+    exit 1
+fi

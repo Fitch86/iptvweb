@@ -19,7 +19,7 @@ cp -f "$FILES/usr/share/rpcd/acl.d/luci-app-iptvweb.json" /usr/share/rpcd/acl.d/
 cp -f "$FILES/www/luci-static/resources/view/iptvweb.js" /www/luci-static/resources/view/iptvweb.js
 cp -f "$FILES/www/luci-static/resources/iptvweb/mpegts.min.js" /www/luci-static/resources/iptvweb/mpegts.min.js
 
-chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u
+chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-stream
 
 /etc/init.d/rpcd restart 2>/dev/null || true
 /etc/init.d/uhttpd restart 2>/dev/null || true
@@ -29,4 +29,4 @@ echo "Installed."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "Note: browser playback uses mpegts.js from jsDelivr at runtime."
+echo "Note: IPTV streams are proxied through the same-origin /cgi-bin/iptvweb-stream endpoint to avoid CORS."
