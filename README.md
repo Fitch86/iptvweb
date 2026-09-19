@@ -1,4 +1,4 @@
-# luci-app-iptvweb 0.2.2-rev4.1
+# luci-app-iptvweb 0.2.2-rev4.2
 
 长连接直播代理版。
 

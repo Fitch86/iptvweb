@@ -26,7 +26,7 @@ cp -f "$FILES/usr/share/rpcd/acl.d/luci-app-iptvweb.json" /usr/share/rpcd/acl.d/
 cp -f "$FILES/www/luci-static/resources/view/iptvweb.js" /www/luci-static/resources/view/iptvweb.js
 cp -f "$FILES/www/luci-static/resources/iptvweb/mpegts.min.js" /www/luci-static/resources/iptvweb/mpegts.min.js
 
-# rev4.1: allow long-lived CGI IPTV streams to survive uhttpd's 60s timeout.
+# rev4.2: allow long-lived CGI IPTV streams to survive uhttpd's 60s timeout.
 if command -v uci >/dev/null 2>&1; then
     uci -q set uhttpd.main.script_timeout='86400' || true
     uci -q commit uhttpd || true
@@ -60,10 +60,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.1."
+echo "Installed 0.2.2-rev4.2."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.1: long-lived MPEG-TS proxy; uhttpd CGI timeout set to 86400s."
+echo "rev4.2: long-lived MPEG-TS proxy; uhttpd CGI timeout set to 86400s."
 echo "Note: mpegts.js 1.8.0 is stored locally; no CDN request is made by the player."
 echo "Note: the proxy reconnects upstream udpxy sessions without closing the browser response."
