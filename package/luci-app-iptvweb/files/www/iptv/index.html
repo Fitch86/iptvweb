@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV</title>
+<title>OpenWrt IPTV rev3 诊断版</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
 header{height:50px;padding:0 14px;background:#181818;display:flex;gap:10px;align-items:center;border-bottom:1px solid #292929}header h1{font-size:17px;margin:0}.small{color:#999;font-size:12px}button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px;cursor:pointer}
@@ -13,54 +13,68 @@ main{flex:1;min-width:0;min-height:0;padding:12px;display:flex;flex-direction:co
 </style>
 </head>
 <body>
-<header><h1>OpenWrt IPTV</h1><button id="refresh">刷新</button><label class="small"><input id="videoOnly" type="checkbox" checked> 视频-only测试</label><span id="status" class="small"></span></header>
-<div class="layout"><aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside><main><div class="player"><video id="video" controls autoplay playsinline></video></div><div class="now" id="now">选择频道开始播放<div class="hint">勾选“视频-only测试”会从 MPEG-TS 数据源层关闭音频，用于判断 Windows 普通 H.264+MP3 的卡顿是否来自音频轨/时间轴。取消勾选可恢复声音。</div><pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre></div></main></div>
+<header><h1>OpenWrt IPTV <span class="small">rev3 诊断版</span></h1><button id="refresh">刷新</button><button id="jumpLive">跳到最新帧</button><button id="reinit">重新初始化</button><button id="clearLog">清空日志</button><label class="small"><input id="videoOnly" type="checkbox" checked> 视频-only测试</label><span id="status" class="small"></span></header>
+<div class="layout"><aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside><main><div class="player"><video id="video" controls autoplay playsinline></video></div><div class="now" id="now">选择频道开始播放<div class="hint">rev3 保持 isLive=false。诊断重点：视频/音频是否已建立、buffered 是否持续增长、currentTime 是否推进、以及卡顿结束前后状态变化。默认视频-only；取消后恢复音频。</div><pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre><pre id="log" class="hint" style="white-space:pre-wrap;margin:6px 0 0;max-height:240px;overflow:auto;background:#0b0b0b;padding:8px;border-radius:5px;font-size:11px"></pre></div></main></div>
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
 <script>
-const state={items:[],groups:[],active:'',current:null,player:null,seq:0,retryVideoOnly:false};
+const state={items:[],groups:[],active:'',current:null,player:null,seq:0,playStarted:0,firstFrameAt:0,firstPlayingAt:0,last:{t:0,wall:0},stats:{},log:[]};
 const $=id=>document.getElementById(id);
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function attr(line,name){const re=new RegExp(name+'="([^"]*)"','i'),m=line.match(re);return m?m[1]:''}
 function parseM3U(text){const lines=text.split(/\r?\n/),out=[];let info=null;for(const raw of lines){const line=raw.trim();if(!line)continue;if(line.startsWith('#EXTINF:'))info=line;else if(info&&!line.startsWith('#')){out.push({name:info.split(',').slice(1).join(',')||attr(info,'tvg-name'),id:attr(info,'tvg-id'),logo:attr(info,'tvg-logo'),group:attr(info,'group-title')||'其他',url:line});info=null}}return out}
 function streamUrl(ch){try{const u=new URL(ch.url,location.href);const m=u.pathname.match(/^\/udp\/([^:]+):(\d+)$/);if(m){const proxy=new URL('/cgi-bin/iptvweb-stream',window.location.href);proxy.searchParams.set('group',m[1]);proxy.searchParams.set('port',m[2]);return proxy.href;}}catch(e){}return new URL(ch.url,window.location.href).href}
 function renderGroups(){const html=state.groups.map(g=>{const list=state.items.filter(x=>x.group===g);const open=state.active===g;return `<section class="group ${open?'open':''}" data-g="${esc(g)}"><div class="group-head"><span class="arrow">${open?'▼':'▶'}</span><span>${esc(g)}</span><span class="count">${list.length}</span></div><div class="group-channels">${list.map(x=>`<div class="channel ${state.current===x?'active':''}" data-i="${state.items.indexOf(x)}">${x.logo?`<img src="${esc(x.logo)}" loading="lazy" alt="">`:''}<div class="name">${esc(x.name)}</div></div>`).join('')}</div></section>`}).join('');$('groups').innerHTML=html;document.querySelectorAll('.group-head').forEach(h=>h.onclick=()=>{const g=h.parentElement.dataset.g;state.active=state.active===g?'':g;renderGroups()});document.querySelectorAll('.channel').forEach(x=>x.onclick=()=>play(state.items[+x.dataset.i]))}
-function isSafari(){return /^((?!chrome|android).)*safari/i.test(navigator.userAgent) || /iPad|iPhone|iPod/.test(navigator.userAgent)}
 function stopPlayer(){if(state.player){try{state.player.pause()}catch(e){}try{state.player.unload()}catch(e){}try{state.player.detachMediaElement()}catch(e){}try{state.player.destroy()}catch(e){}state.player=null}}
 function setStatus(t){$('status').textContent=t||''}
+function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
+function log(msg){const line='['+rel()+'s] '+msg;console.log('[IPTV rev3] '+line);state.log.push(line);if(state.log.length>180)state.log.shift();$('log').textContent=state.log.join('\n');$('log').scrollTop=$('log').scrollHeight}
+function rangeText(r){try{if(!r||!r.length)return '-';let a=[];for(let i=0;i<r.length;i++)a.push(r.start(i).toFixed(3)+'-'+r.end(i).toFixed(3));return a.join(' | ')}catch(e){return 'ERR:'+e.message}}
+function getInternalSourceBuffers(){
+  try{
+    const p=state.player;if(!p)return '-';
+    const cands=[p._mseController,p.mseController,p._mseController&&p._mseController._sourceBuffers,p._mseController&&p._mseController.sourceBuffers,p._sourceBuffers,p.sourceBuffers];
+    for(const c of cands){
+      if(!c)continue;
+      if(typeof c.length==='number' && c.length>0 && typeof c.item==='function'){
+        let a=[];for(let i=0;i<c.length;i++){const x=c.item(i);a.push((x&&x.type)||'?'+':'+rangeText(x&&x.buffered))}return a.join(' || ');
+      }
+      if(Array.isArray(c) && c.length){return c.map(x=>(x&&x.type||'?')+':'+rangeText(x&&x.buffered)).join(' || ')}
+      if(typeof c==='object'){
+        const vals=Object.values(c).filter(x=>x&&typeof x==='object'&&'buffered' in x);if(vals.length)return vals.map(x=>(x.type||'?')+':'+rangeText(x.buffered)).join(' || ');
+      }
+    }
+  }catch(e){return 'ERR:'+e.message}
+  return '-';
+}
 function updateDiag(){
- const v=$('video'); let b='—';
- try{if(v.buffered.length)b=v.buffered.start(0).toFixed(3)+' → '+v.buffered.end(v.buffered.length-1).toFixed(3)}catch(e){}
- $('diag').textContent='currentTime='+((isFinite(v.currentTime)?v.currentTime.toFixed(3):'NaN'))+' | buffered='+b+' | readyState='+v.readyState+' | networkState='+v.networkState+' | paused='+v.paused+' | ended='+v.ended+' | duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration));
+ const v=$('video'); let b='-',s='-';try{b=rangeText(v.buffered);s=rangeText(v.seekable)}catch(e){}
+ const now=performance.now(), dt=state.last.wall?(now-state.last.wall)/1000:0, rate=state.last.wall?(v.currentTime-state.last.t)/Math.max(dt,0.001):0;state.last={t:v.currentTime,wall:now};
+ const err=v.error?(' code='+v.error.code+' msg='+(v.error.message||'')):'';
+ $('diag').textContent=
+  'currentTime='+(isFinite(v.currentTime)?v.currentTime.toFixed(3):'NaN')+' | buffered='+b+' | seekable='+s+'\n'+
+  'readyState='+v.readyState+' | networkState='+v.networkState+' | paused='+v.paused+' | ended='+v.ended+' | duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+' | playbackRate='+v.playbackRate+'\n'+
+  'currentTime Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | videoWidth='+v.videoWidth+'x'+v.videoHeight+' | muted='+v.muted+' | volume='+v.volume+'\n'+
+  'audioTracks='+(v.audioTracks?v.audioTracks.length:'n/a')+' | videoTracks='+(v.videoTracks?v.videoTracks.length:'n/a')+' | error='+err+'\n'+
+  'MSE内部SourceBuffer='+getInternalSourceBuffers()+'\n'+
+  '首帧='+(state.firstFrameAt?(state.firstFrameAt-state.playStarted).toFixed(3)+'s':'-')+' | 首次playing='+(state.firstPlayingAt?(state.firstPlayingAt-state.playStarted).toFixed(3)+'s':'-');
 }
-function play(ch){
- const seq=++state.seq; state.current=ch; state.active=ch.group; renderGroups(); stopPlayer();
- const v=$('video'); try{v.pause()}catch(e){} v.removeAttribute('src'); v.load(); $('now').firstChild.textContent=ch.name;
- const url=streamUrl(ch);
- if(!window.mpegts || !mpegts.isSupported()){setStatus('浏览器不支持 MSE MPEG-TS');return}
- const config={enableWorker:true,enableWorkerForMSE:false,enableStashBuffer:true,stashInitialSize:384*1024,lazyLoad:true,deferLoadAfterSourceOpen:true,autoCleanupSourceBuffer:false,liveBufferLatencyChasing:false,liveBufferLatencyChasingOnPaused:false,liveSync:false,fixAudioTimestampGap:false,accurateSeek:false};
- createPlayer(ch,url,seq,config,$('videoOnly').checked);
+function attachVideoDiagnostics(v,seq){
+ ['loadstart','durationchange','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','suspend','progress','seeking','seeked','timeupdate','ratechange','volumechange','ended','emptied','error'].forEach(ev=>v.addEventListener(ev,()=>{
+   if(seq!==state.seq)return; let extra=''; if(ev==='error'&&v.error)extra=' code='+v.error.code+' '+(v.error.message||''); log('video.'+ev+extra); if(ev==='playing'&&!state.firstPlayingAt)state.firstPlayingAt=performance.now(); updateDiag();
+ }));
+ if('requestVideoFrameCallback' in v){const cb=(now,meta)=>{if(seq!==state.seq)return;if(!state.firstFrameAt){state.firstFrameAt=performance.now();log('video.firstFrame rVFC mediaTime='+(meta.mediaTime??'?')+' presentedFrames='+(meta.presentedFrames??'?'));}v.requestVideoFrameCallback(cb)};v.requestVideoFrameCallback(cb)}
 }
-function createPlayer(ch,url,seq,config,videoOnly){
- if(seq!==state.seq)return;
- const v=$('video');
- // IMPORTANT: hasAudio is a MediaDataSource property, not PlayerConfig.
- const ds={type:'mpegts',url:url,isLive:true};
- if(videoOnly)ds.hasAudio=false;
- let p;
- try{p=mpegts.createPlayer(ds,config)}catch(e){console.error(e);setStatus('播放器创建失败');return}
- state.player=p;
- p.on(mpegts.Events.ERROR,(type,details,info)=>{if(seq!==state.seq)return;console.error('[mpegts]',type,details,info);setStatus('播放错误：'+details)});
- p.on(mpegts.Events.MEDIA_INFO,info=>{if(seq!==state.seq)return;const vc=info&&info.videoCodec?info.videoCodec:'';const ac=info&&info.audioCodec?info.audioCodec:'';setStatus((videoOnly?'视频-only · ':'播放中 · ')+(vc||'')+(ac?' · '+ac:''));console.debug('[MEDIA_INFO]',info)});
- p.on(mpegts.Events.STATISTICS_INFO,info=>{if(seq!==state.seq)return;if(info&&info.speed&&info.speed<0.8)setStatus('接收速率异常 · '+info.speed.toFixed(2)+'x')});
- p.attachMediaElement(v); p.load();
- const start=()=>{if(seq!==state.seq)return;p.play().catch(e=>console.debug('play()',e.name,e.message))};
- if(v.readyState>=1)start();else v.addEventListener('loadedmetadata',start,{once:true});
+function jumpToLatest(){const v=$('video');try{if(!v.buffered.length){log('JUMP: 无 buffered');return}const end=v.buffered.end(v.buffered.length-1);const target=Math.max(v.buffered.start(v.buffered.length-1),end-0.5);log('JUMP: bufferedEnd='+end.toFixed(3)+' target='+target.toFixed(3));v.currentTime=target;const p=v.play();if(p&&p.catch)p.catch(e=>log('JUMP play rejected '+e.name+': '+e.message));}catch(e){log('JUMP error '+e.message)}}
+function reinit(){if(!state.current){log('REINIT: 没有当前频道');return}const ch=state.current;log('REINIT: '+ch.name);play(ch)}
+function play(ch){const seq=++state.seq;state.current=ch;state.active=ch.group;renderGroups();stopPlayer();const v=$('video');try{v.pause()}catch(e){}v.removeAttribute('src');v.load();state.playStarted=performance.now();state.firstFrameAt=0;state.firstPlayingAt=0;state.last={t:0,wall:0};state.log=[];$('log').textContent='';$('now').firstChild.textContent=ch.name;const url=streamUrl(ch);log('PLAY '+ch.name);log('URL '+url);log('isLive=false');log('videoOnly='+$('videoOnly').checked);if(!window.mpegts||!mpegts.isSupported()){setStatus('浏览器不支持 MSE MPEG-TS');log('mpegts.isSupported=false');return}const config={enableWorker:true,enableWorkerForMSE:false,enableStashBuffer:true,stashInitialSize:384*1024,lazyLoad:true,deferLoadAfterSourceOpen:true,autoCleanupSourceBuffer:false,liveBufferLatencyChasing:false,liveBufferLatencyChasingOnPaused:false,liveSync:false,fixAudioTimestampGap:false,accurateSeek:false};createPlayer(ch,url,seq,config,$('videoOnly').checked)}
+function createPlayer(ch,url,seq,config,videoOnly){if(seq!==state.seq)return;const v=$('video');attachVideoDiagnostics(v,seq);const ds={type:'mpegts',url:url,isLive:false};if(videoOnly)ds.hasAudio=false;let p;try{p=mpegts.createPlayer(ds,config)}catch(e){console.error(e);setStatus('播放器创建失败');log('createPlayer error '+e.stack);return}state.player=p;
+ p.on(mpegts.Events.ERROR,(type,details,info)=>{if(seq!==state.seq)return;console.error('[mpegts]',type,details,info);log('mpegts.ERROR type='+type+' details='+details+' info='+JSON.stringify(info||{}));setStatus('播放错误：'+details)});
+ p.on(mpegts.Events.MEDIA_INFO,info=>{if(seq!==state.seq)return;log('MEDIA_INFO '+JSON.stringify(info));const vc=info&&info.videoCodec?info.videoCodec:'';const ac=info&&info.audioCodec?info.audioCodec:'';setStatus((videoOnly?'视频-only · ':'播放中 · ')+(vc||'')+(ac?' · '+ac:''))});
+ ['LOADING_COMPLETE','RECOVERED_EARLY_EOF','MEDIA_METADATA_ARRIVED','SCRIPTDATA_ARRIVED','STATISTICS_INFO'].forEach(name=>{const ev=mpegts.Events[name];if(ev)p.on(ev,info=>{if(seq!==state.seq)return;if(name==='STATISTICS_INFO'){state.stats=info||{};return}log(name+(info?' '+JSON.stringify(info):''))})});
+ p.attachMediaElement(v);log('attachMediaElement');p.load();log('player.load()');const start=()=>{if(seq!==state.seq)return;log('start play() readyState='+v.readyState);const q=p.play();if(q&&q.catch)q.catch(e=>log('player.play rejected '+e.name+': '+e.message))};if(v.readyState>=1)start();else v.addEventListener('loadedmetadata',start,{once:true});
 }
 async function load(){state.current=null;state.active='';stopPlayer();setStatus('正在读取 M3U…');try{const r=await fetch('/cgi-bin/iptvweb-m3u?'+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const text=await r.text();state.items=parseM3U(text);state.groups=[...new Set(state.items.map(x=>x.group))];if(state.items.length)state.active=state.items[0].group;renderGroups();setStatus(`${state.items.length} 个频道`)}catch(e){setStatus('M3U 读取失败');console.error(e)}}
-$('refresh').onclick=load;
-$('videoOnly').onchange=()=>{if(state.current)play(state.current)};
-['timeupdate','progress','loadedmetadata','durationchange','canplay','playing','waiting','stalled','ended'].forEach(ev=>$('video').addEventListener(ev,updateDiag));
-setInterval(updateDiag,500);
-load();
-</script>
+$('refresh').onclick=load;$('jumpLive').onclick=jumpToLatest;$('reinit').onclick=reinit;$('clearLog').onclick=()=>{state.log=[];$('log').textContent=''};$('videoOnly').onchange=()=>{if(state.current)play(state.current)};
+setInterval(updateDiag,500);load();
+</script></script>
 </body></html>
