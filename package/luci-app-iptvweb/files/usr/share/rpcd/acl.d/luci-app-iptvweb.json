@@ -1,0 +1,11 @@
+{
+  "luci-app-iptvweb": {
+    "description": "Grant access to IPTV Web settings",
+    "read": {
+      "uci": [ "iptvweb" ]
+    },
+    "write": {
+      "uci": [ "iptvweb" ]
+    }
+  }
+}

@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenWrt IPTV</title>
+<style>
+:root{color-scheme:dark}
+*{box-sizing:border-box}body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+header{padding:12px 16px;background:#181818;position:sticky;top:0;z-index:5;display:flex;gap:12px;align-items:center}
+header h1{font-size:18px;margin:0}.layout{display:flex;min-height:calc(100vh - 50px)}
+#groups{width:210px;background:#171717;padding:10px;overflow:auto}.group{padding:9px 10px;border-radius:6px;cursor:pointer}.group.active,.group:hover{background:#2a2a2a}
+main{flex:1;min-width:0;padding:12px}.player{max-width:1100px;margin:auto;background:#000;border-radius:8px;overflow:hidden}
+video{display:block;width:100%;aspect-ratio:16/9;background:#000}.now{padding:10px 2px;font-size:15px}
+#channels{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:8px}
+.channel{display:flex;align-items:center;gap:9px;padding:8px;background:#1c1c1c;border-radius:7px;cursor:pointer}
+.channel:hover{background:#292929}.channel img{width:42px;height:42px;object-fit:contain;background:#fff;border-radius:5px}
+.small{color:#999;font-size:12px}button{background:#2b6cb0;border:0;color:white;padding:7px 10px;border-radius:5px;cursor:pointer}
+@media(max-width:700px){#groups{width:120px}.channel{min-width:0}.channel img{width:34px;height:34px}}
+</style>
+</head>
+<body>
+<header><h1>OpenWrt IPTV</h1><button id="refresh">刷新</button><span id="status" class="small"></span></header>
+<div class="layout">
+<aside id="groups"></aside>
+<main>
+<div class="player"><video id="video" controls autoplay></video></div>
+<div class="now" id="now">选择频道开始播放</div>
+<div id="channels"></div>
+</main>
+</div>
+
+<script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
+<script>
+const state={items:[],groups:new Map(),active:'全部',player:null};
+const $=id=>document.getElementById(id);
+
+function attr(line,name){
+  const re=new RegExp(name+'="([^"]*)"','i'),m=line.match(re); return m?m[1]:'';
+}
+function parseM3U(text){
+  const lines=text.split(/\r?\n/), out=[]; let info=null;
+  for(const raw of lines){
+    const line=raw.trim(); if(!line) continue;
+    if(line.startsWith('#EXTINF:')) info=line;
+    else if(info && !line.startsWith('#')){
+      out.push({name:info.split(',').slice(1).join(',')||attr(info,'tvg-name'),
+        id:attr(info,'tvg-id'),logo:attr(info,'tvg-logo'),
+        group:attr(info,'group-title')||'其他',url:line}); info=null;
+    }
+  } return out;
+}
+function renderGroups(){
+  const groups=[...state.groups.keys()];
+  $('groups').innerHTML=['全部',...groups].map(g=>`<div class="group ${g===state.active?'active':''}" data-g="${esc(g)}">${esc(g)}</div>`).join('');
+  document.querySelectorAll('.group').forEach(x=>x.onclick=()=>{state.active=x.dataset.g;renderGroups();renderChannels()});
+}
+function renderChannels(){
+  const list=state.active==='全部'?state.items:state.items.filter(x=>x.group===state.active);
+  $('channels').innerHTML=list.map((x,i)=>`<div class="channel" data-i="${state.items.indexOf(x)}">
+    ${x.logo?`<img src="${esc(x.logo)}" loading="lazy">`:'<div style="width:42px"></div>'}
+    <div><div>${esc(x.name)}</div><div class="small">${esc(x.group)}</div></div></div>`).join('');
+  document.querySelectorAll('.channel').forEach(x=>x.onclick=()=>play(state.items[+x.dataset.i]));
+}
+function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
+
+function play(ch){
+  if(state.player){try{state.player.destroy()}catch(e){} state.player=null}
+  const v=$('video'); v.removeAttribute('src'); v.load();
+  $('now').textContent=ch.name;
+  if(window.mpegts && mpegts.isSupported()){
+    state.player=mpegts.createPlayer({type:'mpegts',url:ch.url,isLive:true});
+    state.player.attachMediaElement(v); state.player.load(); state.player.play().catch(()=>{});
+  } else {
+    v.src=ch.url; v.play().catch(()=>{});
+  }
+}
+async function load(){
+  $('status').textContent='正在读取 M3U…';
+  try{
+    await window.__mpegtsReady.catch(()=>{});
+    const r=await fetch('/cgi-bin/iptvweb-m3u?'+Date.now(),{cache:'no-store'});
+    const text=await r.text(); state.items=parseM3U(text); state.groups=new Map();
+    for(const x of state.items) state.groups.set(x.group,true);
+    renderGroups();renderChannels();
+    $('status').textContent=`${state.items.length} 个频道`;
+  }catch(e){$('status').textContent='M3U 读取失败';console.error(e)}
+}
+$('refresh').onclick=load; load();
+</script>
+</body>
+</html>

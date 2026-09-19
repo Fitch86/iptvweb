@@ -1,0 +1,4 @@
+#!/bin/sh
+# Ensure the CGI is executable and create cache directory if needed.
+mkdir -p /tmp
+exit 0
