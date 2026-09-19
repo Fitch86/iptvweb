@@ -1,15 +1,3 @@
-# luci-app-iptvweb 0.2.2-rev3.3
+# luci-app-iptvweb 0.2.2-rev4.1
 
-OpenWrt 25.12+ LAN IPTV web player for an existing udpxy service.
-
-## rev3.3
-- `isLive=false` unchanged.
-- `stashInitialSize=1MB` unchanged.
-- HTML5 autoplay is disabled completely; playback is started only by the page's explicit `player.play()` call.
-- Pending delayed-start timers are canceled when the video is paused before explicit playback.
-- First-frame/first-playing diagnostics use relative test times.
-- `SOURCE=unexpected-autoplay` is logged if a play event occurs before the page's explicit play call.
-- The 0/1/2/3/5-second startup-buffer selector remains for controlled A/B testing.
-- mpegts.js 1.8.0 remains locally installed; no CDN is used at runtime.
-
-Recommended first test: 0s, 2s, 5s, two repeats per setting.
+rev3.3 的实用稳定版：默认启动前等待约 2 秒可播放缓冲，正常音视频模式，保持 `isLive=false` 和 1MB stash；HTML5 autoplay 已关闭。仍可选择 0/1/2/3/5 秒用于低延迟或排障测试。

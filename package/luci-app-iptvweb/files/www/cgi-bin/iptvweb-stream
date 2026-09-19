@@ -1,25 +1,21 @@
 #!/bin/sh
-# Same-origin MPEG-TS proxy for udpxy. This avoids browser CORS restrictions.
-# Only configured udpxy host/port and IPv4 multicast destinations are accepted.
+# Same-origin long-lived MPEG-TS proxy for udpxy.
+# rev3.8: keep the browser-side HTTP response alive across udpxy upstream
+# disconnects. This is intentionally a byte relay; MPEG-TS continuity is left
+# to mpegts.js. The CGI itself must also be allowed to run longer than uhttpd's
+# default 60-second script timeout (handled by install.sh below).
 
-printf 'Content-Type: video/mp2t\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\n\r\n'
+printf 'Content-Type: video/mp2t\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nX-Content-Type-Options: nosniff\r\nAccess-Control-Allow-Origin: *\r\nConnection: keep-alive\r\n\r\n'
 
 qs="${QUERY_STRING:-}"
 group="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^group=//p' | head -n1)"
 port="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^port=//p' | head -n1)"
 
-# URL-decode the group value (the UI sends encodeURIComponent()).
 group="$(printf '%s' "$group" | sed 's/+/ /g; s/%/\\x/g' | xargs printf '%b' 2>/dev/null || true)"
-
 udpxy="$(uci -q get iptvweb.main.udpxy 2>/dev/null || true)"
 [ -n "$udpxy" ] || exit 1
+case "$udpxy" in *[!A-Za-z0-9.:-]*) exit 1;; esac
 
-# udpxy is configured as host:port; permit only a simple IPv4/hostname form.
-case "$udpxy" in
-    *[!A-Za-z0-9.:-]*) exit 1 ;;
-esac
-
-# Destination must be IPv4 multicast 224.0.0.0/4.
 oldIFS="$IFS"; IFS=.; set -- $group; IFS="$oldIFS"
 [ "$#" = 4 ] || exit 1
 for octet in "$@"; do
@@ -29,19 +25,29 @@ done
 first="$1"
 [ "$first" -ge 224 ] 2>/dev/null || exit 1
 [ "$first" -le 239 ] 2>/dev/null || exit 1
-
 case "$port" in ''|*[!0-9]*) exit 1;; esac
 [ "$port" -ge 1 ] 2>/dev/null || exit 1
 [ "$port" -le 65535 ] 2>/dev/null || exit 1
 
 url="http://${udpxy}/udp/${group}:${port}"
 
-# BusyBox wget/uclient-fetch stream the response to stdout. Do not use -q on
-# some builds if it suppresses useful diagnostics; stderr is not sent to CGI.
-if command -v uclient-fetch >/dev/null 2>&1; then
-    exec uclient-fetch -q -O - "$url"
-elif command -v wget >/dev/null 2>&1; then
-    exec wget -q -O - "$url"
-else
-    exit 1
-fi
+# Do not close the downstream CGI response just because udpxy closes one
+# upstream HTTP session. Reconnect and continue feeding TS bytes to the same
+# browser connection. A short delay prevents a tight reconnect loop if the
+# multicast source is temporarily unavailable.
+fetch_once() {
+    if command -v uclient-fetch >/dev/null 2>&1; then
+        uclient-fetch -q -O - "$url"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -O - "$url"
+    else
+        return 127
+    fi
+}
+
+# Keep the CGI alive until the browser closes the connection or uhttpd kills
+# the request. stderr is deliberately discarded so CGI output remains pure TS.
+while :; do
+    fetch_once >/dev/stdout 2>/dev/null || true
+    sleep 0.20
+ done
