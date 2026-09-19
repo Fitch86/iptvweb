@@ -1,5 +1,5 @@
 #!/bin/sh
-# rev3.8: allow the long-lived IPTV CGI to exceed uhttpd's default 60s timeout.
+# Allow the long-lived IPTV CGI to exceed uhttpd's default 60s timeout.
 if command -v uci >/dev/null 2>&1; then
     uci -q set uhttpd.main.script_timeout='86400' || true
     uci -q commit uhttpd || true

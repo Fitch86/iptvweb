@@ -1,7 +1,6 @@
 #!/bin/sh
 set -eu
 
-CONFIG=/etc/config/iptvweb
 OUT="${1:-/tmp/iptvweb.m3u}"
 
 m3u_url="$(uci -q get iptvweb.main.m3u_url || true)"
@@ -14,15 +13,16 @@ tmp="${OUT}.tmp.$$"
 trap 'rm -f "$tmp"' EXIT
 
 if command -v uclient-fetch >/dev/null 2>&1; then
-    uclient-fetch -q -O "$tmp" "$m3u_url"
+    uclient-fetch -q -T 15 -O "$tmp" "$m3u_url"
 elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$tmp" "$m3u_url"
+    wget -q -T 15 -O "$tmp" "$m3u_url"
 else
     echo "No uclient-fetch/wget available" >&2
     exit 1
 fi
 
+[ -s "$tmp" ] || exit 1
+
 # Replace the template placeholder and also normalize an accidentally supplied
 # full URL. Only the known placeholder is replaced.
 sed "s#{{your_udpxy_address}}#${udpxy}#g" "$tmp" > "$OUT"
-rm -f "$tmp"

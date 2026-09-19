@@ -1,0 +1,67 @@
+#!/bin/sh
+# One-shot TS capture for offline ffprobe/tsduck.
+# Does NOT stream to the browser. Saves /tmp/iptvweb-capture.ts
+# Stop the web player first so this is the only udpxy client.
+#
+# /cgi-bin/iptvweb-capture?group=233.x.x.x&port=xxxx&seconds=15
+
+printf 'Content-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\n\r\n'
+
+qs="${QUERY_STRING:-}"
+group="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^group=//p' | head -n1)"
+port="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^port=//p' | head -n1)"
+seconds="$(printf '%s' "$qs" | tr '&' '\n' | sed -n 's/^seconds=//p' | head -n1)"
+
+group="$(printf '%s' "$group" | sed 's/+/ /g; s/%/\\x/g' | xargs printf '%b' 2>/dev/null || true)"
+case "$seconds" in ''|*[!0-9]*) seconds=15;; esac
+[ "$seconds" -ge 5 ] 2>/dev/null || seconds=15
+[ "$seconds" -le 30 ] 2>/dev/null || seconds=30
+
+udpxy="$(uci -q get iptvweb.main.udpxy 2>/dev/null || true)"
+[ -n "$udpxy" ] || { echo "error=no_udpxy"; exit 0; }
+case "$udpxy" in *[!A-Za-z0-9.:-]*) echo "error=bad_udpxy"; exit 0;; esac
+
+oldIFS="$IFS"; IFS=.; set -- $group; IFS="$oldIFS"
+[ "$#" = 4 ] || { echo "error=bad_group"; exit 0; }
+for octet in "$@"; do
+    case "$octet" in ''|*[!0-9]*) echo "error=bad_group"; exit 0;; esac
+    [ "$octet" -le 255 ] 2>/dev/null || { echo "error=bad_group"; exit 0; }
+done
+first="$1"
+[ "$first" -ge 224 ] 2>/dev/null || { echo "error=not_multicast"; exit 0; }
+[ "$first" -le 239 ] 2>/dev/null || { echo "error=not_multicast"; exit 0; }
+case "$port" in ''|*[!0-9]*) echo "error=bad_port"; exit 0;; esac
+[ "$port" -ge 1 ] 2>/dev/null || { echo "error=bad_port"; exit 0; }
+[ "$port" -le 65535 ] 2>/dev/null || { echo "error=bad_port"; exit 0; }
+
+url="http://${udpxy}/udp/${group}:${port}"
+out="/tmp/iptvweb-capture.ts"
+rm -f "$out"
+
+if command -v uclient-fetch >/dev/null 2>&1; then
+    uclient-fetch -q -O "$out" "$url" &
+    pid=$!
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$out" "$url" &
+    pid=$!
+else
+    echo "error=no_fetcher"
+    exit 0
+fi
+
+sleep "$seconds"
+kill "$pid" 2>/dev/null || true
+wait "$pid" 2>/dev/null || true
+
+bytes=0
+[ -f "$out" ] && bytes="$(wc -c < "$out" | tr -d ' ')"
+
+echo "ok=1"
+echo "file=$out"
+echo "bytes=$bytes"
+echo "seconds=$seconds"
+echo "url=$url"
+echo "scp=scp root@192.168.1.1:/tmp/iptvweb-capture.ts ."
+echo "ffprobe_streams=ffprobe -hide_banner -show_entries stream=index,codec_name,codec_type,profile,level,width,height,r_frame_rate,start_time,start_pts,sample_rate,channels -of json iptvweb-capture.ts"
+echo "ffprobe_gop=ffprobe -v error -select_streams v:0 -show_entries frame=pict_type,key_frame,pkt_pts_time,pkt_dts_time -of csv=p=0 -read_intervals %+12 iptvweb-capture.ts"
+echo "ffprobe_audio=ffprobe -v error -select_streams a:0 -show_entries packet=pts_time,dts_time,duration_time,size -of csv=p=0 -read_intervals %+5 iptvweb-capture.ts"

@@ -1,13 +1,16 @@
 #!/bin/sh
 # CGI endpoint: returns the cached M3U, refreshing it when stale.
+# Never hang the playlist request: iptvweb-fetch has a short timeout.
 printf 'Content-Type: audio/x-mpegurl\r\nCache-Control: no-cache\r\n\r\n'
 
 cache="$(uci -q get iptvweb.main.cache 2>/dev/null || echo /tmp/iptvweb.m3u)"
 ttl="$(uci -q get iptvweb.main.cache_ttl 2>/dev/null || echo 21600)"
+case "$ttl" in ''|*[!0-9]*) ttl=21600;; esac
 now="$(date +%s)"
 mtime=0
 
 [ -f "$cache" ] && mtime="$(stat -c %Y "$cache" 2>/dev/null || echo 0)"
+case "$mtime" in ''|*[!0-9]*) mtime=0;; esac
 
 if [ ! -s "$cache" ] || [ $((now - mtime)) -ge "$ttl" ]; then
     /usr/bin/iptvweb-fetch "$cache" >/dev/null 2>&1 || true
@@ -16,5 +19,5 @@ fi
 if [ -s "$cache" ]; then
     cat "$cache"
 else
-    printf '#EXTM3U\r\n# IPTV Web: unable to fetch M3U\r\n'
+    printf '#EXTM3U\r\n# IPTV Web: unable to fetch M3U. Check LuCI Services -> IPTV Web (m3u_url) and that the router can reach it.\r\n'
 fi
