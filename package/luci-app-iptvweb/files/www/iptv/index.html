@@ -22,7 +22,7 @@ const $=id=>document.getElementById(id);
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function attr(line,name){const re=new RegExp(name+'="([^"]*)"','i'),m=line.match(re);return m?m[1]:''}
 function parseM3U(text){const lines=text.split(/\r?\n/),out=[];let info=null;for(const raw of lines){const line=raw.trim();if(!line)continue;if(line.startsWith('#EXTINF:'))info=line;else if(info&&!line.startsWith('#')){out.push({name:info.split(',').slice(1).join(',')||attr(info,'tvg-name'),id:attr(info,'tvg-id'),logo:attr(info,'tvg-logo'),group:attr(info,'group-title')||'其他',url:line});info=null}}return out}
-function streamUrl(ch){try{const u=new URL(ch.url,location.href);const m=u.pathname.match(/^\/udp\/([^:]+):(\d+)$/);if(m)return `/cgi-bin/iptvweb-stream?group=${encodeURIComponent(m[1])}&port=${m[2]}`;}catch(e){}return ch.url}
+function streamUrl(ch){try{const u=new URL(ch.url,location.href);const m=u.pathname.match(/^\/udp\/([^:]+):(\d+)$/);if(m){const proxy=new URL('/cgi-bin/iptvweb-stream',window.location.href);proxy.searchParams.set('group',m[1]);proxy.searchParams.set('port',m[2]);return proxy.href;}}catch(e){}return new URL(ch.url,window.location.href).href}
 function renderGroups(){const html=state.groups.map(g=>{const list=state.items.filter(x=>x.group===g);const open=state.active===g;return `<section class="group ${open?'open':''}" data-g="${esc(g)}"><div class="group-head"><span class="arrow">${open?'▼':'▶'}</span><span>${esc(g)}</span><span class="count">${list.length}</span></div><div class="group-channels">${list.map(x=>`<div class="channel ${state.current===x?'active':''}" data-i="${state.items.indexOf(x)}">${x.logo?`<img src="${esc(x.logo)}" loading="lazy" alt="">`:''}<div class="name">${esc(x.name)}</div></div>`).join('')}</div></section>`}).join('');$('groups').innerHTML=html;document.querySelectorAll('.group-head').forEach(h=>h.onclick=()=>{const g=h.parentElement.dataset.g;state.active=state.active===g?'':g;renderGroups()});document.querySelectorAll('.channel').forEach(x=>x.onclick=()=>play(state.items[+x.dataset.i]))}
 function isSafari(){return /^((?!chrome|android).)*safari/i.test(navigator.userAgent) || /iPad|iPhone|iPod/.test(navigator.userAgent)}
 function stopPlayer(){if(state.player){try{state.player.pause()}catch(e){}try{state.player.unload()}catch(e){}try{state.player.detachMediaElement()}catch(e){}try{state.player.destroy()}catch(e){}state.player=null}}
@@ -36,11 +36,11 @@ function play(ch){
  if(!window.mpegts || !mpegts.isSupported()){setStatus('浏览器不支持 MSE MPEG-TS');return}
  const config={
    enableWorker:true,
-   enableWorkerForMSE:true,
+   enableWorkerForMSE:false,
    enableStashBuffer:true,
    stashInitialSize:512*1024,
    lazyLoad:false,
-   deferLoadAfterSourceOpen:false,
+   deferLoadAfterSourceOpen:true,
    autoCleanupSourceBuffer:true,
    autoCleanupMaxBackwardDuration:30,
    autoCleanupMinBackwardDuration:10,
