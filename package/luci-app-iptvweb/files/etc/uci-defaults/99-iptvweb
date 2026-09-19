@@ -1,4 +1,29 @@
 #!/bin/sh
-# Ensure the CGI is executable and create cache directory if needed.
+# Fetch the full mpegts.js distribution once at install/first boot time.
+# Runtime playback is local and does not contact jsDelivr/unpkg.
+mkdir -p /www/luci-static/resources/iptvweb /tmp
+TARGET=/www/luci-static/resources/iptvweb/mpegts.min.js
+TMP=/tmp/mpegts.min.js.iptvweb
+URL1='https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js'
+URL2='https://unpkg.com/mpegts.js@1.8.0/dist/mpegts.min.js'
+fetch_ok=0
+if command -v uclient-fetch >/dev/null 2>&1; then
+    uclient-fetch -q -O "$TMP" "$URL1" 2>/dev/null && fetch_ok=1 || true
+    if [ "$fetch_ok" = 0 ]; then
+        uclient-fetch -q -O "$TMP" "$URL2" 2>/dev/null && fetch_ok=1 || true
+    fi
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$TMP" "$URL1" && fetch_ok=1 || true
+    if [ "$fetch_ok" = 0 ]; then
+        wget -q -O "$TMP" "$URL2" && fetch_ok=1 || true
+    fi
+fi
+if [ "$fetch_ok" = 1 ] && [ -s "$TMP" ] && [ "$(wc -c < "$TMP")" -gt 100000 ] && grep -q 'mpegts' "$TMP" 2>/dev/null; then
+    mv -f "$TMP" "$TARGET"
+    chmod 0644 "$TARGET"
+else
+    rm -f "$TMP"
+    echo "iptvweb: WARNING: could not fetch mpegts.js 1.8.0; run install.sh again when the router has Internet access." >&2
+fi
 mkdir -p /tmp
 exit 0

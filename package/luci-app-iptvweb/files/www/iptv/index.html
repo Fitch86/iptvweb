@@ -17,16 +17,75 @@ main{flex:1;min-width:0;min-height:0;padding:12px;display:flex;flex-direction:co
 <div class="layout"><aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside><main><div class="player"><video id="video" controls autoplay playsinline></video></div><div class="now" id="now">选择频道开始播放<div class="hint">提示：部分 HEVC/H.265 频道取决于浏览器及系统的 HEVC 解码支持。</div></div></main></div>
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
 <script>
-const state={items:[],groups:[],active:'',current:null,player:null,seq:0};
+const state={items:[],groups:[],active:'',current:null,player:null,seq:0,retryVideoOnly:false};
 const $=id=>document.getElementById(id);
 function esc(s){return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}
 function attr(line,name){const re=new RegExp(name+'="([^"]*)"','i'),m=line.match(re);return m?m[1]:''}
 function parseM3U(text){const lines=text.split(/\r?\n/),out=[];let info=null;for(const raw of lines){const line=raw.trim();if(!line)continue;if(line.startsWith('#EXTINF:'))info=line;else if(info&&!line.startsWith('#')){out.push({name:info.split(',').slice(1).join(',')||attr(info,'tvg-name'),id:attr(info,'tvg-id'),logo:attr(info,'tvg-logo'),group:attr(info,'group-title')||'其他',url:line});info=null}}return out}
 function streamUrl(ch){try{const u=new URL(ch.url,location.href);const m=u.pathname.match(/^\/udp\/([^:]+):(\d+)$/);if(m)return `/cgi-bin/iptvweb-stream?group=${encodeURIComponent(m[1])}&port=${m[2]}`;}catch(e){}return ch.url}
 function renderGroups(){const html=state.groups.map(g=>{const list=state.items.filter(x=>x.group===g);const open=state.active===g;return `<section class="group ${open?'open':''}" data-g="${esc(g)}"><div class="group-head"><span class="arrow">${open?'▼':'▶'}</span><span>${esc(g)}</span><span class="count">${list.length}</span></div><div class="group-channels">${list.map(x=>`<div class="channel ${state.current===x?'active':''}" data-i="${state.items.indexOf(x)}">${x.logo?`<img src="${esc(x.logo)}" loading="lazy" alt="">`:''}<div class="name">${esc(x.name)}</div></div>`).join('')}</div></section>`}).join('');$('groups').innerHTML=html;document.querySelectorAll('.group-head').forEach(h=>h.onclick=()=>{const g=h.parentElement.dataset.g;state.active=state.active===g?'':g;renderGroups()});document.querySelectorAll('.channel').forEach(x=>x.onclick=()=>play(state.items[+x.dataset.i]))}
-function stopPlayer(){if(state.player){try{state.player.pause();state.player.unload();state.player.detachMediaElement();state.player.destroy()}catch(e){}state.player=null}}
-function play(ch){const seq=++state.seq;state.current=ch;state.active=ch.group;renderGroups();stopPlayer();const v=$('video');v.pause();v.removeAttribute('src');v.load();$('now').firstChild.textContent=ch.name;const url=streamUrl(ch);if(!window.mpegts||!mpegts.isSupported()){v.src=url;v.play().catch(()=>{});return}const config={enableWorker:false,enableStashBuffer:true,stashInitialSize:384*1024,lazyLoad:false,autoCleanupSourceBuffer:true,liveBufferLatencyChasing:true,liveBufferLatencyMaxLatency:3,liveBufferLatencyMinRemain:0.5};const p=mpegts.createPlayer({type:'mpegts',url:url,isLive:true},config);state.player=p;p.on(mpegts.Events.ERROR,(type,details,info)=>{if(seq!==state.seq)return;console.error('[mpegts]',type,details,info);$('status').textContent='播放错误：'+details});p.on(mpegts.Events.LOADING_COMPLETE,()=>console.log('loading complete'));p.attachMediaElement(v);p.load();p.play().catch(e=>console.log('autoplay blocked',e));}
-async function load(){state.current=null;state.active='';stopPlayer();$('status').textContent='正在读取 M3U…';try{const r=await fetch('/cgi-bin/iptvweb-m3u?'+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const text=await r.text();state.items=parseM3U(text);state.groups=[...new Set(state.items.map(x=>x.group))];if(state.items.length)state.active=state.items[0].group;renderGroups();$('status').textContent=`${state.items.length} 个频道`;}catch(e){$('status').textContent='M3U 读取失败';console.error(e)}}
+function isSafari(){return /^((?!chrome|android).)*safari/i.test(navigator.userAgent) || /iPad|iPhone|iPod/.test(navigator.userAgent)}
+function stopPlayer(){if(state.player){try{state.player.pause()}catch(e){}try{state.player.unload()}catch(e){}try{state.player.detachMediaElement()}catch(e){}try{state.player.destroy()}catch(e){}state.player=null}}
+function setStatus(t){$('status').textContent=t||''}
+function play(ch){
+ const seq=++state.seq; state.current=ch; state.active=ch.group; state.retryVideoOnly=false; renderGroups(); stopPlayer();
+ const v=$('video');
+ try{v.pause()}catch(e){}
+ v.removeAttribute('src'); v.load(); $('now').firstChild.textContent=ch.name;
+ const url=streamUrl(ch);
+ if(!window.mpegts || !mpegts.isSupported()){setStatus('浏览器不支持 MSE MPEG-TS');return}
+ const config={
+   enableWorker:true,
+   enableWorkerForMSE:true,
+   enableStashBuffer:true,
+   stashInitialSize:512*1024,
+   lazyLoad:false,
+   deferLoadAfterSourceOpen:false,
+   autoCleanupSourceBuffer:true,
+   autoCleanupMaxBackwardDuration:30,
+   autoCleanupMinBackwardDuration:10,
+   liveBufferLatencyChasing:false,
+   liveBufferLatencyChasingOnPaused:false,
+   liveSync:false,
+   fixAudioTimestampGap:true
+ };
+ createPlayer(ch,url,seq,config,false);
+}
+function createPlayer(ch,url,seq,config,videoOnly){
+ if(seq!==state.seq)return;
+ const v=$('video');
+ const ds={type:'mpegts',url:url,isLive:true};
+ if(videoOnly)ds.hasAudio=false;
+ let p;
+ try{p=mpegts.createPlayer(ds,config)}catch(e){console.error(e);setStatus('播放器创建失败');return}
+ state.player=p;
+ p.on(mpegts.Events.ERROR,(type,details,info)=>{
+   if(seq!==state.seq)return;
+   console.error('[mpegts]',type,details,info);
+   if(!videoOnly && isSafari() && /MEDIA_SOURCE_ERROR|MEDIA_ERROR|FORMAT_ERROR/i.test(String(details))){
+     setStatus('Safari 音频兼容性重试…');
+     try{p.pause();p.unload();p.detachMediaElement();p.destroy()}catch(e){}
+     state.player=null;
+     setTimeout(()=>{if(seq!==state.seq)return; createPlayer(ch,url,seq,config,true)},120);
+     return;
+   }
+   setStatus('播放错误：'+details);
+ });
+ p.on(mpegts.Events.MEDIA_INFO,info=>{
+   if(seq!==state.seq)return;
+   const vcodec=info&&info.videoCodec?info.videoCodec:'';
+   setStatus(videoOnly?'Safari 视频模式':'播放中'+(vcodec?' · '+vcodec:''));
+ });
+ p.on(mpegts.Events.STATISTICS_INFO,info=>{
+   if(seq!==state.seq)return;
+   if(info && info.speed && info.speed<0.8) setStatus('接收速率异常');
+ });
+ p.attachMediaElement(v); p.load();
+ // Start only after load; ignore the normal autoplay interruption when a channel is switched.
+ const start=()=>{if(seq!==state.seq)return; p.play().catch(e=>console.debug('play()',e.name,e.message))};
+ if(v.readyState>=1) start(); else v.addEventListener('loadedmetadata',start,{once:true});
+}
+async function load(){state.current=null;state.active='';stopPlayer();setStatus('正在读取 M3U…');try{const r=await fetch('/cgi-bin/iptvweb-m3u?'+Date.now(),{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const text=await r.text();state.items=parseM3U(text);state.groups=[...new Set(state.items.map(x=>x.group))];if(state.items.length)state.active=state.items[0].group;renderGroups();setStatus(`${state.items.length} 个频道`)}catch(e){setStatus('M3U 读取失败');console.error(e)}}
 $('refresh').onclick=load;load();
 </script>
 </body></html>
