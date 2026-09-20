@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.3</title>
+<title>OpenWrt IPTV rev4.4</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.3 频道列表修复 + 单变量实验</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.4 Private Audio PES + MP3 Frame 显微镜</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -73,7 +73,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.3：修复 rev4.2 频道列表脚本崩溃（IPTVWebRev42.reset 调用未定义的 stop）。
+        rev4.4：基于 rev4.3 基线增加 Private Audio PES / MP3 Frame 显微镜；不改变频道列表、stream CGI 和播放器核心参数。
         核心参数保持 isLive=false、stash 384KB、fixAudioTimestampGap 默认关。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
@@ -100,7 +100,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.3';
+const REV='4.4';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -674,10 +674,52 @@ function streamTypeName(t){
   const map={1:'MPEG1-video',2:'MPEG2-video',3:'MPEG1-audio(MP3)',4:'MPEG2-audio',15:'AAC-ADTS',17:'AAC-LATM',27:'H.264',36:'H.265',6:'PES-private',134:'SCTE-35'};
   return map[t]||('0x'+t.toString(16));
 }
+function readPts(p,o){
+  if(o+4>=p.length) return null;
+  return (((p[o]&14)*0x20000000)+(p[o+1]*0x400000)+((p[o+2]&254)*0x2000)+((p[o+3]>>1)*128)+(p[o+4]>>1));
+}
+function parsePesHeader(p,start,end){
+  if(start+9>=end || p[start]!==0 || p[start+1]!==0 || p[start+2]!==1) return null;
+  const sid=p[start+3];
+  const flags=p[start+7];
+  const hlen=p[start+8];
+  const payload=start+9+hlen;
+  let pts=null,dts=null;
+  if((flags&0x80) && start+14<end) pts=readPts(p,start+9);
+  if((flags&0xc0)===0xc0 && start+19<end) dts=readPts(p,start+14);
+  return {sid,flags,hlen,payload:Math.min(payload,end),pts,dts};
+}
+function mp3Header(u8,o){
+  if(o+3>=u8.length || u8[o]!==0xff || (u8[o+1]&0xe0)!==0xe0) return null;
+  const b1=u8[o+1], b2=u8[o+2], b3=u8[o+3];
+  const verBits=(b1>>3)&3, layer=(b1>>1)&3, brIdx=(b2>>4)&15, srIdx=(b2>>2)&3;
+  if(verBits===1 || layer!==1 || brIdx===0 || brIdx===15 || srIdx===3) return null;
+  const version=verBits===3?'MPEG1':verBits===2?'MPEG2':'MPEG2.5';
+  const rates={MPEG1:[44100,48000,32000],MPEG2:[22050,24000,16000], 'MPEG2.5':[11025,12000,8000]}[version];
+  const brTab={MPEG1:[0,32,40,48,56,64,80,96,112,128,160,192,224,256,320],MPEG2:[0,8,16,24,32,40,48,56,64,80,96,112,128,144,160], 'MPEG2.5':[0,8,16,24,32,40,48,56,64,80,96,112,128,144,160]}[version];
+  const bitrate=brTab[brIdx]*1000, sampleRate=rates[srIdx], pad=(b2>>1)&1, channelMode=(b3>>6)&3;
+  const samples=version==='MPEG1'?1152:576;
+  const frameLen=Math.floor((version==='MPEG1'?144:72)*bitrate/sampleRate)+pad;
+  if(!bitrate || !sampleRate || frameLen<24 || o+frameLen>u8.length) return null;
+  return {version,layer:'Layer III (MP3)',bitrate,sampleRate,channelMode,channels:channelMode===3?1:2,padding:pad,frameLen,samples};
+}
+function sniffMp3(u8,limit=8){
+  const out=[];
+  for(let i=0;i+4<u8.length && out.length<limit;i++){
+    const h=mp3Header(u8,i);
+    if(!h) continue;
+    let frames=1, pos=i+h.frameLen;
+    while(frames<3 && pos+4<u8.length){ const x=mp3Header(u8,pos); if(!x) break; frames++; pos+=x.frameLen; }
+    if(frames>=2 || out.length===0) out.push({offset:i,...h,confirmed:frames>=2});
+    if(out.length>=limit) break;
+    i=Math.max(i,pos-1);
+  }
+  return out;
+}
 function parseTsBuffer(u8){
   const res={
     bytes:u8.length, packets:0, syncLoss:0, continuity:0, disc:0, rai:[],
-    pids:{}, pmt:[],
+    pids:{}, pmt:[], privateAudio:[], mp3Frames:[], pesByPid:{},
     video:{pid:null,type:null,firstPts:null,firstDts:null,lastPts:null,count:0},
     audio:{pid:null,type:null,firstPts:null,firstDts:null,lastPts:null,count:0},
     pcr:{pid:null,first:null,last:null,count:0}
@@ -686,101 +728,82 @@ function parseTsBuffer(u8){
   while(off<u8.length && u8[off]!==0x47) off++;
   const lastCC={};
   let pmtPid=null;
-  for(; off+188<=u8.length; ){
-    if(u8[off]!==0x47){
-      res.syncLoss++;
-      let f=-1;
-      for(let i=off+1;i+188<=u8.length;i++) if(u8[i]===0x47){ f=i; break; }
-      if(f<0) break;
-      off=f; continue;
-    }
-    const p=u8.subarray(off, off+188); off+=188; res.packets++;
-    const pid=((p[1]&31)<<8)|p[2];
-    const pusi=!!(p[1]&0x40);
-    const afc=(p[3]>>4)&3;
-    const cc=p[3]&15;
-    let d=4, hasPcr=false, rai=false;
-    if(afc===2 || afc===3){
-      const al=p[4]; d=5+al;
-      if(al>=1){
-        const flags=p[5];
-        if(flags&0x80) res.disc++;
-        if(flags&0x40){ rai=true; res.rai.push({pkt:res.packets, pid}); }
-        if(al>=7 && (flags&0x10)){
-          const base=((p[6]*0x1000000)+(p[7]<<16)+(p[8]<<8)+p[9])>>>0;
-          const ext=((p[10]&1)<<8)|p[11];
-          const v=base*300+ext;
-          if(res.pcr.first==null){ res.pcr.first=v; res.pcr.pid=pid; }
-          res.pcr.last=v; res.pcr.count++; hasPcr=true;
-        }
-      }
-    }
-    const rec=res.pids[pid]||(res.pids[pid]={packets:0, starts:0, continuity:0});
-    rec.packets++; if(pusi) rec.starts++;
-    if(lastCC[pid]!=null && ((lastCC[pid]+1)&15)!==cc && !hasPcr){ rec.continuity++; res.continuity++; }
-    lastCC[pid]=cc;
-
-    if(!(afc===1 || afc===3) || d>=188) continue;
-    if(pusi && pid===0 && p[d]!==undefined){
-      let i=d+(p[d]+1);
-      if(i+8<188 && p[i]===0x00){
-        const sl=((p[i+1]&0x0f)<<8)|p[i+2];
-        let o=i+8;
-        const end=Math.min(188, i+3+sl);
-        while(o+4<=end){
-          const prog=(p[o]<<8)|p[o+1];
-          const ppid=((p[o+2]&0x1f)<<8)|p[o+3];
-          if(prog!==0) pmtPid=ppid;
-          o+=4;
-        }
-      }
-    }
-    if(pusi && pmtPid!=null && pid===pmtPid && p[d]!==undefined){
-      let i=d+(p[d]+1);
-      if(i+12<188 && p[i]===0x02){
-        const sl=((p[i+1]&0x0f)<<8)|p[i+2];
-        const pil=((p[i+10]&0x0f)<<8)|p[i+11];
-        let o=i+12+pil;
-        const end=Math.min(188, i+3+sl);
-        const streams=[];
-        while(o+5<=end){
-          const st=p[o], epid=((p[o+1]&0x1f)<<8)|p[o+2];
-          const eil=((p[o+3]&0x0f)<<8)|p[o+4];
-          streams.push({type:st, pid:epid, name:streamTypeName(st)});
-          if(st===0x1b || st===0x24 || st===0x02 || st===0x01){
-            if(res.video.pid==null){ res.video.pid=epid; res.video.type=st; }
-          }
-          if(st===0x03 || st===0x04 || st===0x0f || st===0x11){
-            if(res.audio.pid==null){ res.audio.pid=epid; res.audio.type=st; }
-          }
-          o+=5+eil;
-        }
-        if(streams.length) res.pmt=streams;
-      }
-    }
-    if(pusi && d+13<188 && p[d]===0 && p[d+1]===0 && p[d+2]===1){
-      const sid=p[d+3], flags=p[d+7], po=d+9;
-      let pts=null, dts=null;
-      if((flags&0x80) && po+5<188) pts=pts90(p, po);
-      if((flags&0xc0)===0xc0 && po+10<188) dts=pts90(p, po+5);
-      const isVid=(res.video.pid!=null && pid===res.video.pid) || (sid>=0xe0 && sid<=0xef);
-      const isAud=(res.audio.pid!=null && pid===res.audio.pid) || (sid>=0xc0 && sid<=0xdf);
-      if(isVid){
-        res.video.count++;
-        if(res.video.firstPts==null && pts!=null) res.video.firstPts=pts;
-        if(res.video.firstDts==null && dts!=null) res.video.firstDts=dts;
-        if(pts!=null) res.video.lastPts=pts;
-        if(res.video.pid==null) res.video.pid=pid;
-      }
-      if(isAud){
-        res.audio.count++;
-        if(res.audio.firstPts==null && pts!=null) res.audio.firstPts=pts;
-        if(res.audio.firstDts==null && dts!=null) res.audio.firstDts=dts;
-        if(pts!=null) res.audio.lastPts=pts;
-        if(res.audio.pid==null) res.audio.pid=pid;
-      }
+  const payloads={};
+  function addPes(pid, p, payloadStart, pts, dts, sid, streamType){
+    if(payloadStart>=188) return;
+    const a=payloads[pid]||(payloads[pid]={chunks:[],bytes:0,pts,dts,sid,streamType});
+    if(a.pts==null && pts!=null) a.pts=pts;
+    if(a.dts==null && dts!=null) a.dts=dts;
+    a.chunks.push(p.slice(payloadStart)); a.bytes+=188-payloadStart;
+    if(a.chunks.length>32 || a.bytes>512*1024){
+      const merged=new Uint8Array(a.bytes); let q=0; for(const c of a.chunks){merged.set(c,q);q+=c.length;}
+      const frames=sniffMp3(merged,8);
+      if(frames.length) res.mp3Frames.push(...frames.map(f=>({pid,pts:a.pts,dts:a.dts,sid:a.sid,streamType:a.streamType,...f})));
+      a.chunks=[]; a.bytes=0;
     }
   }
+  function flushPes(pid){
+    const a=payloads[pid]; if(!a || !a.bytes) return;
+    const merged=new Uint8Array(a.bytes); let q=0; for(const c of a.chunks){merged.set(c,q);q+=c.length;}
+    const frames=sniffMp3(merged,12);
+    if(frames.length) res.mp3Frames.push(...frames.map(f=>({pid,pts:a.pts,dts:a.dts,sid:a.sid,streamType:a.streamType,...f})));
+    if(frames.length && (!res.audio.pid || a.streamType===6 || (a.sid!=null && a.sid>=0xc0&&a.sid<=0xdf))){
+      if(res.audio.firstPts==null && a.pts!=null) res.audio.firstPts=a.pts;
+      if(res.audio.firstDts==null && a.dts!=null) res.audio.firstDts=a.dts;
+      if(a.pts!=null) res.audio.lastPts=a.pts;
+      res.audio.count++;
+      if(res.audio.pid==null) res.audio.pid=pid;
+      if(res.audio.type==null) res.audio.type=a.streamType??6;
+    }
+    if(frames.length){
+      const pa=res.privateAudio.find(x=>x.pid===pid);
+      if(pa){ pa.pes++; pa.mp3Frames+=frames.length; if(pa.firstPts==null) pa.firstPts=a.pts; pa.lastPts=a.pts; pa.sid=a.sid; }
+      else res.privateAudio.push({pid,streamType:a.streamType??null,sid:a.sid,pes:1,mp3Frames:frames.length,firstPts:a.pts,lastPts:a.pts});
+    }
+    delete payloads[pid];
+  }
+  for(; off+188<=u8.length; ){
+    if(u8[off]!==0x47){
+      res.syncLoss++; let f=-1; for(let i=off+1;i+188<=u8.length;i++) if(u8[i]===0x47){f=i;break;}
+      if(f<0) break; off=f; continue;
+    }
+    const p=u8.subarray(off,off+188); off+=188; res.packets++;
+    const pid=((p[1]&31)<<8)|p[2], pusi=!!(p[1]&0x40), afc=(p[3]>>4)&3, cc=p[3]&15;
+    let d=4, hasPcr=false;
+    if(afc===2 || afc===3){
+      const al=p[4]; d=5+al;
+      if(al>=1){ const flags=p[5]; if(flags&0x80) res.disc++; if(flags&0x40) res.rai.push({pkt:res.packets,pid});
+        if(al>=7 && (flags&0x10)){ const base=(p[6]*0x1000000+(p[7]<<16)+(p[8]<<8)+p[9])>>>0; const ext=((p[10]&1)<<8)|p[11]; const pv=base*300+ext; if(res.pcr.first==null){res.pcr.first=pv;res.pcr.pid=pid} res.pcr.last=pv;res.pcr.count++;hasPcr=true; }
+      }
+    }
+    const rec=res.pids[pid]||(res.pids[pid]={packets:0,starts:0,continuity:0,payloadPackets:0}); rec.packets++; if(pusi) rec.starts++;
+    const hasPayload=(afc===1||afc===3)&&d<188;
+    if(hasPayload){
+      rec.payloadPackets++;
+      if(pid!==0x1fff && lastCC[pid]!=null && ((lastCC[pid]+1)&15)!==cc){rec.continuity++;res.continuity++;}
+      lastCC[pid]=cc;
+    }
+    if(!hasPayload) continue;
+    if(pusi && pid===0 && p[d]!==undefined){
+      const i=d+(p[d]+1); if(i+8<188 && p[i]===0){ const sl=((p[i+1]&15)<<8)|p[i+2]; let o=i+8; const end=Math.min(188,i+3+sl); while(o+4<=end){const prog=(p[o]<<8)|p[o+1],ppid=((p[o+2]&31)<<8)|p[o+3];if(prog!==0)pmtPid=ppid;o+=4;} }
+    }
+    let streamType=null;
+    if(pusi && pmtPid!=null && pid===pmtPid && p[d]!==undefined){
+      const i=d+(p[d]+1); if(i+12<188 && p[i]===2){ const sl=((p[i+1]&15)<<8)|p[i+2],pil=((p[i+10]&15)<<8)|p[i+11];let o=i+12+pil;const end=Math.min(188,i+3+sl),streams=[];while(o+5<=end){const st=p[o],epid=((p[o+1]&31)<<8)|p[o+2],eil=((p[o+3]&15)<<8)|p[o+4];streams.push({type:st,pid:epid,name:streamTypeName(st)});if(st===0x1b||st===0x24||st===2||st===1){if(res.video.pid==null){res.video.pid=epid;res.video.type=st}}if(st===3||st===4||st===15||st===17){if(res.audio.pid==null){res.audio.pid=epid;res.audio.type=st}}if(st===6){res.privateAudio.push({pid:epid,streamType:6,sid:null,pes:0,mp3Frames:0,firstPts:null,lastPts:null});}o+=5+eil;}if(streams.length)res.pmt=streams; }
+    }
+    if(pusi && d+13<188 && p[d]===0&&p[d+1]===0&&p[d+2]===1){
+      flushPes(pid);
+      const ph=parsePesHeader(p,d,188); if(ph){
+        streamType=(res.pmt.find(x=>x.pid===pid)||{}).type??(res.privateAudio.find(x=>x.pid===pid)||{}).streamType??null;
+        const isVid=(res.video.pid!=null&&pid===res.video.pid)||(ph.sid>=0xe0&&ph.sid<=0xef);
+        const isAud=(res.audio.pid!=null&&pid===res.audio.pid)||(ph.sid>=0xc0&&ph.sid<=0xdf)||(streamType===6);
+        if(isVid){res.video.count++;if(res.video.firstPts==null&&ph.pts!=null)res.video.firstPts=ph.pts;if(res.video.firstDts==null&&ph.dts!=null)res.video.firstDts=ph.dts;if(ph.pts!=null)res.video.lastPts=ph.pts;if(res.video.pid==null)res.video.pid=pid;}
+        if(isAud && streamType!==6){res.audio.count++;if(res.audio.firstPts==null&&ph.pts!=null)res.audio.firstPts=ph.pts;if(res.audio.firstDts==null&&ph.dts!=null)res.audio.firstDts=ph.dts;if(ph.pts!=null)res.audio.lastPts=ph.pts;if(res.audio.pid==null)res.audio.pid=pid;}
+        addPes(pid,p,ph.payload,ph.pts,ph.dts,ph.sid,streamType);
+      }
+    } else if(payloads[pid]) addPes(pid,p,d,payloads[pid].pts,payloads[pid].dts,payloads[pid].sid,payloads[pid].streamType);
+  }
+  Object.keys(payloads).forEach(flushPes);
   return res;
 }
 function fmtPts(v){
@@ -788,29 +811,26 @@ function fmtPts(v){
   return v+' ('+(v/90).toFixed(3)+' ms, '+(v/90000).toFixed(6)+' s)';
 }
 function formatTsReport(res){
-  const avDelta = (res.audio.firstPts!=null && res.video.firstPts!=null) ? (res.audio.firstPts-res.video.firstPts)/90 : null;
-  const raiGaps=[];
-  for(let i=1;i<res.rai.length;i++) raiGaps.push(res.rai[i].pkt-res.rai[i-1].pkt);
-  const lines=[
-    '===== TS/PCR 分析 rev'+REV+' =====',
+  const avDelta=(res.audio.firstPts!=null&&res.video.firstPts!=null)?(res.audio.firstPts-res.video.firstPts)/90:null;
+  const raiGaps=[]; for(let i=1;i<res.rai.length;i++) raiGaps.push(res.rai[i].pkt-res.rai[i-1].pkt);
+  const privateLines=res.privateAudio.map(x=>'  PID='+x.pid+' stream_type='+(x.streamType==null?'-':x.streamType)+' sid='+(x.sid==null?'-':'0x'+x.sid.toString(16))+' PES='+x.pes+' MP3_frames='+x.mp3Frames+' firstPTS='+fmtPts(x.firstPts)+' lastPTS='+fmtPts(x.lastPts));
+  const mp3Lines=res.mp3Frames.slice(0,12).map((x,i)=>'  #'+(i+1)+' pid='+x.pid+' offset='+x.offset+' '+x.version+' '+x.layer+' '+x.bitrate/1000+'kbps '+x.sampleRate+'Hz '+x.channels+'ch frameLen='+x.frameLen+' samples='+x.samples+' PES_PTS='+fmtPts(x.pts)+' confirmed='+x.confirmed);
+  return [
+    '===== TS/PCR + Private Audio/MP3 分析 rev'+REV+' =====',
     'bytes='+res.bytes+' packets='+res.packets+' syncLoss='+res.syncLoss+' CC_err='+res.continuity+' discontinuity_indicator='+res.disc,
-    'PMT streams: '+(res.pmt.length?res.pmt.map(s=> 'pid='+s.pid+' type='+s.type+'('+s.name+')').join(', '):'(not seen)'),
+    'PMT streams: '+(res.pmt.length?res.pmt.map(s=>'pid='+s.pid+' type='+s.type+'('+s.name+')').join(', '):'(not seen)'),
     'PCR pid='+(res.pcr.pid??'-')+' count='+res.pcr.count+' first='+(res.pcr.first??'-')+' last='+(res.pcr.last??'-'),
-    'VIDEO pid='+(res.video.pid??'-')+' type='+(res.video.type!=null?streamTypeName(res.video.type):'-')+' pes='+res.video.count,
-    '  first PTS='+fmtPts(res.video.firstPts),
-    '  first DTS='+fmtPts(res.video.firstDts),
-    '  last  PTS='+fmtPts(res.video.lastPts),
-    'AUDIO pid='+(res.audio.pid??'-')+' type='+(res.audio.type!=null?streamTypeName(res.audio.type):'-')+' pes='+res.audio.count,
-    '  first PTS='+fmtPts(res.audio.firstPts),
-    '  first DTS='+fmtPts(res.audio.firstDts),
-    '  last  PTS='+fmtPts(res.audio.lastPts),
+    'VIDEO pid='+(res.video.pid??'-')+' type='+(res.video.type!=null?streamTypeName(res.video.type):'-')+' PES='+res.video.count,
+    '  first PTS='+fmtPts(res.video.firstPts), '  first DTS='+fmtPts(res.video.firstDts), '  last  PTS='+fmtPts(res.video.lastPts),
+    'AUDIO pid='+(res.audio.pid??'-')+' type='+(res.audio.type!=null?streamTypeName(res.audio.type):'-')+' PES='+res.audio.count,
+    '  first PTS='+fmtPts(res.audio.firstPts), '  first DTS='+fmtPts(res.audio.firstDts), '  last  PTS='+fmtPts(res.audio.lastPts),
     'A-V start delta (audio-video) = '+(avDelta==null?'n/a':avDelta.toFixed(3)+' ms'),
+    'PRIVATE AUDIO CANDIDATES='+res.privateAudio.length+(privateLines.length?'\n'+privateLines.join('\n'):'\n  -'),
+    'MP3 FRAME SAMPLES='+res.mp3Frames.length+(mp3Lines.length?'\n'+mp3Lines.join('\n'):'\n  -'),
     'RAI/random_access count='+res.rai.length+(res.rai.length?(' first_pkt='+res.rai[0].pkt+' intervals_pkts='+(raiGaps.slice(0,12).join(',')||'-')):''),
-    avDelta==null?'':(Math.abs(avDelta)>400 ? 'INTERPRET: A/V PTS 起始差 >400ms，Chrome 初始化 waiting 很可能就是在等音视频对齐。' : 'INTERPRET: A/V PTS 起始差较小，waiting 更可能是 MP3 解码器/MSE coded-frame 而不是 PTS 错位。')
-  ];
-  return lines.filter(Boolean).join('\n');
+    avDelta==null?'':(Math.abs(avDelta)>400?'INTERPRET: A/V PTS 起始差 >400ms；结合 MP3 帧信息继续判断 Chrome waiting。':'INTERPRET: A/V PTS 起始差较小；若仍 waiting，重点看 MP3 帧是否连续以及 private PES 是否可解码。')
+  ].filter(Boolean).join('\n');
 }
-
 async function analyzeTsInBrowser(){
   if(!state.current){ setStatus('请先选择频道'); return; }
   const url=streamUrl(state.current);
