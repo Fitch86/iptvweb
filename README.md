@@ -1,6 +1,6 @@
-# luci-app-iptvweb 0.2.2-rev4.5
+# luci-app-iptvweb 0.2.2-rev4.6
 
-OpenWrt LuCI IPTV Web Player。rev4.5 先修复 rev4.2 装完频道列表空白的阻塞问题，再继续做 Windows Chromium 上 CCTV1 那次稳定的 1～2 秒初始化 waiting 对照实验。
+OpenWrt LuCI IPTV Web Player。rev4.6 先修复 rev4.2 装完频道列表空白的阻塞问题，再继续做 Windows Chromium 上 CCTV1 那次稳定的 1～2 秒初始化 waiting 对照实验。
 
 ## rev4.2 频道列表故障
 
@@ -17,9 +17,9 @@ R.stop = function () { /* ... */ };
 顺带两个会污染测试的问题一并去掉：
 
 - `play()` 里调用了未定义的 `startRawTsProbe()`，即便频道列表修好也会在点播时再崩一次。
-- 播放时自动再 `fetch` 同一条 `/cgi-bin/iptvweb-stream` 做 TS 探针，等于第二个 udpxy 客户端。rev4.5 只在你点「浏览器 TS 分析」或「路由器抓包」且先停止播放后才抓 TS。
+- 播放时自动再 `fetch` 同一条 `/cgi-bin/iptvweb-stream` 做 TS 探针，等于第二个 udpxy 客户端。rev4.6 只在你点「浏览器 TS 分析」或「路由器抓包」且先停止播放后才抓 TS。
 
-另外，rev4.2 的 `install.sh` 每次都会覆盖 `/etc/config/iptvweb`。如果 LuCI 里填过自定义 M3U，装完会被还原成默认 `myepg.org`。rev4.5 不再覆盖已有配置。
+另外，rev4.2 的 `install.sh` 每次都会覆盖 `/etc/config/iptvweb`。如果 LuCI 里填过自定义 M3U，装完会被还原成默认 `myepg.org`。rev4.6 不再覆盖已有配置。
 
 装完请 **Ctrl+F5** 强制刷新 `http://192.168.1.1/iptv/`。
 

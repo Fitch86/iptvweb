@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.5</title>
+<title>OpenWrt IPTV rev4.6</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.5 频道列表修复 + 单变量实验</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.6 PID290 原始 PES 十六进制解剖</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -73,7 +73,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.5：修复 rev4.2 频道列表脚本崩溃（IPTVWebRev42.reset 调用未定义的 stop）。
+        rev4.6：严格按 PMT 锁定 PID290，进行原始 PES/十六进制解剖。
         核心参数保持 isLive=false、stash 384KB、fixAudioTimestampGap 默认关。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
@@ -100,7 +100,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.5';
+const REV='4.6';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -711,7 +711,7 @@ function parseTsBuffer(u8, hints){
     if((flags&0xc0)===0xc0 && ptsOff+10<=buf.length) dts=pts90(buf,ptsOff+5);
     const payloadStart=Math.min(buf.length,9+hlen);
     const payload=buf.subarray(payloadStart);
-    return {pid,sid,pts,dts,payload,payloadStart,total:buf.length};
+    return {pid,sid,pts,dts,payload,payloadStart,total:buf.length,len};
   }
   function mpegAudioFrame(buf,o){
     if(o+4>buf.length || buf[o]!==0xff || (buf[o+1]&0xe0)!==0xe0) return null;
@@ -729,29 +729,44 @@ function parseTsBuffer(u8, hints){
     const ch=((b3>>6)&3)===3?'mono':'stereo';
     return {version,layer:'III',kbps,hz,channels:ch,frameLen};
   }
+  function hx(buf,n){return Array.from(buf.subarray(0,Math.min(n,buf.length))).map(x=>x.toString(16).padStart(2,'0')).join(' ')}
+  function ax(buf,n){return Array.from(buf.subarray(0,Math.min(n,buf.length))).map(x=>(x>=32&&x<=126)?String.fromCharCode(x):'.').join('')}
   function inspectPrivate(rec,pes){
     if(!pes || !privatePids.has(rec.pid) || pes.sid!==0xbd) return;
     const payload=pes.payload;
-    let sub=null, audioStart=0;
-    if(payload.length){
-      const x=payload[0];
-      if((x>=0x80&&x<=0x8f)||(x>=0xa0&&x<=0xaf)||(x>=0x20&&x<=0x3f)){ sub=x; audioStart=1; }
-    }
-    const samples=[];
-    for(let i=audioStart;i+4<payload.length;i++){
-      const f=mpegAudioFrame(payload,i);
-      if(f){samples.push({offset:i,...f}); if(samples.length>=8) break;}
-    }
-    const hex=Array.from(payload.subarray(0,96)).map(x=>x.toString(16).padStart(2,'0')).join(' ');
-    let a=res.privateAudios.find(x=>x.pid===rec.pid && x.sid===pes.sid);
-    if(!a){a={pid:rec.pid,sid:pes.sid,pes:0,firstPts:null,lastPts:null,substreamIds:[],mp3Frames:0,samples:[],hexSamples:[]};res.privateAudios.push(a);}
-    a.pes++;
-    if(a.firstPts==null && pes.pts!=null)a.firstPts=pes.pts;
+    let a=res.privateAudios.find(x=>x.pid===rec.pid&&x.sid===pes.sid);
+    if(!a){a={pid:rec.pid,sid:pes.sid,pes:0,firstPts:null,lastPts:null,firstDts:null,lastDts:null,payloadBytes:0,headers:[],mp3Frames:0};res.privateAudios.push(a);}
+    a.pes++; a.payloadBytes+=payload.length;
+    if(a.firstPts==null&&pes.pts!=null)a.firstPts=pes.pts;
     if(pes.pts!=null)a.lastPts=pes.pts;
-    if(sub!=null && !a.substreamIds.includes(sub))a.substreamIds.push(sub);
-    a.mp3Frames+=samples.length;
-    for(const x of samples) if(a.samples.length<12)a.samples.push(x);
-    if(a.hexSamples.length<3)a.hexSamples.push(hex);
+    if(a.firstDts==null&&pes.dts!=null)a.firstDts=pes.dts;
+    if(pes.dts!=null)a.lastDts=pes.dts;
+    if(a.headers.length<4){
+      a.headers.push({len:pes.len,sid:pes.sid,pts:pes.pts,dts:pes.dts,headerHex:hx(pes.raw,32),payloadHex:hx(payload,512),payloadAscii:ax(payload,256),substreamId:payload.length?payload[0]:null});
+    }
+    // Secondary MP3 sync-header candidates only; never use this to classify the private stream.
+    for(let i=0;i+4<payload.length&&a.mp3Frames<8;i++){
+      const b1=payload[i+1],b2=payload[i+2];
+      if(payload[i]===0xff&&(b1&0xe0)===0xe0&&((b1>>1)&3)===1&&((b2>>4)&15)!==0&&((b2>>4)&15)!==15&&((b2>>2)&3)!==3)a.mp3Frames++;
+    }
+  }
+  function scanPrivatePesBuffer(pid,buf){
+    // Do not depend on TS PUSI: locate complete 0x000001BD PES packets directly in the reassembled PID byte stream.
+    let pos=0;
+    while(pos+9<=buf.length){
+      let st=-1;
+      for(let i=pos;i+9<=buf.length;i++){
+        if(buf[i]===0&&buf[i+1]===0&&buf[i+2]===1&&buf[i+3]===0xbd){st=i;break;}
+      }
+      if(st<0)break;
+      const h=readPes(buf.subarray(st),pid);
+      if(!h)break;
+      const total=h.len?6+h.len:buf.length-st;
+      if(total<9||st+total>buf.length)break;
+      const raw=buf.subarray(st,st+total), payload=raw.subarray(h.payloadStart);
+      inspectPrivate({pid},Object.assign({},h,{raw,payload}));
+      pos=st+total;
+    }
   }
   function consumePes(pid,buf){
     const rec=res.pids[pid]||(res.pids[pid]={packets:0,starts:0,continuity:0});
@@ -775,13 +790,18 @@ function parseTsBuffer(u8, hints){
   function feedPes(pid,payload,pusi){
     if(!payload.length)return;
     if(pusi){
-      if(pesBuf[pid])consumePes(pid,pesBuf[pid]);
+      if(pesBuf[pid]&&pesBuf[pid].length){
+        if(privatePids.has(pid))scanPrivatePesBuffer(pid,pesBuf[pid]);
+        else consumePes(pid,pesBuf[pid]);
+      }
       pesBuf[pid]=new Uint8Array(payload);
     }else if(pesBuf[pid]){
-      const old=pesBuf[pid], n=new Uint8Array(old.length+payload.length); n.set(old); n.set(payload,old.length); pesBuf[pid]=n;
+      const old=pesBuf[pid],n=new Uint8Array(old.length+payload.length);n.set(old);n.set(payload,old.length);pesBuf[pid]=n;
     }
-    // Bound memory: only retain enough for header + private payload inspection.
-    if(pesBuf[pid] && pesBuf[pid].length>512*1024){consumePes(pid,pesBuf[pid]); delete pesBuf[pid];}
+    if(pesBuf[pid]&&pesBuf[pid].length>2*1024*1024){
+      if(privatePids.has(pid))scanPrivatePesBuffer(pid,pesBuf[pid]);else consumePes(pid,pesBuf[pid]);
+      delete pesBuf[pid];
+    }
   }
   while(off<u8.length && u8[off]!==0x47)off++;
   for(;off+188<=u8.length;){
@@ -802,7 +822,7 @@ function parseTsBuffer(u8, hints){
     if(pusi&&pmtPid!=null&&pid===pmtPid&&p[d]!==undefined){let i=d+(p[d]+1);if(i+12<188&&p[i]===2){const sl=((p[i+1]&15)<<8)|p[i+2],pil=((p[i+10]&15)<<8)|p[i+11];let o=i+12+pil,end=Math.min(188,i+3+sl);while(o+5<=end){const st=p[o],epid=((p[o+1]&31)<<8)|p[o+2],eil=((p[o+3]&15)<<8)|p[o+4];addPmtStream(st,epid);o+=5+eil;}}}
     if(hasPayload&&pid!==0x1fff)feedPes(pid,p.subarray(d),pusi);
   }
-  Object.keys(pesBuf).forEach(pid=>{if(pesBuf[pid])consumePes(Number(pid),pesBuf[pid]);});
+  Object.keys(pesBuf).forEach(pid=>{if(pesBuf[pid]){if(privatePids.has(Number(pid)))scanPrivatePesBuffer(Number(pid),pesBuf[pid]);else consumePes(Number(pid),pesBuf[pid]);}});
   res.privateAudios=res.privateAudios.filter(x=>x.pes>0);
   return res;
 }
@@ -811,7 +831,7 @@ function formatTsReport(res){
   const avDelta=(res.audio.firstPts!=null&&res.video.firstPts!=null)?(res.audio.firstPts-res.video.firstPts)/90:null;
   const raiGaps=[];for(let i=1;i<res.rai.length;i++)raiGaps.push(res.rai[i].pkt-res.rai[i-1].pkt);
   const lines=[
-    '===== Private PES 精确解包 rev'+REV+' =====',
+    '===== PID290 原始 PES 十六进制解剖 rev'+REV+' =====',
     'bytes='+res.bytes+' packets='+res.packets+' syncLoss='+res.syncLoss+' media_CC_err='+res.continuity+' null_CC_err='+res.nullContinuity+' discontinuity_indicator='+res.disc,
     'PMT streams: '+(res.pmt.length?res.pmt.map(s=>'pid='+s.pid+' type='+s.type+'('+s.name+')').join(', '):'(not seen)'),
     'PMT source: '+(res.pmt.length && state.ts && Object.keys(state.ts.pmtStreams||{}).length?'mpegts.js TSLOG hint + TS packets':'TS packets only'),
@@ -825,14 +845,19 @@ function formatTsReport(res){
   ];
   if(res.privateAudios.length){
     res.privateAudios.forEach((a,i)=>{
-      lines.push('PRIVATE['+(i+1)+'] PID='+a.pid+' PMT='+streamTypeName((res.pmt.find(x=>x.pid===a.pid)||{}).type??6)+' sid=0x'+a.sid.toString(16)+' PES='+a.pes+' MP3_frame_candidates='+a.mp3Frames);
-      lines.push('  PTS first='+fmtPts(a.firstPts)+' last='+fmtPts(a.lastPts)+' substream_ids='+(a.substreamIds.length?a.substreamIds.map(x=>'0x'+x.toString(16)).join(','):'none'));
-      a.samples.slice(0,8).forEach((x,j)=>lines.push('  MP3? #'+(j+1)+' payloadOffset='+x.offset+' '+x.version+' Layer '+x.layer+' '+x.kbps+'kbps '+x.hz+'Hz '+x.channels+' frameLen='+x.frameLen));
-      a.hexSamples.slice(0,2).forEach((h,j)=>lines.push('  PAYLOAD_HEX['+(j+1)+'] '+h));
+      lines.push('PRIVATE['+(i+1)+'] PID='+a.pid+' PMT='+streamTypeName((res.pmt.find(x=>x.pid===a.pid)||{}).type??6)+' sid=0x'+a.sid.toString(16)+' PES='+a.pes+' payloadBytes='+a.payloadBytes+' MP3_header_candidates='+a.mp3Frames);
+      lines.push('  PTS first='+fmtPts(a.firstPts)+' last='+fmtPts(a.lastPts)+' DTS first='+fmtPts(a.firstDts)+' last='+fmtPts(a.lastDts));
+      a.headers.forEach((h,j)=>{
+        lines.push('  PES['+(j+1)+'] length='+h.len+' sid=0x'+h.sid.toString(16)+' PTS='+fmtPts(h.pts)+' DTS='+fmtPts(h.dts));
+        lines.push('    PES_HEADER_HEX '+h.headerHex);
+        lines.push('    SUBSTREAM_ID='+(h.substreamId==null?'-':'0x'+h.substreamId.toString(16)));
+        lines.push('    PAYLOAD_HEX '+h.payloadHex);
+        lines.push('    PAYLOAD_ASCII '+h.payloadAscii);
+      });
     });
   }else lines.push('PRIVATE PES AUDIO: none');
   lines.push('RAI/random_access count='+res.rai.length+(res.rai.length?(' first_pkt='+res.rai[0].pkt+' intervals_pkts='+(raiGaps.slice(0,12).join(',')||'-')):''));
-  lines.push('INTERPRET: 只有 PMT stream_type=0x06 的 PID 才进入 Private PES 分析；视频 PID 不再做 MP3 扫描。MP3 candidates 仅表示在私有 PES payload 中找到符合帧头/长度约束的候选，不等于已确认音频编码。');
+  lines.push('INTERPRET: 仅对 PMT stream_type=0x06 的 PID 做 0x000001BD 原始 PES 解包；输出 PES header、PTS/DTS、前 512 字节 payload HEX/ASCII。不要仅凭 0xBD/0x06 判定具体音频编码，需结合 payload 格式确认。');
   return lines.join('\n');
 }
 

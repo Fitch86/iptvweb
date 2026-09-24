@@ -74,10 +74,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.5."
+echo "Installed 0.2.2-rev4.6."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.5: corrected Private PES probe; fixed channel-list JS crash from rev4.2; M3U config is preserved;"
+echo "rev4.6: corrected Private PES probe; fixed channel-list JS crash from rev4.2; M3U config is preserved;"
 echo "        mpegts.js stays local; long-lived CGI still uses script_timeout=86400."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
