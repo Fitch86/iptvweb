@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.7 E-AC-3 精确解析 + 浏览器兼容性实验</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.8-preview iOS Safari + E-AC-3</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.7：在 rev4.6 原始 PES 解剖基础上增加 E-AC-3 精确帧解析、ec-3/MSE/AudioDecoder 能力探测。
+        rev4.8-preview：普通频道优先保证 iOS 17.1+ Safari；iOS Safari 使用 ManagedMediaSource + live 模式，其他浏览器保持原播放路径。北京4K/内蒙古等特殊音视频编码不作为本版兼容目标。
         核心播放参数保持 isLive=false、stash 384KB、fixAudioTimestampGap 默认关。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.7';
+const REV='4.8-preview';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -479,17 +479,28 @@ function playerConfig(){
   };
 }
 
+function isIOSSafari(){
+  const ua=navigator.userAgent||'';
+  const ios=/iPad|iPhone|iPod/.test(ua) || (navigator.platform==='MacIntel' && navigator.maxTouchPoints>1);
+  const webkit=/WebKit/i.test(ua);
+  return ios && webkit;
+}
+
 function createPlayer(ch, url, seq, mode){
   if(seq!==state.seq) return;
   const v=$('video');
+  const iosSafari=isIOSSafari();
   attachVideoDiagnostics(v, seq);
   if(mode==='muted'){ v.muted=true; v.volume=0; log('audio experiment: muted=true volume=0 (audio still demuxed)'); }
   else { v.muted=false; }
-  const ds={type:'mpegts', url:url, isLive:false};
+  // iPhone/iPad Safari uses ManagedMediaSource. Marking the source live is important
+  // for Apple's live-MSE path; keep the proven isLive=false path on other browsers.
+  const ds={type:'mpegts', url:url, isLive:iosSafari};
   if(mode==='video') ds.hasAudio=false;
   const config=playerConfig();
   log('CONFIG '+JSON.stringify(config));
   log('MediaDataSource '+JSON.stringify(ds));
+  if(iosSafari) log('iOS Safari path: ManagedMediaSource + isLive=true');
   try{
     if(window.MediaSource){
       log('isTypeSupported video/mp4;codecs="avc1.640029"='+MediaSource.isTypeSupported('video/mp4; codecs="avc1.640029"'));
@@ -588,7 +599,7 @@ function play(ch){
   state.avMode=avMode();
   log('PLAY '+ch.name);
   log('URL '+url);
-  log('isLive=false avMode='+state.avMode+' rev='+REV);
+  log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' rev='+REV);
   if(!window.mpegts || !mpegts.isSupported()){
     setStatus('浏览器不支持 MSE MPEG-TS / mpegts.js 未安装');
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);

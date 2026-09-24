@@ -1,11 +1,11 @@
-# luci-app-iptvweb 0.2.2-rev4.7
+# luci-app-iptvweb 0.2.2-rev4.8-preview
 
-rev4.7 在 rev4.6 PID290 原始 PES 解剖基础上加入：
+本版目标：只解决**普通 IPTV 频道的 iOS Safari 播放**，不再继续针对北京卫视4K、内蒙古等特殊编码频道做兼容性优化。
 
-- E-AC-3 帧头精确解析：`0x0B77`、frame size、fscod/numblkscod、sample rate、acmod、LFE、bsid、channels、samples/frame、bitrate、frame duration。
-- Private PES `stream_type=0x06` / `stream_id=0xBD` 的 E-AC-3 连续帧检测。
-- 浏览器兼容性实验：`audio/mp4; codecs="ec-3"`、HEVC+E-AC-3 的 `canPlayType()` / `MediaSource.isTypeSupported()`，以及可用时的 WebCodecs `AudioDecoder.isConfigSupported()`。
-- TS 分析仍先停止播放器再抓流，避免第二个 udpxy 客户端抢同一组播。
-- 修复 rev4.6 分析器中 `len is not defined` 类变量错误：所有长度均从已定义的 PES/frame 字段计算。
+- 基于 rev4.7，保留频道列表、M3U、udpxy、长连接 CGI、诊断功能。
+- iOS/iPadOS Safari（iOS 17.1+）识别后走 mpegts.js 的 ManagedMediaSource 路径，并对该路径使用 `isLive=true`。mpegts.js 官方从 v1.8.0 起支持 iOS 17.1+ ManagedMediaSource。
+- 其他浏览器保持现有 `isLive=false` 路径，避免改变已经验证的桌面/Android 行为。
+- 安装脚本改为优先获取 mpegts.js 1.8.2。
+- 北京卫视4K（H.265 + E-AC-3）以及内蒙古等异常频道明确列为非本版目标。
 
-注意：mpegts.js 1.8.0 官方版本已加入 MPEG-TS E-AC-3 支持，但本频道的 E-AC-3 是 `stream_type=0x06` + `0xBD` Private PES，因此 rev4.7 先把实际封装和浏览器能力完整测出来；本版不宣称已经完成 Private-PES→MSE 的自动转封装。citeturn1search0turn1search2
+官方 mpegts.js 文档确认：iOS Safari 17.1+ 通过 ManagedMediaSource 支持 MPEG-TS 播放；同时 v1.8.x 已支持 MPEG-TS MP3/AC-3/E-AC-3 等音频解析。

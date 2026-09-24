@@ -43,8 +43,8 @@ if command -v uci >/dev/null 2>&1; then
 fi
 
 TMP="/tmp/mpegts.min.js.iptvweb"
-URL1="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.0/dist/mpegts.min.js"
-URL2="https://unpkg.com/mpegts.js@1.8.0/dist/mpegts.min.js"
+URL1="https://cdn.jsdelivr.net/npm/mpegts.js@1.8.2/dist/mpegts.min.js"
+URL2="https://unpkg.com/mpegts.js@1.8.2/dist/mpegts.min.js"
 FETCHED=0
 if command -v uclient-fetch >/dev/null 2>&1; then
     uclient-fetch -q -T 20 -O "$TMP" "$URL1" 2>/dev/null && FETCHED=1 || true
@@ -59,9 +59,9 @@ else
     rm -f "$TMP"
     if [ -s /www/luci-static/resources/iptvweb/mpegts.min.js ] && \
        [ "$(wc -c < /www/luci-static/resources/iptvweb/mpegts.min.js)" -gt 100000 ]; then
-        echo "NOTE: could not refresh mpegts.js 1.8.0; keeping the existing local copy."
+        echo "NOTE: could not refresh mpegts.js 1.8.2; keeping the existing local copy."
     else
-        echo "ERROR: could not download mpegts.js 1.8.0. Router needs Internet access during installation." >&2
+        echo "ERROR: could not download mpegts.js 1.8.2. Router needs Internet access during installation." >&2
         exit 1
     fi
 fi
@@ -74,10 +74,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.7."
+echo "Installed 0.2.2-rev4.8-preview."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.7: E-AC-3 precise parser + browser compatibility probe; M3U config is preserved;"
-echo "        mpegts.js 1.8.0 stays local; long-lived CGI still uses script_timeout=86400."
+echo "rev4.8-preview: iOS Safari ManagedMediaSource/live path; M3U config is preserved;"
+echo "        mpegts.js 1.8.2 stays local; long-lived CGI still uses script_timeout=86400."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
