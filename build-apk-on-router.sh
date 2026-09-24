@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-OUT="${ROOT}/luci-app-iptvweb_0.2.2-rev4.3-r1_all.apk"
+OUT="${ROOT}/luci-app-iptvweb_0.2.2-rev4.5-r1_all.apk"
 STAGE="${ROOT}/.stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
