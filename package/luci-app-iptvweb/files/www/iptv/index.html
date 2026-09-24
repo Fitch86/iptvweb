@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.6</title>
+<title>OpenWrt IPTV rev4.7</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.6 PID290 原始 PES 十六进制解剖</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.7 E-AC-3 精确解析 + 浏览器兼容性实验</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -59,6 +59,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     <button id="tsAnalyze">浏览器 TS 分析(12s)</button>
     <button id="tsCapture">路由器抓包 15s</button>
     <button id="probeCaps">设备解码能力</button>
+    <button id="probeEac3">E-AC-3兼容性</button>
   </div>
 </header>
 <div class="layout">
@@ -73,8 +74,8 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.6：严格按 PMT 锁定 PID290，进行原始 PES/十六进制解剖。
-        核心参数保持 isLive=false、stash 384KB、fixAudioTimestampGap 默认关。
+        rev4.7：在 rev4.6 原始 PES 解剖基础上增加 E-AC-3 精确帧解析、ec-3/MSE/AudioDecoder 能力探测。
+        核心播放参数保持 isLive=false、stash 384KB、fixAudioTimestampGap 默认关。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -100,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.6';
+const REV='4.7';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -108,7 +109,7 @@ const state={
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
   lastRecoveryAt:0, lastProgressWall:0, lastProgressTime:0, playingSince:0,
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
-  audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[],pmtStreams:{},pmtPid:null,pcrPid:null},
+  audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   diagTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null
@@ -536,10 +537,6 @@ function createPlayer(ch, url, seq, mode){
         if(/PTS/i.test(text)) state.ts.pts++;
         if(/DTS/i.test(text)) state.ts.dts++;
         if(/continuity|discontinuity/i.test(text)) state.ts.continuity++;
-        const mm=text.match(/Parsed first PAT:\s*(\{.*\})/);
-        if(mm){ try{ const pat=JSON.parse(mm[1]); const pp=pat.program_pmt_pid&&Object.values(pat.program_pmt_pid)[0]; if(pp!=null) state.ts.pmtPid=Number(pp); }catch(e){} }
-        const mp=text.match(/Parsed first PMT:\s*(\{.*\})/);
-        if(mp){ try{ const pm=JSON.parse(mp[1]); state.ts.pmtStreams=Object.assign({},pm.pid_stream_type||{}); if(pm.pcr_pid!=null) state.ts.pcrPid=Number(pm.pcr_pid); else if(pm.pcrPid!=null) state.ts.pcrPid=Number(pm.pcrPid); log('TS_HINT PMT '+JSON.stringify(pm.pid_stream_type||{})); }catch(e){} }
         if($('microMode').value==='full') log('TSLOG '+text.slice(0,700));
       });
     }catch(e){ log('TSLOG listener install failed '+e.message); }
@@ -569,7 +566,7 @@ function resetPlayState(){
   state.stats={}; state.playIssuedAt=0; state.lastRecoveryAt=0; state.recoveries=0;
   state.lastProgressWall=performance.now(); state.lastProgressTime=0; state.playingSince=0;
   state.mediaInfo=null; state.lastErrorText=''; state.audioDecodeError=false;
-  state.ts={pts:0,dts:0,continuity:0,privateAudio:[],pmtStreams:{},pmtPid:null,pcrPid:null};
+  state.ts={pts:0,dts:0,continuity:0,privateAudio:[]};
   state.timeline=[]; state.lastFrame=null;
   state.classification='STARTING'; state.classificationReason='';
   state.userPaused=false; state.stopping=false; state.nudgedThisPlay=false;
@@ -678,187 +675,239 @@ function streamTypeName(t){
   const map={1:'MPEG1-video',2:'MPEG2-video',3:'MPEG1-audio(MP3)',4:'MPEG2-audio',15:'AAC-ADTS',17:'AAC-LATM',27:'H.264',36:'H.265',6:'PES-private',134:'SCTE-35'};
   return map[t]||('0x'+t.toString(16));
 }
-function parseTsBuffer(u8, hints){
+function hexBytes(a,n=64){
+  let s=''; const m=Math.min(a.length,n);
+  for(let i=0;i<m;i++) s+=(i?' ':'')+a[i].toString(16).padStart(2,'0');
+  return s+(a.length>n?' …':'');
+}
+function readPesHeader(a){
+  if(!a||a.length<9 || a[0]!==0 || a[1]!==0 || a[2]!==1) return null;
+  const sid=a[3], len=(a[4]<<8)|a[5], flags=a[7], hlen=a[8];
+  let pts=null,dts=null,po=9;
+  if((flags&0x80) && po+4<a.length) pts=pts90(a,po);
+  if((flags&0xc0)===0xc0 && po+9<a.length) dts=pts90(a,po+5);
+  return {sid,len,flags,hlen,headerBytes:9+hlen,pts,dts};
+}
+function parseMp3Header(a,o=0){
+  if(!a||o+4>a.length || a[o]!==0xff || (a[o+1]&0xe0)!==0xe0) return null;
+  const b1=a[o+1], b2=a[o+2], b3=a[o+3];
+  const verBits=(b1>>3)&3, layerBits=(b1>>1)&3;
+  if(verBits===1 || layerBits!==1) return null; // MP3 Layer III only
+  const version=verBits===3?'MPEG1':(verBits===2?'MPEG2':'MPEG2.5');
+  const brIdx=(b2>>4)&15, srIdx=(b2>>2)&3, pad=(b2>>1)&1;
+  const mode=(b3>>6)&3, modeName=['stereo','joint stereo','dual channel','mono'][mode]||'?';
+  const srTable={
+    'MPEG1':[44100,48000,32000], 'MPEG2':[22050,24000,16000], 'MPEG2.5':[11025,12000,8000]
+  };
+  const brTable={
+    'MPEG1':[0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0],
+    'MPEG2':[0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0],
+    'MPEG2.5':[0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0]
+  };
+  const sampleRate=(srTable[version]||[])[srIdx]||0, bitrate=(brTable[version]||[])[brIdx]||0;
+  if(!sampleRate || !bitrate || brIdx===15 || srIdx===3) return null;
+  const frameLength=version==='MPEG1' ? Math.floor(144*bitrate*1000/sampleRate)+pad : Math.floor(72*bitrate*1000/sampleRate)+pad;
+  return {version,layer:'III',bitrateKbps:bitrate,sampleRate,channelMode:modeName,channels:mode===3?1:2,frameLength,padding:pad};
+}
+function findMp3Frames(a,max=12){
+  const out=[];
+  for(let i=0;i+4<=a.length && out.length<max;i++){
+    const h=parseMp3Header(a,i); if(!h) continue;
+    let n=1, pos=i+h.frameLength;
+    while(n<3 && pos+4<=a.length){
+      const h2=parseMp3Header(a,pos); if(!h2 || h2.sampleRate!==h.sampleRate || h2.version!==h.version) break;
+      n++; pos+=h2.frameLength;
+    }
+    if(n>=2 || out.length===0){ out.push({offset:i,frames:n,...h}); if(out.length>=max) break; }
+    i=Math.max(i,pos-2);
+  }
+  return out;
+}
+function parseEac3Header(a,o=0){
+  if(!a || o+6>a.length || a[o]!==0x0b || a[o+1]!==0x77) return null;
+  const b2=a[o+2], b3=a[o+3], b4=a[o+4], b5=a[o+5];
+  const strmtyp=(b2>>6)&3;
+  const substreamid=(b2>>3)&7;
+  const frmsiz=((b2&7)<<8)|b3;
+  const frameLength=(frmsiz+1)*2;
+  const fscod=(b4>>6)&3;
+  const numblkscod=(b4>>4)&3;
+  const acmod=(b4>>1)&7;
+  const lfeon=b4&1;
+  const bsid=(b5>>3)&31;
+  const srTable=[48000,44100,32000];
+  const sr2Table=[24000,22050,16000];
+  let sampleRate=0, sampleRateCode='';
+  if(fscod<3){ sampleRate=srTable[fscod]; sampleRateCode='fscod='+fscod; }
+  else {
+    const fscod2=(b5>>6)&3;
+    sampleRate=sr2Table[fscod2]||0;
+    sampleRateCode='fscod=3/fscod2='+fscod2;
+  }
+  const blocks=[1,2,3,6][numblkscod]||0;
+  const samplesPerFrame=blocks*256;
+  const channelsByAcmod=[2,1,2,3,3,4,4,5][acmod]||0;
+  const channels=channelsByAcmod+lfeon;
+  const durationSec=sampleRate&&samplesPerFrame?samplesPerFrame/sampleRate:0;
+  const bitrate=durationSec?Math.round(frameLength*8/durationSec/1000):0;
+  const codec=bsid>=11?'E-AC-3':'AC-3';
+  if(frameLength<6 || frameLength>a.length-o || !sampleRate || !blocks || !channels) return null;
+  return {codec,offset:o,strmtyp,substreamid,frameLength,sampleRate,numblkscod,blocks,samplesPerFrame,acmod,lfeon,channels,bsid,bitrateKbps:bitrate,sampleDurationMs:durationSec*1000,sampleRateCode};
+}
+function findEac3Frames(a,max=12){
+  const out=[];
+  for(let i=0;i+6<=a.length && out.length<max;i++){
+    const h=parseEac3Header(a,i); if(!h) continue;
+    let n=1,pos=i+h.frameLength;
+    while(n<6 && pos+6<=a.length){
+      const h2=parseEac3Header(a,pos);
+      if(!h2 || h2.frameLength!==h.frameLength || h2.sampleRate!==h.sampleRate || h2.bsid!==h.bsid) break;
+      n++; pos+=h2.frameLength;
+    }
+    if(n>=2 || out.length===0){ out.push({...h,consecutiveFrames:n}); i=Math.max(i,pos-2); }
+  }
+  return out;
+}
+function probeEac3Capabilities(){
+  const v=$('video'), out=['===== E-AC-3 浏览器兼容性实验 rev'+REV+' =====','UA='+navigator.userAgent];
+  const tests=[
+    ['audio/mp4; codecs="ec-3"','audio'],
+    ['video/mp4; codecs="hvc1.2.1.L180.B0,ec-3"','video']
+  ];
+  for(const [mime] of tests){
+    let ct='ERR'; try{ct=v.canPlayType(mime)||'';}catch(e){ct='ERR:'+e.message;}
+    let ms='n/a'; try{ms=window.MediaSource&&MediaSource.isTypeSupported?String(MediaSource.isTypeSupported(mime)):'MediaSource unavailable';}catch(e){ms='ERR:'+e.message;}
+    out.push(mime+' | canPlayType='+ct+' | MediaSource.isTypeSupported='+ms);
+  }
+  let ad='AudioDecoder unavailable';
+  try{
+    if('AudioDecoder' in window && AudioDecoder.isConfigSupported){
+      AudioDecoder.isConfigSupported({codec:'ec-3',sampleRate:48000,numberOfChannels:6}).then(r=>{
+        const x='AudioDecoder ec-3 48k/6ch | supported='+r.supported+' config='+JSON.stringify(r.config||{});
+        log('EAC3 '+x); $('tsReport').textContent += '\n'+x; setStatus('E-AC-3 能力探测完成');
+      }).catch(e=>{log('EAC3 AudioDecoder error '+e.message);});
+    }
+  }catch(e){ad='ERR:'+e.message;}
+  out.push('AudioDecoder ec-3 48k/6ch | '+ad);
+  state.caps=out; out.forEach(x=>log('EAC3 '+x)); $('tsReport').textContent=out.join('\n'); setStatus('E-AC-3 能力探测完成'); updateDiag();
+}
+
+function detectAudioPayload(a){
+  const scan=a.subarray(0,Math.min(a.length,16384));
+  const eac3=findEac3Frames(scan,8);
+  if(eac3.length) return {codec:eac3[0].codec,frames:eac3};
+  const mp3=findMp3Frames(scan,8);
+  if(mp3.length) return {codec:'MP3',frames:mp3};
+  for(let i=0;i+7<scan.length;i++){
+    if(scan[i]===0xff && (scan[i+1]&0xf6)===0xf0){
+      const profile=((scan[i+2]>>6)&3)+1, srIdx=(scan[i+2]>>2)&15;
+      const sr=[96000,88200,64000,48000,44100,32000,24000,22050,16000,12000,11025,8000][srIdx]||0;
+      if(sr) return {codec:'AAC-ADTS',frames:[{offset:i,profile,sampleRate:sr}]};
+    }
+  }
+  return {codec:'UNKNOWN',frames:[]};
+}
+
+function parseTsBuffer(u8){
   const res={
-    bytes:u8.length, packets:0, syncLoss:0, continuity:0, nullContinuity:0, disc:0, rai:[],
-    pids:{}, pmt:[],
+    bytes:u8.length, packets:0, syncLoss:0, continuity:0, mediaContinuity:0, nullContinuity:0, disc:0, rai:[],
+    pids:{}, pmt:[], privateAudio:[], pesSamples:{},
     video:{pid:null,type:null,firstPts:null,firstDts:null,lastPts:null,count:0},
     audio:{pid:null,type:null,firstPts:null,firstDts:null,lastPts:null,count:0},
-    privateAudios:[],
     pcr:{pid:null,first:null,last:null,count:0}
   };
-  let off=0, pmtPid=(hints&&hints.pmtPid!=null)?Number(hints.pmtPid):null;
-  const lastCC={}, lastPayloadCC={};
-  const pesBuf={};
-  const pmtSeen={};
-  const videoTypes=new Set([0x01,0x02,0x1b,0x24]);
-  const audioTypes=new Set([0x03,0x04,0x0f,0x11]);
-  const privatePids=new Set();
-  const hintStreams=(hints&&hints.pmtStreams)||{};
-  Object.keys(hintStreams).forEach(k=>addPmtStream(Number(hintStreams[k]),Number(k)));
-  if(hints&&hints.pmtPid!=null) pmtPid=Number(hints.pmtPid);
-  function addPmtStream(st,pid){
-    if(!res.pmt.some(x=>x.pid===pid)) res.pmt.push({type:st,pid,name:streamTypeName(st)});
-    if(videoTypes.has(st) && res.video.pid==null){res.video.pid=pid;res.video.type=st;}
-    if(audioTypes.has(st) && res.audio.pid==null){res.audio.pid=pid;res.audio.type=st;}
-    if(st===0x06) privatePids.add(pid);
+  let off=0;
+  while(off<u8.length && u8[off]!==0x47) off++;
+  const lastCC={}; let pmtPid=null;
+  const pesBuf={}, pesMeta={};
+  function finalizePes(pid){
+    const a=pesBuf[pid]; if(!a||a.length<9) return;
+    const h=readPesHeader(a); if(!h) return;
+    const payload=a.subarray(h.headerBytes);
+    const rec={pid,streamId:h.sid,packetLength:h.len,pts:h.pts,dts:h.dts,payloadLength:payload.length,head:hexBytes(payload,128),audio:detectAudioPayload(payload)};
+    const arr=res.pesSamples[pid]||(res.pesSamples[pid]=[]); if(arr.length<8) arr.push(rec);
   }
-  function readPes(buf,pid){
-    if(!buf || buf.length<14 || buf[0]!==0 || buf[1]!==0 || buf[2]!==1) return null;
-    const sid=buf[3], flags=buf[7], hlen=buf[8], ptsOff=9;
-    let pts=null,dts=null;
-    if((flags&0x80) && ptsOff+5<=buf.length) pts=pts90(buf,ptsOff);
-    if((flags&0xc0)===0xc0 && ptsOff+10<=buf.length) dts=pts90(buf,ptsOff+5);
-    const payloadStart=Math.min(buf.length,9+hlen);
-    const payload=buf.subarray(payloadStart);
-    return {pid,sid,pts,dts,payload,payloadStart,total:buf.length,len};
+  function startPes(pid, bytes){
+    finalizePes(pid); pesBuf[pid]=Array.from(bytes); 
   }
-  function mpegAudioFrame(buf,o){
-    if(o+4>buf.length || buf[o]!==0xff || (buf[o+1]&0xe0)!==0xe0) return null;
-    const b1=buf[o+1], b2=buf[o+2], b3=buf[o+3];
-    const verBits=(b1>>3)&3, layerBits=(b1>>1)&3, bitrateIdx=(b2>>4)&15, srIdx=(b2>>2)&3, pad=(b2>>1)&1;
-    if(layerBits!==1 || bitrateIdx===0 || bitrateIdx===15 || srIdx===3) return null;
-    const version=verBits===3?'MPEG1':(verBits===2?'MPEG2':(verBits===0?'MPEG2.5':'reserved'));
-    if(version==='reserved') return null;
-    const bitrates=version==='MPEG1'?[0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0]:[0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0];
-    const srs=version==='MPEG1'?[44100,48000,32000]:[22050,24000,16000];
-    const kbps=bitrates[bitrateIdx], hz=srs[srIdx];
-    const samples=version==='MPEG1'?1152:576;
-    const frameLen=Math.floor((version==='MPEG1'?144:72)*kbps*1000/hz)+pad;
-    if(frameLen<24 || o+frameLen>buf.length) return null;
-    const ch=((b3>>6)&3)===3?'mono':'stereo';
-    return {version,layer:'III',kbps,hz,channels:ch,frameLen};
-  }
-  function hx(buf,n){return Array.from(buf.subarray(0,Math.min(n,buf.length))).map(x=>x.toString(16).padStart(2,'0')).join(' ')}
-  function ax(buf,n){return Array.from(buf.subarray(0,Math.min(n,buf.length))).map(x=>(x>=32&&x<=126)?String.fromCharCode(x):'.').join('')}
-  function inspectPrivate(rec,pes){
-    if(!pes || !privatePids.has(rec.pid) || pes.sid!==0xbd) return;
-    const payload=pes.payload;
-    let a=res.privateAudios.find(x=>x.pid===rec.pid&&x.sid===pes.sid);
-    if(!a){a={pid:rec.pid,sid:pes.sid,pes:0,firstPts:null,lastPts:null,firstDts:null,lastDts:null,payloadBytes:0,headers:[],mp3Frames:0};res.privateAudios.push(a);}
-    a.pes++; a.payloadBytes+=payload.length;
-    if(a.firstPts==null&&pes.pts!=null)a.firstPts=pes.pts;
-    if(pes.pts!=null)a.lastPts=pes.pts;
-    if(a.firstDts==null&&pes.dts!=null)a.firstDts=pes.dts;
-    if(pes.dts!=null)a.lastDts=pes.dts;
-    if(a.headers.length<4){
-      a.headers.push({len:pes.len,sid:pes.sid,pts:pes.pts,dts:pes.dts,headerHex:hx(pes.raw,32),payloadHex:hx(payload,512),payloadAscii:ax(payload,256),substreamId:payload.length?payload[0]:null});
+  for(; off+188<=u8.length; ){
+    if(u8[off]!==0x47){
+      res.syncLoss++; let f=-1; for(let i=off+1;i+188<=u8.length;i++) if(u8[i]===0x47){f=i;break;}
+      if(f<0) break; off=f; continue;
     }
-    // Secondary MP3 sync-header candidates only; never use this to classify the private stream.
-    for(let i=0;i+4<payload.length&&a.mp3Frames<8;i++){
-      const b1=payload[i+1],b2=payload[i+2];
-      if(payload[i]===0xff&&(b1&0xe0)===0xe0&&((b1>>1)&3)===1&&((b2>>4)&15)!==0&&((b2>>4)&15)!==15&&((b2>>2)&3)!==3)a.mp3Frames++;
-    }
-  }
-  function scanPrivatePesBuffer(pid,buf){
-    // Do not depend on TS PUSI: locate complete 0x000001BD PES packets directly in the reassembled PID byte stream.
-    let pos=0;
-    while(pos+9<=buf.length){
-      let st=-1;
-      for(let i=pos;i+9<=buf.length;i++){
-        if(buf[i]===0&&buf[i+1]===0&&buf[i+2]===1&&buf[i+3]===0xbd){st=i;break;}
-      }
-      if(st<0)break;
-      const h=readPes(buf.subarray(st),pid);
-      if(!h)break;
-      const total=h.len?6+h.len:buf.length-st;
-      if(total<9||st+total>buf.length)break;
-      const raw=buf.subarray(st,st+total), payload=raw.subarray(h.payloadStart);
-      inspectPrivate({pid},Object.assign({},h,{raw,payload}));
-      pos=st+total;
-    }
-  }
-  function consumePes(pid,buf){
-    const rec=res.pids[pid]||(res.pids[pid]={packets:0,starts:0,continuity:0});
-    const pes=readPes(buf,pid); if(!pes)return;
-    const isVid=res.video.pid!=null && pid===res.video.pid;
-    const isAud=res.audio.pid!=null && pid===res.audio.pid;
-    if(isVid){
-      res.video.count++;
-      if(res.video.firstPts==null&&pes.pts!=null)res.video.firstPts=pes.pts;
-      if(res.video.firstDts==null&&pes.dts!=null)res.video.firstDts=pes.dts;
-      if(pes.pts!=null)res.video.lastPts=pes.pts;
-    }
-    if(isAud){
-      res.audio.count++;
-      if(res.audio.firstPts==null&&pes.pts!=null)res.audio.firstPts=pes.pts;
-      if(res.audio.firstDts==null&&pes.dts!=null)res.audio.firstDts=pes.dts;
-      if(pes.pts!=null)res.audio.lastPts=pes.pts;
-    }
-    if(privatePids.has(pid)) inspectPrivate(rec,pes);
-  }
-  function feedPes(pid,payload,pusi){
-    if(!payload.length)return;
-    if(pusi){
-      if(pesBuf[pid]&&pesBuf[pid].length){
-        if(privatePids.has(pid))scanPrivatePesBuffer(pid,pesBuf[pid]);
-        else consumePes(pid,pesBuf[pid]);
-      }
-      pesBuf[pid]=new Uint8Array(payload);
-    }else if(pesBuf[pid]){
-      const old=pesBuf[pid],n=new Uint8Array(old.length+payload.length);n.set(old);n.set(payload,old.length);pesBuf[pid]=n;
-    }
-    if(pesBuf[pid]&&pesBuf[pid].length>2*1024*1024){
-      if(privatePids.has(pid))scanPrivatePesBuffer(pid,pesBuf[pid]);else consumePes(pid,pesBuf[pid]);
-      delete pesBuf[pid];
-    }
-  }
-  while(off<u8.length && u8[off]!==0x47)off++;
-  for(;off+188<=u8.length;){
-    if(u8[off]!==0x47){res.syncLoss++;let f=-1;for(let i=off+1;i+188<=u8.length;i++)if(u8[i]===0x47){f=i;break;}if(f<0)break;off=f;continue;}
-    const p=u8.subarray(off,off+188);off+=188;res.packets++;
+    const p=u8.subarray(off,off+188); off+=188; res.packets++;
     const pid=((p[1]&31)<<8)|p[2], pusi=!!(p[1]&0x40), afc=(p[3]>>4)&3, cc=p[3]&15;
-    let d=4,hasPcr=false;
-    if(afc===2||afc===3){const al=p[4];d=5+al;if(al>=1){const fl=p[5];if(fl&0x80)res.disc++;if(fl&0x40)res.rai.push({pkt:res.packets,pid});if(al>=7&&(fl&0x10)){const base=((p[6]*0x1000000)+(p[7]<<16)+(p[8]<<8)+p[9])>>>0,ext=((p[10]&1)<<8)|p[11],v=base*300+ext;if(res.pcr.first==null){res.pcr.first=v;res.pcr.pid=pid;}res.pcr.last=v;res.pcr.count++;hasPcr=true;}}}
-    const rec=res.pids[pid]||(res.pids[pid]={packets:0,starts:0,continuity:0});rec.packets++;if(pusi)rec.starts++;
-    const hasPayload=(afc===1||afc===3)&&d<188;
-    if(hasPayload){
-      if(lastPayloadCC[pid]!=null&&((lastPayloadCC[pid]+1)&15)!==cc){rec.continuity++;if(pid===0x1fff)res.nullContinuity++;else res.continuity++;}
-      lastPayloadCC[pid]=cc;
-    }
+    let d=4, hasPcr=false;
+    if(afc===2 || afc===3){ const al=p[4]; d=5+al; if(al>=1){ const flags=p[5]; if(flags&0x80) res.disc++; if(flags&0x40) res.rai.push({pkt:res.packets,pid}); if(al>=7&&(flags&0x10)){ const base=((p[6]*0x1000000)+(p[7]<<16)+(p[8]<<8)+p[9])>>>0, ext=((p[10]&1)<<8)|p[11], v=base*300+ext; if(res.pcr.first==null){res.pcr.first=v;res.pcr.pid=pid} res.pcr.last=v;res.pcr.count++;hasPcr=true; } } }
+    const rec=res.pids[pid]||(res.pids[pid]={packets:0,starts:0,continuity:0}); rec.packets++; if(pusi) rec.starts++;
+    if(lastCC[pid]!=null && ((lastCC[pid]+1)&15)!==cc && !hasPcr){ rec.continuity++; res.continuity++; if(pid===8191) res.nullContinuity++; else res.mediaContinuity++; }
     lastCC[pid]=cc;
-    if(!hasPayload)continue;
-    if(pusi&&pid===0&&p[d]!==undefined){let i=d+(p[d]+1);if(i+8<188&&p[i]===0){const sl=((p[i+1]&15)<<8)|p[i+2];let o=i+8,end=Math.min(188,i+3+sl);while(o+4<=end){const prog=(p[o]<<8)|p[o+1],ppid=((p[o+2]&31)<<8)|p[o+3];if(prog!==0)pmtPid=ppid;o+=4;}}}
-    if(pusi&&pmtPid!=null&&pid===pmtPid&&p[d]!==undefined){let i=d+(p[d]+1);if(i+12<188&&p[i]===2){const sl=((p[i+1]&15)<<8)|p[i+2],pil=((p[i+10]&15)<<8)|p[i+11];let o=i+12+pil,end=Math.min(188,i+3+sl);while(o+5<=end){const st=p[o],epid=((p[o+1]&31)<<8)|p[o+2],eil=((p[o+3]&15)<<8)|p[o+4];addPmtStream(st,epid);o+=5+eil;}}}
-    if(hasPayload&&pid!==0x1fff)feedPes(pid,p.subarray(d),pusi);
+    if(!(afc===1||afc===3)||d>=188) continue;
+    const payload=p.subarray(d);
+    if(pusi && pid===0 && payload.length){
+      let i=payload[0]+1; if(i+8<payload.length && payload[i]===0x00){ const sl=((payload[i+1]&15)<<8)|payload[i+2]; let o=i+8,end=Math.min(payload.length,i+3+sl); while(o+4<=end){const prog=(payload[o]<<8)|payload[o+1],ppid=((payload[o+2]&31)<<8)|payload[o+3];if(prog)pmtPid=ppid;o+=4;} }
+    }
+    if(pusi && pmtPid!=null && pid===pmtPid && payload.length){
+      let i=payload[0]+1; if(i+12<payload.length && payload[i]===0x02){ const sl=((payload[i+1]&15)<<8)|payload[i+2], pil=((payload[i+10]&15)<<8)|payload[i+11]; let o=i+12+pil,end=Math.min(payload.length,i+3+sl),streams=[]; while(o+5<=end){ const st=payload[o],epid=((payload[o+1]&31)<<8)|payload[o+2],eil=((payload[o+3]&15)<<8)|payload[o+4]; streams.push({type:st,pid:epid,name:streamTypeName(st)}); if(st===27||st===36||st===2||st===1){if(res.video.pid==null){res.video.pid=epid;res.video.type=st}} if(st===3||st===4||st===15||st===17){if(res.audio.pid==null){res.audio.pid=epid;res.audio.type=st}} if(st===6) res.privateAudio.push({pid:epid,type:st}); o+=5+eil; } if(streams.length) res.pmt=streams; }
+    }
+    if(pusi){ startPes(pid,payload); } else if(pesBuf[pid] && pesBuf[pid].length<200000){ pesBuf[pid].push(...payload); }
+    if(pusi && payload.length>=14 && payload[0]===0 && payload[1]===0 && payload[2]===1){
+      const sid=payload[3],flags=payload[7],po=9; let pts=null,dts=null; if((flags&0x80)&&po+4<payload.length)pts=pts90(payload,po); if((flags&0xc0)===0xc0&&po+9<payload.length)dts=pts90(payload,po+5);
+      const isVid=(res.video.pid!=null&&pid===res.video.pid)||(sid>=0xe0&&sid<=0xef), isAud=(res.audio.pid!=null&&pid===res.audio.pid)||(sid>=0xc0&&sid<=0xdf);
+      if(isVid){res.video.count++;if(res.video.firstPts==null&&pts!=null)res.video.firstPts=pts;if(res.video.firstDts==null&&dts!=null)res.video.firstDts=dts;if(pts!=null)res.video.lastPts=pts;if(res.video.pid==null)res.video.pid=pid}
+      if(isAud){res.audio.count++;if(res.audio.firstPts==null&&pts!=null)res.audio.firstPts=pts;if(res.audio.firstDts==null&&dts!=null)res.audio.firstDts=dts;if(pts!=null)res.audio.lastPts=pts;if(res.audio.pid==null)res.audio.pid=pid}
+    }
   }
-  Object.keys(pesBuf).forEach(pid=>{if(pesBuf[pid]){if(privatePids.has(Number(pid)))scanPrivatePesBuffer(Number(pid),pesBuf[pid]);else consumePes(Number(pid),pesBuf[pid]);}});
-  res.privateAudios=res.privateAudios.filter(x=>x.pes>0);
+  Object.keys(pesBuf).forEach(finalizePes);
+  for(const x of res.privateAudio){ x.samples=res.pesSamples[x.pid]||[]; }
   return res;
 }
-function fmtPts(v){if(v==null)return '-';return v+' ('+(v/90).toFixed(3)+' ms, '+(v/90000).toFixed(6)+' s)';}
+function fmtPts(v){ if(v==null)return '-'; return v+' ('+(v/90).toFixed(3)+' ms, '+(v/90000).toFixed(6)+' s)'; }
+function formatAudioMicroscope(res){
+  const lines=['===== E-AC-3 精确解析 + Private PES rev'+REV+' ====='];
+  const pids=[...new Set([...res.privateAudio.map(x=>x.pid),...Object.keys(res.pesSamples).map(Number).filter(pid=>pid!==res.video.pid&&pid!==8191)])];
+  if(!pids.length) lines.push('未发现可分析的音频/PES PID');
+  for(const pid of pids){
+    const samples=res.pesSamples[pid]||[], pmt=res.privateAudio.find(x=>x.pid===pid), all=[];
+    for(const s of samples){
+      const a=s.audio||{codec:'UNKNOWN',frames:[]};
+      lines.push(`PID ${pid} ${pmt?'PMT type='+pmt.type+'('+streamTypeName(pmt.type)+')':'PMT type=-'} PES stream_id=0x${s.streamId.toString(16).padStart(2,'0')} len=${s.packetLength} payload=${s.payloadLength}`);
+      lines.push('  PTS='+fmtPts(s.pts)+' DTS='+fmtPts(s.dts));
+      lines.push('  payload[0:128]='+s.head);
+      if((a.codec==='E-AC-3'||a.codec==='AC-3')&&a.frames.length){
+        a.frames.slice(0,4).forEach((f,i)=>lines.push(`  ${a.codec} frame#${i+1} offset=${f.offset} len=${f.frameLength} ${f.bitrateKbps}kbps ${f.sampleRate}Hz ${f.channels}ch acmod=${f.acmod} lfe=${f.lfeon} bsid=${f.bsid} blocks=${f.blocks} samples=${f.samplesPerFrame} duration=${f.sampleDurationMs.toFixed(3)}ms consecutive=${f.consecutiveFrames}`));
+        all.push(...a.frames);
+      } else if(a.codec==='MP3'&&a.frames.length){
+        a.frames.slice(0,4).forEach((f,i)=>lines.push(`  MP3 frame#${i+1} offset=${f.offset} ${f.version} Layer ${f.layer} ${f.bitrateKbps}kbps ${f.sampleRate}Hz ${f.channels}ch ${f.channelMode} frameLen=${f.frameLength}`));
+        all.push(...a.frames);
+      } else if(a.codec!=='UNKNOWN') lines.push('  DETECTED '+a.codec+' '+JSON.stringify(a.frames[0]||{}));
+      else lines.push('  DETECTED UNKNOWN');
+    }
+    if(all.length && (all[0].codec==='E-AC-3'||all[0].codec==='AC-3')){
+      const lens=[...new Set(all.map(x=>x.frameLength))], sr=[...new Set(all.map(x=>x.sampleRate))], br=[...new Set(all.map(x=>x.bitrateKbps))], ch=[...new Set(all.map(x=>x.channels))];
+      lines.push('  SUMMARY '+all[0].codec+' frameLen='+lens.join(',')+' bytes sampleRate='+sr.join(',')+'Hz bitrate='+br.join(',')+'kbps channels='+ch.join(',')+' frames='+all.length);
+    }
+  }
+  return lines.join('\n');
+}
+
 function formatTsReport(res){
   const avDelta=(res.audio.firstPts!=null&&res.video.firstPts!=null)?(res.audio.firstPts-res.video.firstPts)/90:null;
   const raiGaps=[];for(let i=1;i<res.rai.length;i++)raiGaps.push(res.rai[i].pkt-res.rai[i-1].pkt);
-  const lines=[
-    '===== PID290 原始 PES 十六进制解剖 rev'+REV+' =====',
-    'bytes='+res.bytes+' packets='+res.packets+' syncLoss='+res.syncLoss+' media_CC_err='+res.continuity+' null_CC_err='+res.nullContinuity+' discontinuity_indicator='+res.disc,
+  const lines=['===== TS/PCR 分析 rev'+REV+' =====',
+    'bytes='+res.bytes+' packets='+res.packets+' syncLoss='+res.syncLoss+' CC_err='+res.continuity+' media_CC_err='+res.mediaContinuity+' null_CC_err='+res.nullContinuity+' discontinuity_indicator='+res.disc,
     'PMT streams: '+(res.pmt.length?res.pmt.map(s=>'pid='+s.pid+' type='+s.type+'('+s.name+')').join(', '):'(not seen)'),
-    'PMT source: '+(res.pmt.length && state.ts && Object.keys(state.ts.pmtStreams||{}).length?'mpegts.js TSLOG hint + TS packets':'TS packets only'),
     'PCR pid='+(res.pcr.pid??'-')+' count='+res.pcr.count+' first='+(res.pcr.first??'-')+' last='+(res.pcr.last??'-'),
-    'VIDEO pid='+(res.video.pid??'-')+' type='+(res.video.type!=null?streamTypeName(res.video.type):'-')+' PES='+res.video.count,
-    '  first PTS='+fmtPts(res.video.firstPts), '  first DTS='+fmtPts(res.video.firstDts), '  last  PTS='+fmtPts(res.video.lastPts),
-    'STANDARD AUDIO pid='+(res.audio.pid??'-')+' type='+(res.audio.type!=null?streamTypeName(res.audio.type):'-')+' PES='+res.audio.count,
-    '  first PTS='+fmtPts(res.audio.firstPts), '  first DTS='+fmtPts(res.audio.firstDts), '  last  PTS='+fmtPts(res.audio.lastPts),
-    'A-V start delta (standard audio-video) = '+(avDelta==null?'n/a':avDelta.toFixed(3)+' ms'),
-    'PRIVATE PES AUDIO count='+res.privateAudios.length
-  ];
-  if(res.privateAudios.length){
-    res.privateAudios.forEach((a,i)=>{
-      lines.push('PRIVATE['+(i+1)+'] PID='+a.pid+' PMT='+streamTypeName((res.pmt.find(x=>x.pid===a.pid)||{}).type??6)+' sid=0x'+a.sid.toString(16)+' PES='+a.pes+' payloadBytes='+a.payloadBytes+' MP3_header_candidates='+a.mp3Frames);
-      lines.push('  PTS first='+fmtPts(a.firstPts)+' last='+fmtPts(a.lastPts)+' DTS first='+fmtPts(a.firstDts)+' last='+fmtPts(a.lastDts));
-      a.headers.forEach((h,j)=>{
-        lines.push('  PES['+(j+1)+'] length='+h.len+' sid=0x'+h.sid.toString(16)+' PTS='+fmtPts(h.pts)+' DTS='+fmtPts(h.dts));
-        lines.push('    PES_HEADER_HEX '+h.headerHex);
-        lines.push('    SUBSTREAM_ID='+(h.substreamId==null?'-':'0x'+h.substreamId.toString(16)));
-        lines.push('    PAYLOAD_HEX '+h.payloadHex);
-        lines.push('    PAYLOAD_ASCII '+h.payloadAscii);
-      });
-    });
-  }else lines.push('PRIVATE PES AUDIO: none');
-  lines.push('RAI/random_access count='+res.rai.length+(res.rai.length?(' first_pkt='+res.rai[0].pkt+' intervals_pkts='+(raiGaps.slice(0,12).join(',')||'-')):''));
-  lines.push('INTERPRET: 仅对 PMT stream_type=0x06 的 PID 做 0x000001BD 原始 PES 解包；输出 PES header、PTS/DTS、前 512 字节 payload HEX/ASCII。不要仅凭 0xBD/0x06 判定具体音频编码，需结合 payload 格式确认。');
-  return lines.join('\n');
+    'VIDEO pid='+(res.video.pid??'-')+' type='+(res.video.type!=null?streamTypeName(res.video.type):'-')+' pes='+res.video.count,
+    '  first PTS='+fmtPts(res.video.firstPts),'  first DTS='+fmtPts(res.video.firstDts),'  last  PTS='+fmtPts(res.video.lastPts),
+    'STANDARD AUDIO pid='+(res.audio.pid??'-')+' type='+(res.audio.type!=null?streamTypeName(res.audio.type):'-')+' pes='+res.audio.count,
+    '  first PTS='+fmtPts(res.audio.firstPts),'  first DTS='+fmtPts(res.audio.firstDts),'  last  PTS='+fmtPts(res.audio.lastPts),
+    'PRIVATE PES AUDIO count='+res.privateAudio.length,
+    'A-V start delta (audio-video) = '+(avDelta==null?'n/a':avDelta.toFixed(3)+' ms'),
+    'RAI/random_access count='+res.rai.length+(res.rai.length?(' first_pkt='+res.rai[0].pkt+' intervals_pkts='+(raiGaps.slice(0,12).join(',')||'-')):''),
+    '',formatAudioMicroscope(res),
+    avDelta==null?'':(Math.abs(avDelta)>400?'INTERPRET: A/V PTS 起始差 >400ms，Chrome 初始化 waiting 可能涉及 A/V 对齐；需结合音频帧实际 PTS 判断。':'INTERPRET: A/V PTS 起始差较小，优先检查音频编码/MSE coded-frame。')];
+  return lines.filter(Boolean).join('\n');
 }
 
 async function analyzeTsInBrowser(){
@@ -884,7 +933,7 @@ async function analyzeTsInBrowser(){
     try{ ctl.abort(); }catch(e){}
     const u8=new Uint8Array(bytes);
     let o=0; for(const c of chunks){ u8.set(c,o); o+=c.length; }
-    const res=parseTsBuffer(u8, state.ts);
+    const res=parseTsBuffer(u8);
     const text=formatTsReport(res);
     $('tsReport').textContent=text;
     log('TS_ANALYZE done bytes='+bytes+' packets='+res.packets);
@@ -968,6 +1017,7 @@ $('avMode').onchange=()=>{ state.avMode=avMode(); log('AV_MODE='+state.avMode+' 
 $('fixAudioGap').onchange=()=>{ log('EXPERIMENT fixAudioTimestampGap='+$('fixAudioGap').checked); if(state.current) play(state.current); };
 $('nudgeWaiting').onchange=()=>log('EXPERIMENT nudgeOnWaiting='+$('nudgeWaiting').checked);
 $('probeCaps').onclick=probeCapabilities;
+$('probeEac3').onclick=probeEac3Capabilities;
 $('tsAnalyze').onclick=analyzeTsInBrowser;
 $('tsCapture').onclick=captureOnRouter;
 load();

@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 ROOT="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-OUT="${ROOT}/luci-app-iptvweb_0.2.2-rev4.6-r1_all.apk"
+OUT="${ROOT}/luci-app-iptvweb_0.2.2-rev4.4-r1_all.apk"
 STAGE="${ROOT}/.stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
@@ -12,7 +12,7 @@ cp -a "$ROOT/package/luci-app-iptvweb/files/." "$STAGE/"
 # The OpenWrt apk command in 25.12 includes apk mkpkg in current builds.
 apk mkpkg \
   --info name:luci-app-iptvweb \
-  --info version:0.2.0-r1 \
+  --info version:0.2.2-r1 \
   --info arch:all \
   --info license:MIT \
   --info description:"Lightweight LuCI IPTV web player using M3U and udpxy" \
