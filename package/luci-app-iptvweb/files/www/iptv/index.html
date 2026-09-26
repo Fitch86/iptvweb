@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.7</title>
+<title>OpenWrt IPTV rev4.10</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.8-preview iOS Safari + E-AC-3</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.10 Safari MSE fallback</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,8 +74,8 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.8-preview：普通频道优先保证 iOS 17.1+ Safari；iOS Safari 使用 ManagedMediaSource + live 模式，其他浏览器保持原播放路径。北京4K/内蒙古等特殊音视频编码不作为本版兼容目标。
-        核心播放参数保持 isLive=false、stash 384KB、fixAudioTimestampGap 默认关。
+        rev4.10：iOS Safari 普通频道先走 A/V；若 mpegts.js 报 MSE 错误，则只回退一次到 Video-only（hasAudio=false）。其他浏览器保持原播放路径。北京4K/内蒙古等特殊音视频编码不作为本版兼容目标。
+        Safari 初始 A/V；仅在检测到 mpegts.js MSE 错误后动态回退一次到 Video-only。Safari 使用 ManagedMediaSource + isLive=true；其他浏览器保持 isLive=false。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.8-preview';
+const REV='4.10';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -112,7 +112,7 @@ const state={
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
-  diagTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null
+  diagTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0
 };
 
 const $=id=>document.getElementById(id);
@@ -231,6 +231,7 @@ function startDiagTimer(seq){
 function stopPlayer(){
   if(state.analyzeCtl){ try{ state.analyzeCtl.abort(); }catch(e){} state.analyzeCtl=null; }
   if(state.startTimer){ clearTimeout(state.startTimer); state.startTimer=0; }
+  if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
   stopDiagTimers();
   if(state.player){
     try{ state.player.pause(); }catch(e){}
@@ -399,7 +400,7 @@ function updateDiag(){
     '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
     '【Chrome计数】 '+chromeCounters(v)+'\n'+
     '【MSE】 '+mseDump()+'\n'+
-    '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive=false stash=384KB\n'+
+    '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive='+(isIOSSafari()?'true':'false')+' stash=384KB\n'+
     '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+v.paused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
     '【错误】 '+(state.lastErrorText||'-')+'\n'+
     '【mpegts】 speed='+(state.stats.speed??'-')+' KB/s loader='+(state.stats.loaderType??'-');
@@ -486,6 +487,53 @@ function isIOSSafari(){
   return ios && webkit;
 }
 
+function safariMseFallbackToVideo(ch, url, seq, failedPlayer){
+  if(seq!==state.seq || !isIOSSafari() || state.safariFallbackTried) return;
+  if(state.player!==failedPlayer) return;
+  state.safariFallbackTried=true;
+  state.safariFallbackTimer=0;
+  log('SAFARI_MSE_FALLBACK: A/V MSE 失败，开始一次性 Video-only 回退');
+  setStatus('Safari MSE失败 → 回退 Video-only');
+  stopDiagTimers();
+  try{ failedPlayer.pause(); }catch(e){}
+  try{ failedPlayer.unload(); }catch(e){ log('FALLBACK unload error '+e.message); }
+  try{ failedPlayer.detachMediaElement(); }catch(e){ log('FALLBACK detach error '+e.message); }
+  try{ failedPlayer.destroy(); }catch(e){ log('FALLBACK destroy error '+e.message); }
+  if(state.player===failedPlayer) state.player=null;
+  const v=$('video');
+  try{ v.pause(); }catch(e){}
+  try{ v.removeAttribute('src'); v.load(); }catch(e){ log('FALLBACK video reset error '+e.message); }
+  state.playIssuedAt=0;
+  state.firstFrameAt=0;
+  state.firstPlayingAt=0;
+  state.waitingStart=0;
+  state.stallStart=0;
+  state.waitingCount=0;
+  state.stallCount=0;
+  state.lastProgressWall=performance.now();
+  state.lastProgressTime=0;
+  state.playingSince=0;
+  state.mediaInfo=null;
+  state.lastErrorText='';
+  state.audioDecodeError=false;
+  state.classification='FALLBACK';
+  state.classificationReason='Safari A/V MSE error → Video-only';
+  state.avMode='video-fallback';
+  log('SAFARI_MSE_FALLBACK: createPlayer mode=video, hasAudio=false');
+  createPlayer(ch, url, seq, 'video');
+}
+
+function scheduleSafariMseFallback(ch, url, seq, failedPlayer, details, type){
+  if(!isIOSSafari() || state.safariFallbackTried) return;
+  if(state.avMode!=='av' || state.player!==failedPlayer) return;
+  const text=String(details||type||'');
+  const isMse=/MSE|mse/i.test(text) || text===String(mpegts.ErrorDetails && mpegts.ErrorDetails.MEDIA_MSE_ERROR || 'MEDIA_MSE_ERROR');
+  if(!isMse) return;
+  if(state.safariFallbackTimer) return;
+  log('SAFARI_MSE_FALLBACK: detected mpegts ERROR '+text+'; 600ms 后回退');
+  state.safariFallbackTimer=setTimeout(()=>safariMseFallbackToVideo(ch,url,seq,failedPlayer),600);
+}
+
 function createPlayer(ch, url, seq, mode){
   if(seq!==state.seq) return;
   const v=$('video');
@@ -517,6 +565,7 @@ function createPlayer(ch, url, seq, mode){
     state.lastErrorText=String(details||type);
     if(/audio/i.test(String(details||'')+' '+JSON.stringify(info||{}))) state.audioDecodeError=true;
     log('mpegts.ERROR type='+type+' details='+details+' info='+JSON.stringify(info||{}));
+    scheduleSafariMseFallback(ch,url,seq,p,details,type);
     setStatus('播放错误：'+details);
     updateDiag();
   });
@@ -527,7 +576,7 @@ function createPlayer(ch, url, seq, mode){
     log('MSE after MEDIA_INFO '+mseDump());
     const vc=info&&info.videoCodec?info.videoCodec:'';
     const ac=info&&info.audioCodec?info.audioCodec:'';
-    setStatus((mode==='video'?'Video-only · ':mode==='muted'?'Muted-AV · ':'A/V · ')+(vc||'')+(ac?' · '+ac:''));
+    setStatus((mode==='video'?(state.safariFallbackTried?'Safari回退 Video-only · ':'Video-only · '):mode==='muted'?'Muted-AV · ':'A/V · ')+(vc||'')+(ac?' · '+ac:''));
     updateDiag();
   });
   ['LOADING_COMPLETE','RECOVERED_EARLY_EOF','STATISTICS_INFO'].forEach(name=>{
@@ -581,6 +630,8 @@ function resetPlayState(){
   state.timeline=[]; state.lastFrame=null;
   state.classification='STARTING'; state.classificationReason='';
   state.userPaused=false; state.stopping=false; state.nudgedThisPlay=false;
+  state.safariFallbackTried=false;
+  if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
   state.log=[]; $('log').textContent='';
 }
 
@@ -599,7 +650,7 @@ function play(ch){
   state.avMode=avMode();
   log('PLAY '+ch.name);
   log('URL '+url);
-  log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' rev='+REV);
+  log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
   if(!window.mpegts || !mpegts.isSupported()){
     setStatus('浏览器不支持 MSE MPEG-TS / mpegts.js 未安装');
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);
