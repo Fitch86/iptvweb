@@ -1,4 +1,4 @@
-# luci-app-iptvweb 0.2.2-rev4.10
+# luci-app-iptvweb 0.2.2-rev4.11
 
 本版目标：只解决**普通 IPTV 频道的 iOS Safari 播放**，不再继续针对北京卫视4K、内蒙古等特殊编码频道做兼容性优化。
 
@@ -11,7 +11,7 @@
 官方 mpegts.js 文档确认：iOS Safari 17.1+ 通过 ManagedMediaSource 支持 MPEG-TS 播放；同时 v1.8.x 已支持 MPEG-TS MP3/AC-3/E-AC-3 等音频解析。
 
 
-## rev4.10 实验逻辑
+## rev4.11 实验逻辑
 
 - iOS/iPadOS Safari 普通频道初始保持完整 A/V demux。
 - 只有 mpegts.js 报告 MSE 错误时，才销毁当前 A/V player，并重新建立一次 `hasAudio=false` 的 Video-only player。

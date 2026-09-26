@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.10';
+const REV='4.11';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -487,6 +487,187 @@ function isIOSSafari(){
   return ios && webkit;
 }
 
+
+// Safari Video-only fallback: filter MPEG-TS before mpegts.js sees it.
+// We keep PAT/PMT/PCR/video packets, rewrite PMT to remove audio ES entries,
+// and drop all other elementary-stream packets. This is intentionally a
+// browser-side custom loader experiment; the normal A/V path is untouched.
+function makeSafariVideoOnlyLoader(){
+  const Base=mpegts.BaseLoader;
+  if(!Base) throw new Error('mpegts.BaseLoader unavailable');
+  const K=Base;
+  class SafariVideoOnlyLoader extends K {
+    constructor(seekHandler, config){
+      super('SafariVideoOnlyLoader');
+      this._seekHandler=seekHandler; this._config=config||{};
+      this._status=0; this._needStash=false; this._aborter=null;
+      this._buffer=new Uint8Array(0); this._byteStart=0; this._outBytes=0;
+      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._pcrPid=null;
+      this._sectionBuf=new Map(); this._sectionNeed=new Map(); this._sectionType=new Map();
+      this._started=false; this._closed=false;
+    }
+    open(dataSource, range){
+      this._status=1; this._dataSource=dataSource; this._range=range||{};
+      const url=dataSource.url;
+      const headers=new Headers();
+      try{
+        const h=(this._config&&this._config.headers)||{};
+        Object.keys(h).forEach(k=>headers.set(k,h[k]));
+      }catch(e){}
+      if(range && (range.from!=null || range.to!=null)){
+        const from=range.from==null?0:range.from;
+        const to=range.to==null?'':range.to;
+        headers.set('Range','bytes='+from+'-'+to);
+      }
+      this._aborter=new AbortController();
+      fetch(url,{headers,signal:this._aborter.signal,cache:'no-store'}).then(async r=>{
+        if(!r.ok && r.status!==206) throw new Error('HTTP '+r.status);
+        this._status=2;
+        if(!r.body) throw new Error('ReadableStream unavailable');
+        const reader=r.body.getReader();
+        let pos=(range&&range.from!=null)?range.from:0;
+        while(!this._closed){
+          const q=await reader.read();
+          if(q.done) break;
+          if(!q.value || !q.value.length) continue;
+          const out=this._filterChunk(q.value);
+          if(out.length){
+            const ab=out.buffer.slice(out.byteOffset,out.byteOffset+out.byteLength);
+            this._outBytes+=out.byteLength;
+            if(this.onDataArrival) this.onDataArrival(ab,pos,this._outBytes);
+            pos+=out.byteLength;
+          }
+        }
+        if(this._closed) return;
+        this._status=4;
+        if(this.onComplete) this.onComplete((range&&range.from!=null)?range.from:0,pos-1);
+      }).catch(e=>{
+        if(this._closed || (e&&e.name==='AbortError')) return;
+        this._status=3;
+        if(this.onError) this.onError('Exception',{code:-1,msg:String(e&&e.message||e)});
+      });
+    }
+    abort(){ try{ if(this._aborter) this._aborter.abort(); }catch(e){} this._status=0; }
+    destroy(){ this._closed=true; this.abort(); this._buffer=new Uint8Array(0); }
+    isWorking(){ return this._status===1 || this._status===2; }
+    get status(){ return this._status; }
+    get needStashBuffer(){ return this._needStash; }
+    _appendBuffer(a){
+      if(!this._buffer.length) this._buffer=a.slice();
+      else { const x=new Uint8Array(this._buffer.length+a.length); x.set(this._buffer); x.set(a,this._buffer.length); this._buffer=x; }
+    }
+    _filterChunk(chunk){
+      this._appendBuffer(chunk);
+      const packets=[]; let off=0;
+      while(this._buffer.length-off>=188){
+        if(this._buffer[off]!==0x47){
+          const n=this._buffer.indexOf(0x47,off+1);
+          if(n<0){ off=this._buffer.length; break; }
+          off=n;
+          if(this._buffer.length-off<188) break;
+        }
+        if(this._buffer.length-off<188) break;
+        let ok=true;
+        for(let i=1;i<4;i++){ if(this._buffer[off+i]===undefined){ok=false;break;} }
+        if(!ok) break;
+        packets.push(this._buffer.slice(off,off+188)); off+=188;
+      }
+      this._buffer=this._buffer.slice(off);
+      const out=[];
+      for(const pkt of packets){
+        const pid=((pkt[1]&0x1f)<<8)|pkt[2];
+        if(pid===0){ this._inspectPAT(pkt); out.push(pkt); continue; }
+        if(this._pmtPid!=null && pid===this._pmtPid){
+          const rp=this._rewritePMTPacket(pkt);
+          if(rp) out.push(rp);
+          continue;
+        }
+        if(this._videoPid!=null && pid===this._videoPid){ out.push(pkt); continue; }
+        if(this._pcrPid!=null && pid===this._pcrPid){ out.push(pkt); continue; }
+      }
+      const total=out.length*188; const ret=new Uint8Array(total);
+      for(let i=0;i<out.length;i++) ret.set(out[i],i*188);
+      return ret;
+    }
+    _payload(pkt){
+      const afc=(pkt[3]>>4)&3;
+      let o=4;
+      if(afc===0 || afc===2) return null;
+      if(afc===3){ const n=pkt[4]; o=5+n; if(o>188) return null; }
+      return pkt.slice(o);
+    }
+    _inspectPAT(pkt){
+      if(!(pkt[1]&0x40)) return;
+      const pl=this._payload(pkt); if(!pl||pl.length<9) return;
+      const ptr=pl[0]; const s=1+ptr;
+      if(pl.length<s+8 || pl[s]!==0x00) return;
+      const sectionLen=((pl[s+1]&0x0f)<<8)|pl[s+2];
+      const end=Math.min(pl.length,s+3+sectionLen);
+      for(let i=s+8;i+3<end-4;i+=4){
+        const pn=(pl[i]<<8)|pl[i+1], pid=((pl[i+2]&0x1f)<<8)|pl[i+3];
+        if(pn!==0){ this._pmtPid=pid; break; }
+      }
+    }
+    _sectionFromPacket(pkt){
+      const pl=this._payload(pkt); if(!pl) return null;
+      const pusi=!!(pkt[1]&0x40); const pid=((pkt[1]&0x1f)<<8)|pkt[2];
+      let data=pl;
+      if(pusi){ const ptr=data[0]||0; if(ptr+1>data.length) return null; data=data.slice(1+ptr); }
+      if(!data.length) return null;
+      return {pid,data,pusi};
+    }
+    _rewritePMTPacket(pkt){
+      const x=this._sectionFromPacket(pkt); if(!x) return pkt;
+      if(!x.pusi) return null; // Current IPTV PMTs fit one TS packet; never leak an unfiltered continuation.
+      const d=x.data;
+      if(d.length<12 || d[0]!==0x02) return pkt;
+      const sl=((d[1]&0x0f)<<8)|d[2];
+      const fullLen=3+sl;
+      if(fullLen>d.length) return pkt;
+      const section=d.slice(0,fullLen);
+      const pcr=((section[8]&0x1f)<<8)|section[9];
+      this._pcrPid=pcr;
+      const pil=((section[10]&0x0f)<<8)|section[11];
+      let i=12+pil; if(i>section.length-4) return pkt;
+      const es=[];
+      while(i<section.length-4){
+        if(i+5>section.length-4) break;
+        const st=section[i], ep=((section[i+1]&0x1f)<<8)|section[i+2];
+        const eil=((section[i+3]&0x0f)<<8)|section[i+4];
+        if(i+5+eil>section.length-4) break;
+        const keep=(st===0x1b || st===0x24 || st===0x02 || st===0x10 || st===0x1f || st===0x20);
+        if(keep){ es.push(section.slice(i,i+5+eil)); if(this._videoPid==null) this._videoPid=ep; }
+        i+=5+eil;
+      }
+      if(this._videoPid==null || !es.length) return pkt;
+      const body=section.slice(0,12+pil);
+      const newSection=new Uint8Array(12+pil+es.reduce((n,a)=>n+a.length,0)+4);
+      newSection.set(body,0); let o=body.length; for(const e of es){newSection.set(e,o);o+=e.length;}
+      const newLen=newSection.length-3;
+      newSection[1]=(newSection[1]&0xf0)|((newLen>>8)&0x0f); newSection[2]=newLen&0xff;
+      const crc=this._crc32(newSection.slice(0,newSection.length-4));
+      newSection[newSection.length-4]=(crc>>>24)&255; newSection[newSection.length-3]=(crc>>>16)&255;
+      newSection[newSection.length-2]=(crc>>>8)&255; newSection[newSection.length-1]=crc&255;
+      // Repack a one-packet PMT. Preserve continuity counter and adaptation field.
+      const np=pkt.slice(); const afc=(np[3]>>4)&3; let po=4;
+      if(afc===3){po=5+(np[4]||0);} else if(afc!==1) return pkt;
+      const avail=188-po; const payload=new Uint8Array(avail); payload.fill(0xff); payload[0]=0; payload.set(newSection,1);
+      np.set(payload,po); this._sectionVideoLogged=true;
+      if(!this._loggedFilter){ this._loggedFilter=true; setTimeout(()=>log('SAFARI_TS_FILTER: PMT rewritten; video PID='+this._videoPid+' PCR PID='+this._pcrPid+' audio ES removed'),0); }
+      return np;
+    }
+    _crc32(data){
+      let crc=0xffffffff;
+      for(let i=0;i<data.length;i++){
+        crc^=data[i]<<24;
+        for(let b=0;b<8;b++) crc=(crc&0x80000000)?((crc<<1)^0x04c11db7)>>>0:(crc<<1)>>>0;
+      }
+      return crc>>>0;
+    }
+  }
+  return SafariVideoOnlyLoader;
+}
+
 function safariMseFallbackToVideo(ch, url, seq, failedPlayer){
   if(seq!==state.seq || !isIOSSafari() || state.safariFallbackTried) return;
   if(state.player!==failedPlayer) return;
@@ -519,8 +700,12 @@ function safariMseFallbackToVideo(ch, url, seq, failedPlayer){
   state.classification='FALLBACK';
   state.classificationReason='Safari A/V MSE error → Video-only';
   state.avMode='video-fallback';
-  log('SAFARI_MSE_FALLBACK: createPlayer mode=video, hasAudio=false');
-  createPlayer(ch, url, seq, 'video');
+  log('SAFARI_MSE_FALLBACK: old player fully destroyed; waiting 250ms before Video-only create');
+  setTimeout(()=>{
+    if(seq!==state.seq || state.safariFallbackTried!==true || state.player) return;
+    log('SAFARI_MSE_FALLBACK: createPlayer mode=video, hasAudio=false + TS filter');
+    createPlayer(ch, url, seq, 'video');
+  },250);
 }
 
 function scheduleSafariMseFallback(ch, url, seq, failedPlayer, details, type){
@@ -544,7 +729,13 @@ function createPlayer(ch, url, seq, mode){
   // iPhone/iPad Safari uses ManagedMediaSource. Marking the source live is important
   // for Apple's live-MSE path; keep the proven isLive=false path on other browsers.
   const ds={type:'mpegts', url:url, isLive:iosSafari};
-  if(mode==='video') ds.hasAudio=false;
+  if(mode==='video') {
+    ds.hasAudio=false;
+    if(iosSafari){
+      try{ ds.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled'); }
+      catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
+    }
+  }
   const config=playerConfig();
   log('CONFIG '+JSON.stringify(config));
   log('MediaDataSource '+JSON.stringify(ds));
