@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.12</title>
+<title>OpenWrt IPTV rev4.10</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.12 Safari MSE fallback + TS filter</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.13 Safari Video-only stable</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,8 +74,8 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.12：iOS Safari 普通频道先走 A/V；若 mpegts.js 报 MSE 错误，则只回退一次到 Video-only（Config.customLoader + hasAudio=false）。其他浏览器保持原播放路径。北京4K/内蒙古等特殊音视频编码不作为本版兼容目标。
-        Safari 初始 A/V；仅在检测到 mpegts.js MSE 错误后动态回退一次到 Video-only。Safari 使用 ManagedMediaSource + isLive=true；其他浏览器保持 isLive=false。
+        rev4.13：iOS Safari 普通频道先走 A/V；若 mpegts.js 报 MSE 错误，则只回退一次到真正的 TS Video-only。其他浏览器保持原播放路径。北京4K/内蒙古等特殊音视频编码不作为本版兼容目标。
+        Safari 初始 A/V；仅在检测到 mpegts.js MSE 错误后动态回退一次到 Video-only；回退后不再二次回退。Safari 使用 ManagedMediaSource + isLive=true；其他浏览器保持 isLive=false。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.11';
+const REV='4.13';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -112,6 +112,7 @@ const state={
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
+  stableTimer:0, stableSince:0, stableLogged:false,
   diagTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0
 };
 
@@ -220,6 +221,7 @@ function stopDiagTimers(){
   if(state.stuckTimer){ clearInterval(state.stuckTimer); state.stuckTimer=0; }
   if(state.timelineTimer){ clearInterval(state.timelineTimer); state.timelineTimer=0; }
   if(state.diagTimer){ clearInterval(state.diagTimer); state.diagTimer=0; }
+  if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
 }
 function startDiagTimer(seq){
   if(state.diagTimer) clearInterval(state.diagTimer);
@@ -392,9 +394,13 @@ function updateDiag(){
   const ahead=bufferAhead(v), cls=classifyTimeline();
   const mi=state.mediaInfo||{};
   const frame=state.lastFrame||{};
+  const videoOnly=state.avMode==='video-fallback';
+  const shownVideo=mi.videoCodec||'-';
+  const shownAudio=videoOnly?'none':(mi.audioCodec||'-');
+  const shownAudioState=videoOnly?'no':(mi.hasAudio?'yes':'?');
   $('diag').textContent=
     '【状态】 '+cls+(state.classificationReason?' | '+state.classificationReason:'')+'\n'+
-    '【编码】 V='+(mi.videoCodec||'-')+' / A='+(mi.audioCodec||'-')+' | '+(mi.width||v.videoWidth||'-')+'x'+(mi.height||v.videoHeight||'-')+' @ '+(mi.fps||'-')+'fps | audio='+(mi.hasAudio?'yes':'?')+' '+(mi.audioSampleRate||'-')+'Hz/'+(mi.audioChannelCount||'-')+'ch\n'+
+    '【编码】 V='+shownVideo+' / A='+shownAudio+' | '+(mi.width||v.videoWidth||'-')+'x'+(mi.height||v.videoHeight||'-')+' @ '+(mi.fps||'-')+'fps | audio='+shownAudioState+' '+(videoOnly?'-':(mi.audioSampleRate||'-')+'Hz/'+(mi.audioChannelCount||'-')+'ch')+'\n'+
     '【时间线】 current='+(isFinite(v.currentTime)?v.currentTime.toFixed(3):'NaN')+' | buffered='+b+' | seekable='+s+' | ahead='+(isFinite(ahead)?ahead.toFixed(3):'-')+'s\n'+
     '【显微镜】 mediaTime='+(frame.mediaTime!=null?Number(frame.mediaTime).toFixed(3):'-')+' | presentedFrames='+(frame.presentedFrames??'-')+' | '+timelineSummary()+'\n'+
     '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
@@ -729,13 +735,13 @@ function createPlayer(ch, url, seq, mode){
   // iPhone/iPad Safari uses ManagedMediaSource. Marking the source live is important
   // for Apple's live-MSE path; keep the proven isLive=false path on other browsers.
   const ds={type:'mpegts', url:url, isLive:iosSafari};
-  const config=playerConfig();
   if(mode==='video') {
     ds.hasAudio=false;
-    if(iosSafari){
-      try{ config.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader'); }
-      catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
-    }
+  }
+  const config=playerConfig();
+  if(mode==='video' && iosSafari){
+    try{ config.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader'); }
+    catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
   }
   log('CONFIG '+JSON.stringify(config));
   log('MediaDataSource '+JSON.stringify(ds));
@@ -796,6 +802,19 @@ function createPlayer(ch, url, seq, mode){
   p.attachMediaElement(v); log('attachMediaElement');
   p.load(); log('player.load()');
   startStuckMonitor(seq); startDiagTimer(seq);
+  const startStableMonitor=()=>{
+    if(!isIOSSafari() || mode!=='video') return;
+    if(state.stableTimer) clearTimeout(state.stableTimer);
+    state.stableSince=performance.now(); state.stableLogged=false;
+    state.stableTimer=setTimeout(()=>{
+      if(seq!==state.seq || state.player!==p || v.paused || v.readyState<2) return;
+      state.stableTimer=0; state.stableLogged=true;
+      log('SAFARI_VIDEO_ONLY_STABLE: continuous playback >=30s');
+      setStatus('Safari Video-only · 稳定播放 ≥30s');
+      updateDiag();
+    },30000);
+  };
+  v.addEventListener('playing', startStableMonitor, {once:true});
   const start=()=>{
     if(seq!==state.seq || state.playIssuedAt) return;
     state.startTimer=0;
@@ -822,6 +841,8 @@ function resetPlayState(){
   state.classification='STARTING'; state.classificationReason='';
   state.userPaused=false; state.stopping=false; state.nudgedThisPlay=false;
   state.safariFallbackTried=false;
+  state.stableSince=0; state.stableLogged=false;
+  if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
   state.log=[]; $('log').textContent='';
 }
