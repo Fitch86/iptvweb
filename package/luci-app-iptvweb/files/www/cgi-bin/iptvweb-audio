@@ -1,0 +1,130 @@
+#!/usr/bin/lua
+-- rev4.16: extract MPEG-1 Layer II/III audio (primarily MP3 stream_type=0x03)
+-- from an IPTV MPEG-TS/udpxy stream and expose it as a native audio/mpeg stream.
+-- This is intentionally a small experiment: no transcoding and no MSE audio.
+
+local function qget(name)
+  local q=os.getenv('QUERY_STRING') or ''
+  for part in q:gmatch('[^&]+') do
+    local k,v=part:match('^([^=]*)=(.*)$')
+    if k==name then
+      v=(v or ''):gsub('+',' '):gsub('%%(%x%x)', function(h) return string.char(tonumber(h,16)) end)
+      return v
+    end
+  end
+  return nil
+end
+
+local group=qget('group') or ''
+local port=qget('port') or ''
+if not group:match('^%d+%.%d+%.%d+%.%d+$') or not port:match('^%d+$') then os.exit(1) end
+local a,b,c,d=group:match('^(%d+)%.(%d+)%.(%d+)%.(%d+)$')
+a,b,c,d=tonumber(a),tonumber(b),tonumber(c),tonumber(d)
+if not (a>=224 and a<=239 and b<=255 and c<=255 and d<=255) then os.exit(1) end
+local pton=tonumber(port); if pton<1 or pton>65535 then os.exit(1) end
+
+local udpxy
+local f=io.popen("uci -q get iptvweb.main.udpxy 2>/dev/null", 'r')
+if f then udpxy=f:read('*l'); f:close() end
+if not udpxy or not udpxy:match('^[%w%.%-]+:%d+$') then os.exit(1) end
+local url='http://'..udpxy..'/udp/'..group..':'..port
+local pipe=io.popen("uclient-fetch -q -O - '"..url.."' 2>/dev/null", 'r')
+if not pipe then os.exit(1) end
+
+io.write('Content-Type: audio/mpeg\r\nCache-Control: no-store, no-cache, must-revalidate\r\nPragma: no-cache\r\nX-Content-Type-Options: nosniff\r\nConnection: keep-alive\r\n\r\n')
+io.flush()
+
+local buf=''
+local pmt_pid=nil
+local audio_pid=nil
+local audio_type=nil
+local pesbuf=nil
+local last_cc={}
+
+local function u8(s,i) return s:byte(i) end
+local function be16(s,i) return u8(s,i)*256+u8(s,i+1) end
+
+local function parse_pat(pkt, payload, pusi)
+  if not pusi or #payload<2 then return end
+  local ptr=u8(payload,1) or 0
+  local i=2+ptr
+  if i+7>#payload or u8(payload,i)~=0x00 then return end
+  local sec=((u8(payload,i+1)&0x0f)*256)+u8(payload,i+2)
+  local e=math.min(#payload,i+3+sec-4)
+  i=i+8
+  while i+3<=e do
+    local pn=be16(payload,i); local pid=((u8(payload,i+2)&0x1f)*256)+u8(payload,i+3)
+    if pn~=0 then pmt_pid=pid; return end
+    i=i+4
+  end
+end
+
+local function parse_pmt(payload, pusi)
+  if not pusi or #payload<3 then return end
+  local ptr=u8(payload,1) or 0; local i=2+ptr
+  if i+11>#payload or u8(payload,i)~=0x02 then return end
+  local sec=((u8(payload,i+1)&0x0f)*256)+u8(payload,i+2)
+  local endsec=math.min(#payload,i+3+sec-4)
+  local pil=((u8(payload,i+10)&0x0f)*256)+u8(payload,i+11)
+  i=i+12+pil
+  while i+4<=endsec do
+    local st=u8(payload,i); local pid=((u8(payload,i+1)&0x1f)*256)+u8(payload,i+2)
+    local eil=((u8(payload,i+3)&0x0f)*256)+u8(payload,i+4)
+    if i+5+eil>endsec then break end
+    if st==0x03 or st==0x04 then audio_pid=pid; audio_type=st; return end
+    i=i+5+eil
+  end
+end
+
+local function pes_payload(data)
+  if #data<9 or data:sub(1,3)~='\0\0\1' then return '' end
+  local hlen=u8(data,9) or 0
+  local start=10+hlen
+  if start>#data then return '' end
+  return data:sub(start)
+end
+
+local function emit(s)
+  if s and #s>0 then io.write(s); io.flush() end
+end
+
+local function process_packet(pkt)
+  if #pkt~=188 or u8(pkt,1)~=0x47 then return end
+  local pusi=(u8(pkt,2)&0x40)~=0
+  local pid=((u8(pkt,2)&0x1f)*256)+u8(pkt,3)
+  local afc=(u8(pkt,4)&0x30)/16
+  local pos=5
+  if afc==2 or afc==3 then pos=6+(u8(pkt,5) or 0) end
+  if afc==0 or afc==2 or pos>188 then return end
+  local payload=pkt:sub(pos)
+  if pid==0 then parse_pat(pkt,payload,pusi); return end
+  if pmt_pid and pid==pmt_pid then parse_pmt(payload,pusi); return end
+  if not audio_pid or pid~=audio_pid then return end
+
+  if pusi then
+    -- Flush any completed previous PES. For MPEG audio, the PES payload itself
+    -- is a concatenation of complete MP3/Layer-II frames in normal IPTV streams.
+    pesbuf=pes_payload(payload)
+    emit(pesbuf)
+  else
+    if pesbuf then emit(payload) end
+  end
+end
+
+while true do
+  local chunk=pipe:read(65536)
+  if not chunk or #chunk==0 then break end
+  buf=buf..chunk
+  while #buf>=188 do
+    local pos=1
+    if u8(buf,1)~=0x47 then
+      local found=buf:find('\x47',2,true)
+      if not found then buf=buf:sub(-187); break end
+      buf=buf:sub(found)
+      if #buf<188 then break end
+    end
+    local pkt=buf:sub(1,188); buf=buf:sub(189)
+    process_packet(pkt)
+  end
+end
+pipe:close()

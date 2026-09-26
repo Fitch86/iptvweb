@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.10</title>
+<title>OpenWrt IPTV rev4.16</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.15 Safari Video-only status</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.16 Safari Video MSE + MP3 Audio experiment</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -50,8 +50,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
       <select id="avMode">
         <option value="av" selected>1. A/V 正常</option>
         <option value="video">2. Video-only (hasAudio=false)</option>
-        <option value="audio">3. Safari H.264 + MP3 实验</option>
-        <option value="muted">4. 保留音轨但静音</option>
+        <option value="muted">3. 保留音轨但静音</option>
       </select>
     </label>
     <label class="small"><input type="checkbox" id="fixAudioGap"> 实验 fixAudioTimestampGap</label>
@@ -68,6 +67,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
   <main>
     <div class="player">
       <video id="video" controls playsinline></video>
+      <audio id="audio" controls preload="none" style="display:none;width:100%;margin-top:6px"></audio>
       <div style="display:flex;gap:7px;margin:7px 0 0">
         <button id="recoverBtn" type="button" style="flex:1">▶ 播放 / 恢复</button>
         <button id="stopBtn2" type="button" style="flex:1" class="danger">⏹ 停止并断开</button>
@@ -75,8 +75,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.15：在 rev4.13 基础上仅修正 Safari Video-only 回退后的状态采集，不改变 TS 过滤和播放链。
-        Safari 初始 A/V；仅在检测到 mpegts.js MSE 错误后动态回退一次到 Video-only；回退后不再二次回退。Safari 使用 ManagedMediaSource + isLive=true；其他浏览器保持 isLive=false。
+        rev4.16：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only，同时启动独立原生 MP3 <audio>。音频由路由器 CGI 从原始 TS 中提取为 audio/mpeg，不进入 mpegts.js 的 MSE。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -102,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.15';
+const REV='4.16';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -111,6 +110,7 @@ const state={
   lastRecoveryAt:0, lastProgressWall:0, lastProgressTime:0, playingSince:0,
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
+  audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
@@ -150,6 +150,46 @@ function streamUrl(ch){
   }catch(e){}
   return new URL(ch.url, window.location.href).href;
 }
+
+function audioStreamUrl(ch){
+  try{
+    const u=new URL(ch.url, location.href);
+    const m=u.pathname.match(/^\/udp\/([^:]+):(\d+)$/);
+    if(m){
+      const proxy=new URL('/cgi-bin/iptvweb-audio', window.location.href);
+      proxy.searchParams.set('group', m[1]); proxy.searchParams.set('port', m[2]);
+      return proxy.href;
+    }
+  }catch(e){}
+  return '';
+}
+function stopIndependentAudio(){
+  const a=$('audio');
+  if(!a) return;
+  try{ a.pause(); }catch(e){}
+  try{ a.removeAttribute('src'); a.load(); }catch(e){}
+  state.audioUrl=''; state.audioStartedAt=0; state.audioError=''; state.audioPlaying=false;
+  a.style.display='none';
+}
+function startIndependentAudio(ch, seq){
+  if(!isIOSSafari() || seq!==state.seq) return;
+  const a=$('audio'); if(!a) return;
+  const url=audioStreamUrl(ch);
+  if(!url){ log('SAFARI_AUDIO: channel URL is not /udp/group:port; independent MP3 disabled'); return; }
+  stopIndependentAudio();
+  state.audioUrl=url; state.audioError=''; state.audioPlaying=false;
+  a.onplaying=()=>{ if(seq!==state.seq) return; state.audioPlaying=true; state.audioStartedAt=performance.now(); log('SAFARI_AUDIO: native MP3 playing'); updateDiag(); };
+  a.onwaiting=()=>{ if(seq===state.seq) log('SAFARI_AUDIO: native MP3 waiting'); };
+  a.onerror=()=>{ if(seq!==state.seq) return; state.audioError='HTMLAudioMediaError'; log('SAFARI_AUDIO: native MP3 error code='+(a.error&&a.error.code)); updateDiag(); };
+  a.onloadedmetadata=()=>{ if(seq===state.seq) log('SAFARI_AUDIO: metadata duration='+(isFinite(a.duration)?a.duration:'live')); };
+  a.src=url; a.style.display='block';
+  log('SAFARI_AUDIO: independent native <audio> URL='+url);
+  try{
+    const q=a.play();
+    if(q&&q.then) q.then(()=>log('SAFARI_AUDIO: audio.play() resolved')).catch(e=>log('SAFARI_AUDIO: audio.play() rejected '+e.name+': '+e.message));
+  }catch(e){ log('SAFARI_AUDIO: audio.play() threw '+e.name+': '+e.message); }
+}
+
 function renderGroups(){
   const html=state.groups.map(g=>{
     const list=state.items.filter(x=>x.group===g);
@@ -175,7 +215,7 @@ function log(msg){
   if(el){ el.textContent=state.log.join('\n'); el.scrollTop=el.scrollHeight; }
 }
 function setStatus(t){ $('status').textContent=t||''; }
-function avMode(){ const x=$('avMode') ? $('avMode').value : 'av'; return x==='video'?'video':(x==='audio'?'audio':(x==='muted'?'muted':'av')); }
+function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
 function rangeText(r){
   try{
     if(!r||!r.length) return '-';
@@ -233,6 +273,7 @@ function startDiagTimer(seq){
   }, 500);
 }
 function stopPlayer(){
+  stopIndependentAudio();
   if(state.analyzeCtl){ try{ state.analyzeCtl.abort(); }catch(e){} state.analyzeCtl=null; }
   if(state.startTimer){ clearTimeout(state.startTimer); state.startTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
@@ -397,7 +438,6 @@ function updateDiag(){
   const mi=state.mediaInfo||{};
   const frame=state.lastFrame||{};
   const videoOnly=state.avMode==='video-fallback';
-  const audioFallback=state.avMode==='audio-fallback';
   const shownVideo=mi.videoCodec||state.lastVideoCodec||'-';
   const shownAudio=videoOnly?'none':(mi.audioCodec||'-');
   const shownAudioState=videoOnly?'no':(mi.hasAudio?'yes':'?');
@@ -412,6 +452,7 @@ function updateDiag(){
     '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
     '【Chrome计数】 '+chromeCounters(v)+'\n'+
     '【MSE】 '+mseDump()+'\n'+
+    '【独立音频】 nativeMP3='+(state.audioUrl?'on':'off')+' playing='+(state.audioPlaying?'yes':'no')+' error='+(state.audioError||'-')+'\n'+
     '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive='+(isIOSSafari()?'true':'false')+' stash=384KB\n'+
     '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+effectivePaused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
     '【错误】 '+(state.lastErrorText||'-')+'\n'+
@@ -506,17 +547,17 @@ function isIOSSafari(){
 // We keep PAT/PMT/PCR/video packets, rewrite PMT to remove audio ES entries,
 // and drop all other elementary-stream packets. This is intentionally a
 // browser-side custom loader experiment; the normal A/V path is untouched.
-function makeSafariFilteredLoader(keepMp3){
+function makeSafariVideoOnlyLoader(){
   const Base=mpegts.BaseLoader;
   if(!Base) throw new Error('mpegts.BaseLoader unavailable');
   const K=Base;
   class SafariVideoOnlyLoader extends K {
     constructor(seekHandler, config){
-      super(keepMp3?'SafariH264Mp3Loader':'SafariVideoOnlyLoader');
+      super('SafariVideoOnlyLoader');
       this._seekHandler=seekHandler; this._config=config||{};
       this._status=0; this._needStash=false; this._aborter=null;
       this._buffer=new Uint8Array(0); this._byteStart=0; this._outBytes=0;
-      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._pcrPid=null; this._audioPids=new Set();
+      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._pcrPid=null;
       this._sectionBuf=new Map(); this._sectionNeed=new Map(); this._sectionType=new Map();
       this._started=false; this._closed=false;
     }
@@ -597,7 +638,6 @@ function makeSafariFilteredLoader(keepMp3){
           continue;
         }
         if(this._videoPid!=null && pid===this._videoPid){ out.push(pkt); continue; }
-        if(keepMp3 && this._audioPids.has(pid)){ out.push(pkt); continue; }
         if(this._pcrPid!=null && pid===this._pcrPid){ out.push(pkt); continue; }
       }
       const total=out.length*188; const ret=new Uint8Array(total);
@@ -650,10 +690,8 @@ function makeSafariFilteredLoader(keepMp3){
         const st=section[i], ep=((section[i+1]&0x1f)<<8)|section[i+2];
         const eil=((section[i+3]&0x0f)<<8)|section[i+4];
         if(i+5+eil>section.length-4) break;
-        const keepVideo=(st===0x1b || st===0x24 || st===0x02 || st===0x10 || st===0x1f || st===0x20);
-        const keepAudio=keepMp3 && st===0x03;
-        const keep=keepVideo || keepAudio;
-        if(keep){ es.push(section.slice(i,i+5+eil)); if(keepVideo && this._videoPid==null) this._videoPid=ep; if(keepAudio) this._audioPids.add(ep); }
+        const keep=(st===0x1b || st===0x24 || st===0x02 || st===0x10 || st===0x1f || st===0x20);
+        if(keep){ es.push(section.slice(i,i+5+eil)); if(this._videoPid==null) this._videoPid=ep; }
         i+=5+eil;
       }
       if(this._videoPid==null || !es.length) return pkt;
@@ -670,7 +708,7 @@ function makeSafariFilteredLoader(keepMp3){
       if(afc===3){po=5+(np[4]||0);} else if(afc!==1) return pkt;
       const avail=188-po; const payload=new Uint8Array(avail); payload.fill(0xff); payload[0]=0; payload.set(newSection,1);
       np.set(payload,po); this._sectionVideoLogged=true;
-      if(!this._loggedFilter){ this._loggedFilter=true; setTimeout(()=>log('SAFARI_TS_FILTER: PMT rewritten; video PID='+this._videoPid+' PCR PID='+this._pcrPid+(keepMp3?' MP3 PID='+Array.from(this._audioPids).join(','):' audio ES removed')),0); }
+      if(!this._loggedFilter){ this._loggedFilter=true; setTimeout(()=>log('SAFARI_TS_FILTER: PMT rewritten; video PID='+this._videoPid+' PCR PID='+this._pcrPid+' audio ES removed'),0); }
       return np;
     }
     _crc32(data){
@@ -685,7 +723,7 @@ function makeSafariFilteredLoader(keepMp3){
   return SafariVideoOnlyLoader;
 }
 
-function safariMseFallbackToAudio(ch, url, seq, failedPlayer){
+function safariMseFallbackToVideo(ch, url, seq, failedPlayer){
   if(seq!==state.seq || !isIOSSafari() || state.safariFallbackTried) return;
   if(state.player!==failedPlayer) return;
   state.safariFallbackTried=true;
@@ -715,13 +753,14 @@ function safariMseFallbackToAudio(ch, url, seq, failedPlayer){
   state.lastErrorText='';
   state.audioDecodeError=false;
   state.classification='FALLBACK';
-  state.classificationReason='Safari A/V MSE error → H.264 + MP3 fallback';
-  state.avMode='audio-fallback';
-  log('SAFARI_MSE_FALLBACK: old player fully destroyed; waiting 250ms before H.264+MP3 create');
+  state.classificationReason='Safari A/V MSE error → Video-only';
+  state.avMode='video-fallback';
+  log('SAFARI_MSE_FALLBACK: old player fully destroyed; waiting 250ms before Video-only create');
   setTimeout(()=>{
     if(seq!==state.seq || state.safariFallbackTried!==true || state.player) return;
-    log('SAFARI_MSE_FALLBACK: createPlayer mode=audio, keep H.264 + MP3 + TS filter');
-    createPlayer(ch, url, seq, 'audio');
+    log('SAFARI_MSE_FALLBACK: createPlayer mode=video, hasAudio=false + TS filter');
+    createPlayer(ch, url, seq, 'video');
+    setTimeout(()=>startIndependentAudio(ch, seq), 350);
   },250);
 }
 
@@ -733,7 +772,7 @@ function scheduleSafariMseFallback(ch, url, seq, failedPlayer, details, type){
   if(!isMse) return;
   if(state.safariFallbackTimer) return;
   log('SAFARI_MSE_FALLBACK: detected mpegts ERROR '+text+'; 600ms 后回退');
-  state.safariFallbackTimer=setTimeout(()=>safariMseFallbackToAudio(ch,url,seq,failedPlayer),600);
+  state.safariFallbackTimer=setTimeout(()=>safariMseFallbackToVideo(ch,url,seq,failedPlayer),600);
 }
 
 function createPlayer(ch, url, seq, mode){
@@ -748,12 +787,11 @@ function createPlayer(ch, url, seq, mode){
   const ds={type:'mpegts', url:url, isLive:iosSafari};
   if(mode==='video') {
     ds.hasAudio=false;
-  } else if(mode==='audio') {
-    log('SAFARI_AUDIO_FALLBACK: H.264 + MP3 demux enabled; hasAudio remains default');
   }
   const config=playerConfig();
-  if((mode==='video' || mode==='audio') && iosSafari){
-    try{ config.customLoader=makeSafariFilteredLoader(mode==='audio'); log(mode==='audio' ? 'SAFARI_TS_FILTER: custom MPEG-TS H.264+MP3 loader enabled via Config.customLoader' : 'SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader'); }
+  if(mode==='video' && iosSafari){
+    try{ config.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
+      if(mode==='video') log('SAFARI_AUDIO: video MSE path is audio-free; independent native MP3 will be started by fallback'); }
     catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
   }
   log('CONFIG '+JSON.stringify(config));
@@ -857,6 +895,7 @@ function resetPlayState(){
   state.classification='STARTING'; state.classificationReason='';
   state.userPaused=false; state.stopping=false; state.nudgedThisPlay=false;
   state.safariFallbackTried=false;
+  state.audioUrl=''; state.audioStartedAt=0; state.audioError=''; state.audioPlaying=false;
   state.stableSince=0; state.stableLogged=false;
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
@@ -888,7 +927,8 @@ function play(ch){
 }
 
 function stopPlayback(){
-  state.stopping=true; state.userPaused=false;
+  state.stopping=true;
+  stopIndependentAudio(); state.userPaused=false;
   log('STOP: 用户请求停止并断开流');
   stopDiagTimers();
   const p=state.player, v=$('video');

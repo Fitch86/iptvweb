@@ -25,6 +25,7 @@ cp -f "$FILES/usr/bin/iptvweb-fetch" /usr/bin/iptvweb-fetch
 cp -f "$FILES/www/iptv/index.html" /www/iptv/index.html
 cp -f "$FILES/www/cgi-bin/iptvweb-m3u" /www/cgi-bin/iptvweb-m3u
 cp -f "$FILES/www/cgi-bin/iptvweb-stream" /www/cgi-bin/iptvweb-stream
+cp -f "$FILES/www/cgi-bin/iptvweb-audio" /www/cgi-bin/iptvweb-audio
 cp -f "$FILES/www/cgi-bin/iptvweb-capture" /www/cgi-bin/iptvweb-capture
 cp -f "$FILES/usr/share/luci/menu.d/luci-app-iptvweb.json" /usr/share/luci/menu.d/luci-app-iptvweb.json
 cp -f "$FILES/usr/share/rpcd/acl.d/luci-app-iptvweb.json" /usr/share/rpcd/acl.d/luci-app-iptvweb.json
@@ -66,18 +67,19 @@ else
     fi
 fi
 
-chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-capture
+chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-audio /www/cgi-bin/iptvweb-capture
 [ -x /www/cgi-bin/iptvweb-stream ] || { echo "ERROR: iptvweb-stream was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-m3u ] || { echo "ERROR: iptvweb-m3u was not installed" >&2; exit 1; }
+[ -x /www/cgi-bin/iptvweb-audio ] || { echo "ERROR: iptvweb-audio was not installed" >&2; exit 1; }
 
 /etc/init.d/rpcd restart 2>/dev/null || true
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.10."
+echo "Installed 0.2.2-rev4.16."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.8-preview: iOS Safari ManagedMediaSource/live path; M3U config is preserved;"
+echo "rev4.16: Safari H.264 video MSE + independent native MP3 audio experiment; M3U config is preserved;"
 echo "        mpegts.js 1.8.2 stays local; long-lived CGI still uses script_timeout=86400."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
