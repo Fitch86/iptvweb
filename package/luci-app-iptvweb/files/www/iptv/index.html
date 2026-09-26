@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.10</title>
+<title>OpenWrt IPTV rev4.12</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.10 Safari MSE fallback</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.12 Safari MSE fallback + TS filter</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.10：iOS Safari 普通频道先走 A/V；若 mpegts.js 报 MSE 错误，则只回退一次到 Video-only（hasAudio=false）。其他浏览器保持原播放路径。北京4K/内蒙古等特殊音视频编码不作为本版兼容目标。
+        rev4.12：iOS Safari 普通频道先走 A/V；若 mpegts.js 报 MSE 错误，则只回退一次到 Video-only（Config.customLoader + hasAudio=false）。其他浏览器保持原播放路径。北京4K/内蒙古等特殊音视频编码不作为本版兼容目标。
         Safari 初始 A/V；仅在检测到 mpegts.js MSE 错误后动态回退一次到 Video-only。Safari 使用 ManagedMediaSource + isLive=true；其他浏览器保持 isLive=false。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
@@ -729,14 +729,14 @@ function createPlayer(ch, url, seq, mode){
   // iPhone/iPad Safari uses ManagedMediaSource. Marking the source live is important
   // for Apple's live-MSE path; keep the proven isLive=false path on other browsers.
   const ds={type:'mpegts', url:url, isLive:iosSafari};
+  const config=playerConfig();
   if(mode==='video') {
     ds.hasAudio=false;
     if(iosSafari){
-      try{ ds.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled'); }
+      try{ config.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader'); }
       catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
     }
   }
-  const config=playerConfig();
   log('CONFIG '+JSON.stringify(config));
   log('MediaDataSource '+JSON.stringify(ds));
   if(iosSafari) log('iOS Safari path: ManagedMediaSource + isLive=true');
