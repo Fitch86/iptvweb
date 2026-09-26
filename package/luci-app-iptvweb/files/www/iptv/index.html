@@ -179,12 +179,28 @@ function stopIndependentAudio(){
   state.audioUrl=''; state.audioStartedAt=0; state.audioError=''; state.audioPlaying=false;
   a.style.display='none';
 }
+function probeIndependentAudio(ch, seq){
+  if(!isIOSSafari() || seq!==state.seq) return;
+  const url=audioStreamUrl(ch); if(!url) return;
+  try{
+    const u=new URL(url, window.location.href);
+    const probe=new URL('/cgi-bin/iptvweb-audio-probe', window.location.href);
+    probe.search=u.search;
+    fetch(probe.href, {cache:'no-store'}).then(r=>r.json()).then(x=>{
+      if(seq!==state.seq) return;
+      if(x&&x.ok) log('SAFARI_AUDIO: MPEG header pid='+x.pid+' stream_type='+x.pmt_stream_type+' '+x.version+' '+x.layer+' '+x.bitrate_kbps+'kbps '+x.sample_rate+'Hz '+x.channels+'ch frame='+x.frame_length+' hex='+x.header_hex);
+      else log('SAFARI_AUDIO: MPEG header probe failed '+(x&&x.error||'unknown'));
+    }).catch(e=>log('SAFARI_AUDIO: MPEG header probe error '+e));
+  }catch(e){ log('SAFARI_AUDIO: MPEG header probe exception '+e); }
+}
+
 function startIndependentAudio(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const a=$('audio'); if(!a) return;
   const source=String(ch&&ch.url||'');
   const url=audioStreamUrl(ch);
   log('SAFARI_AUDIO: source='+source);
+  probeIndependentAudio(ch, seq);
   if(!url){ log('SAFARI_AUDIO: cannot extract multicast /udp/group:port; independent MP3 disabled'); return; }
   stopIndependentAudio();
   state.audioUrl=url; state.audioError=''; state.audioPlaying=false;

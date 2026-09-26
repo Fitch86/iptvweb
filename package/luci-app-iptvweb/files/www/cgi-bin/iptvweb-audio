@@ -1,5 +1,5 @@
 #!/usr/bin/lua
--- rev4.16.1: extract MPEG-1 Layer II/III audio (primarily MP3 stream_type=0x03)
+-- rev4.16.3: extract MPEG-1 Layer II/III audio (primarily MP3 stream_type=0x03)
 -- from an IPTV MPEG-TS/udpxy stream and expose it as a native audio/mpeg stream.
 -- This is intentionally a small experiment: no transcoding and no MSE audio.
 
