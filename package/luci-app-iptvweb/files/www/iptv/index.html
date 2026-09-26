@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.16</title>
+<title>OpenWrt IPTV rev4.16.1</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.16 Safari Video MSE + MP3 Audio experiment</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.16.1 Safari Video MSE + MP3 Audio experiment</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -75,7 +75,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.16：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only，同时启动独立原生 MP3 <audio>。音频由路由器 CGI 从原始 TS 中提取为 audio/mpeg，不进入 mpegts.js 的 MSE。
+        rev4.16.1：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only，同时启动独立原生 MP3 <audio>。音频由路由器 CGI 从原始 TS 中提取为 audio/mpeg，不进入 mpegts.js 的 MSE。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -153,8 +153,8 @@ function streamUrl(ch){
 
 function audioStreamUrl(ch){
   try{
-    const u=new URL(ch.url, location.href);
-    const m=u.pathname.match(/^\/udp\/([^:]+):(\d+)$/);
+    const raw=String(ch&&ch.url||'');
+    const m=raw.match(/\/udp\/(\d+\.\d+\.\d+\.\d+):(\d+)(?:[/?#]|$)/);
     if(m){
       const proxy=new URL('/cgi-bin/iptvweb-audio', window.location.href);
       proxy.searchParams.set('group', m[1]); proxy.searchParams.set('port', m[2]);
@@ -175,7 +175,7 @@ function startIndependentAudio(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const a=$('audio'); if(!a) return;
   const url=audioStreamUrl(ch);
-  if(!url){ log('SAFARI_AUDIO: channel URL is not /udp/group:port; independent MP3 disabled'); return; }
+  if(!url){ log('SAFARI_AUDIO: cannot extract /udp/group:port from channel URL; independent MP3 disabled source='+String(ch&&ch.url||'')); return; }
   stopIndependentAudio();
   state.audioUrl=url; state.audioError=''; state.audioPlaying=false;
   a.onplaying=()=>{ if(seq!==state.seq) return; state.audioPlaying=true; state.audioStartedAt=performance.now(); log('SAFARI_AUDIO: native MP3 playing'); updateDiag(); };
@@ -760,7 +760,8 @@ function safariMseFallbackToVideo(ch, url, seq, failedPlayer){
     if(seq!==state.seq || state.safariFallbackTried!==true || state.player) return;
     log('SAFARI_MSE_FALLBACK: createPlayer mode=video, hasAudio=false + TS filter');
     createPlayer(ch, url, seq, 'video');
-    setTimeout(()=>startIndependentAudio(ch, seq), 350);
+    // Audio was already started from the channel-selection gesture. Keep the
+    // existing native <audio> stream alive across the video-only fallback.
   },250);
 }
 
@@ -918,6 +919,9 @@ function play(ch){
   log('PLAY '+ch.name);
   log('URL '+url);
   log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
+  // Start the independent MP3 element directly from the channel-selection gesture.
+  // The audio CGI itself waits for PAT/PMT, so it is safe to start before video MSE.
+  if(isIOSSafari()) startIndependentAudio(ch, seq);
   if(!window.mpegts || !mpegts.isSupported()){
     setStatus('浏览器不支持 MSE MPEG-TS / mpegts.js 未安装');
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);
