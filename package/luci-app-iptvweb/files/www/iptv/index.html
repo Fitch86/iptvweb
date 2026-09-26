@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.13 Safari Video-only stable</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.14 Safari Video-only status</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.13：iOS Safari 普通频道先走 A/V；若 mpegts.js 报 MSE 错误，则只回退一次到真正的 TS Video-only。其他浏览器保持原播放路径。北京4K/内蒙古等特殊音视频编码不作为本版兼容目标。
+        rev4.14：在 rev4.13 基础上仅修正 Safari Video-only 回退后的状态采集，不改变 TS 过滤和播放链。
         Safari 初始 A/V；仅在检测到 mpegts.js MSE 错误后动态回退一次到 Video-only；回退后不再二次回退。Safari 使用 ManagedMediaSource + isLive=true；其他浏览器保持 isLive=false。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.13';
+const REV='4.14';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -113,6 +113,7 @@ const state={
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
+  lastVideoCodec:'', lastVideoWidth:0, lastVideoHeight:0,
   diagTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0
 };
 
@@ -395,19 +396,22 @@ function updateDiag(){
   const mi=state.mediaInfo||{};
   const frame=state.lastFrame||{};
   const videoOnly=state.avMode==='video-fallback';
-  const shownVideo=mi.videoCodec||'-';
+  const shownVideo=mi.videoCodec||state.lastVideoCodec||'-';
   const shownAudio=videoOnly?'none':(mi.audioCodec||'-');
   const shownAudioState=videoOnly?'no':(mi.hasAudio?'yes':'?');
+  const shownWidth=mi.width||state.lastVideoWidth||v.videoWidth||'-';
+  const shownHeight=mi.height||state.lastVideoHeight||v.videoHeight||'-';
+  const effectivePaused=(state.playingSince && !state.userPaused && !v.ended) ? false : v.paused;
   $('diag').textContent=
     '【状态】 '+cls+(state.classificationReason?' | '+state.classificationReason:'')+'\n'+
-    '【编码】 V='+shownVideo+' / A='+shownAudio+' | '+(mi.width||v.videoWidth||'-')+'x'+(mi.height||v.videoHeight||'-')+' @ '+(mi.fps||'-')+'fps | audio='+shownAudioState+' '+(videoOnly?'-':(mi.audioSampleRate||'-')+'Hz/'+(mi.audioChannelCount||'-')+'ch')+'\n'+
+    '【编码】 V='+shownVideo+' / A='+shownAudio+' | '+shownWidth+'x'+shownHeight+' @ '+(mi.fps||'-')+'fps | audio='+shownAudioState+' '+(videoOnly?'-':(mi.audioSampleRate||'-')+'Hz/'+(mi.audioChannelCount||'-')+'ch')+'\n'+
     '【时间线】 current='+(isFinite(v.currentTime)?v.currentTime.toFixed(3):'NaN')+' | buffered='+b+' | seekable='+s+' | ahead='+(isFinite(ahead)?ahead.toFixed(3):'-')+'s\n'+
     '【显微镜】 mediaTime='+(frame.mediaTime!=null?Number(frame.mediaTime).toFixed(3):'-')+' | presentedFrames='+(frame.presentedFrames??'-')+' | '+timelineSummary()+'\n'+
     '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
     '【Chrome计数】 '+chromeCounters(v)+'\n'+
     '【MSE】 '+mseDump()+'\n'+
     '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive='+(isIOSSafari()?'true':'false')+' stash=384KB\n'+
-    '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+v.paused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
+    '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+effectivePaused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
     '【错误】 '+(state.lastErrorText||'-')+'\n'+
     '【mpegts】 speed='+(state.stats.speed??'-')+' KB/s loader='+(state.stats.loaderType??'-');
 }
@@ -459,6 +463,8 @@ function attachVideoDiagnostics(v, seq){
     const cb=(now, meta)=>{
       if(seq!==state.seq) return;
       state.lastFrame={wall:performance.now(), mediaTime:Number(meta.mediaTime), presentedFrames:Number(meta.presentedFrames||0)};
+      if(meta.width) state.lastVideoWidth=meta.width;
+      if(meta.height) state.lastVideoHeight=meta.height;
       if(!state.firstFrameAt){
         state.firstFrameAt=performance.now();
         log('video.firstFrame rVFC mediaTime='+(meta.mediaTime??'?')+' presentedFrames='+(meta.presentedFrames??'?'));
@@ -769,6 +775,9 @@ function createPlayer(ch, url, seq, mode){
   p.on(mpegts.Events.MEDIA_INFO, info=>{
     if(seq!==state.seq) return;
     state.mediaInfo=info||{};
+    if(info&&info.videoCodec) state.lastVideoCodec=info.videoCodec;
+    if(info&&info.width) state.lastVideoWidth=info.width;
+    if(info&&info.height) state.lastVideoHeight=info.height;
     log('MEDIA_INFO '+JSON.stringify(info));
     log('MSE after MEDIA_INFO '+mseDump());
     const vc=info&&info.videoCodec?info.videoCodec:'';
@@ -835,7 +844,7 @@ function resetPlayState(){
   state.waitingStart=0; state.stallStart=0; state.waitingCount=0; state.stallCount=0;
   state.stats={}; state.playIssuedAt=0; state.lastRecoveryAt=0; state.recoveries=0;
   state.lastProgressWall=performance.now(); state.lastProgressTime=0; state.playingSince=0;
-  state.mediaInfo=null; state.lastErrorText=''; state.audioDecodeError=false;
+  state.mediaInfo=null; state.lastVideoCodec=''; state.lastVideoWidth=0; state.lastVideoHeight=0; state.lastErrorText=''; state.audioDecodeError=false;
   state.ts={pts:0,dts:0,continuity:0,privateAudio:[]};
   state.timeline=[]; state.lastFrame=null;
   state.classification='STARTING'; state.classificationReason='';
