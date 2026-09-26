@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.16.1</title>
+<title>OpenWrt IPTV rev4.16.2</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.16.1 Safari Video MSE + MP3 Audio experiment</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.16.2 Safari Video MSE + MP3 Audio experiment</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -75,7 +75,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.16.1：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only，同时启动独立原生 MP3 <audio>。音频由路由器 CGI 从原始 TS 中提取为 audio/mpeg，不进入 mpegts.js 的 MSE。
+        rev4.16.2：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only，同时启动独立原生 MP3 <audio>。音频由路由器 CGI 从原始 TS 中提取为 audio/mpeg，不进入 mpegts.js 的 MSE。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -152,15 +152,23 @@ function streamUrl(ch){
 }
 
 function audioStreamUrl(ch){
-  try{
-    const raw=String(ch&&ch.url||'');
-    const m=raw.match(/\/udp\/(\d+\.\d+\.\d+\.\d+):(\d+)(?:[/?#]|$)/);
-    if(m){
-      const proxy=new URL('/cgi-bin/iptvweb-audio', window.location.href);
-      proxy.searchParams.set('group', m[1]); proxy.searchParams.set('port', m[2]);
-      return proxy.href;
-    }
-  }catch(e){}
+  const candidates=[];
+  try{ candidates.push(String(ch&&ch.url||'')); }catch(e){}
+  try{ candidates.push(String(streamUrl(ch)||'')); }catch(e){}
+  for(const raw of candidates){
+    if(!raw) continue;
+    try{
+      const u=new URL(raw, window.location.href);
+      const path=u.pathname.replace(/\/+$/,'');
+      let m=path.match(/\/udp\/(\d+\.\d+\.\d+\.\d+):(\d+)$/);
+      if(!m) m=raw.match(/\/udp\/(\d+\.\d+\.\d+\.\d+):(\d+)(?:[\/?#]|$)/);
+      if(m){
+        const proxy=new URL('/cgi-bin/iptvweb-audio', window.location.href);
+        proxy.searchParams.set('group', m[1]); proxy.searchParams.set('port', m[2]);
+        return proxy.href;
+      }
+    }catch(e){}
+  }
   return '';
 }
 function stopIndependentAudio(){
@@ -174,8 +182,10 @@ function stopIndependentAudio(){
 function startIndependentAudio(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const a=$('audio'); if(!a) return;
+  const source=String(ch&&ch.url||'');
   const url=audioStreamUrl(ch);
-  if(!url){ log('SAFARI_AUDIO: cannot extract /udp/group:port from channel URL; independent MP3 disabled source='+String(ch&&ch.url||'')); return; }
+  log('SAFARI_AUDIO: source='+source);
+  if(!url){ log('SAFARI_AUDIO: cannot extract multicast /udp/group:port; independent MP3 disabled'); return; }
   stopIndependentAudio();
   state.audioUrl=url; state.audioError=''; state.audioPlaying=false;
   a.onplaying=()=>{ if(seq!==state.seq) return; state.audioPlaying=true; state.audioStartedAt=performance.now(); log('SAFARI_AUDIO: native MP3 playing'); updateDiag(); };

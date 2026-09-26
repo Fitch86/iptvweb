@@ -76,10 +76,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.16.1.1."
+echo "Installed 0.2.2-rev4.16.2.1."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.16.1: Safari H.264 video MSE + independent native MP3 audio experiment; M3U config is preserved;"
+echo "rev4.16.2: Safari H.264 video MSE + independent native MP3 audio experiment; M3U config is preserved;"
 echo "        mpegts.js 1.8.2 stays local; long-lived CGI still uses script_timeout=86400."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
