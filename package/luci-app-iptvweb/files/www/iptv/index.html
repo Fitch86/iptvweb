@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.16.2</title>
+<title>OpenWrt IPTV rev4.17</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.16.2 Safari Video MSE + MP3 Audio experiment</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.17 Safari Video MSE + WebAudio MPEG Audio PES experiment</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -67,15 +67,14 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
   <main>
     <div class="player">
       <video id="video" controls playsinline></video>
-      <audio id="audio" controls preload="none" style="display:none;width:100%;margin-top:6px"></audio>
-      <div style="display:flex;gap:7px;margin:7px 0 0">
+          <div style="display:flex;gap:7px;margin:7px 0 0">
         <button id="recoverBtn" type="button" style="flex:1">▶ 播放 / 恢复</button>
         <button id="stopBtn2" type="button" style="flex:1" class="danger">⏹ 停止并断开</button>
       </div>
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.16.2：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only，同时启动独立原生 MP3 <audio>。音频由路由器 CGI 从原始 TS 中提取为 audio/mpeg，不进入 mpegts.js 的 MSE。
+        rev4.17：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为 MPEG Audio PES 提取实验：路由器先从 TS/PES 提取原始 MPEG Audio 帧，浏览器用 WebAudio decodeAudioData() 尝试解码，不再使用独立原生 <audio>。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -101,7 +100,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.16';
+const REV='4.17';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -111,6 +110,7 @@ const state={
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
+  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioState:'off', webAudioError:'', webAudioInfo:null,
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
@@ -163,7 +163,7 @@ function audioStreamUrl(ch){
       let m=path.match(/\/udp\/(\d+\.\d+\.\d+\.\d+):(\d+)$/);
       if(!m) m=raw.match(/\/udp\/(\d+\.\d+\.\d+\.\d+):(\d+)(?:[\/?#]|$)/);
       if(m){
-        const proxy=new URL('/cgi-bin/iptvweb-audio', window.location.href);
+        const proxy=new URL('/cgi-bin/iptvweb-audio-pes', window.location.href);
         proxy.searchParams.set('group', m[1]); proxy.searchParams.set('port', m[2]);
         return proxy.href;
       }
@@ -171,14 +171,7 @@ function audioStreamUrl(ch){
   }
   return '';
 }
-function stopIndependentAudio(){
-  const a=$('audio');
-  if(!a) return;
-  try{ a.pause(); }catch(e){}
-  try{ a.removeAttribute('src'); a.load(); }catch(e){}
-  state.audioUrl=''; state.audioStartedAt=0; state.audioError=''; state.audioPlaying=false;
-  a.style.display='none';
-}
+
 function probeIndependentAudio(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const url=audioStreamUrl(ch); if(!url) return;
@@ -186,34 +179,66 @@ function probeIndependentAudio(ch, seq){
     const u=new URL(url, window.location.href);
     const probe=new URL('/cgi-bin/iptvweb-audio-probe', window.location.href);
     probe.search=u.search;
-    fetch(probe.href, {cache:'no-store'}).then(r=>r.json()).then(x=>{
+    fetch(probe.href, {cache:'no-store'}).then(r=>{
+      if(!r.ok) throw new Error('HTTP '+r.status);
+      return r.text();
+    }).then(text=>{
       if(seq!==state.seq) return;
-      if(x&&x.ok) log('SAFARI_AUDIO: MPEG header pid='+x.pid+' stream_type='+x.pmt_stream_type+' '+x.version+' '+x.layer+' '+x.bitrate_kbps+'kbps '+x.sample_rate+'Hz '+x.channels+'ch frame='+x.frame_length+' hex='+x.header_hex);
-      else log('SAFARI_AUDIO: MPEG header probe failed '+(x&&x.error||'unknown'));
-    }).catch(e=>log('SAFARI_AUDIO: MPEG header probe error '+e));
-  }catch(e){ log('SAFARI_AUDIO: MPEG header probe exception '+e); }
+      let x;
+      try{x=JSON.parse(text);}catch(e){ throw new Error('probe JSON parse: '+e.message+' body='+text.slice(0,240)); }
+      if(x&&x.ok){
+        state.webAudioInfo=x;
+        log('SAFARI_AUDIO: MPEG header pid='+x.pid+' stream_type='+x.pmt_stream_type+' '+x.version+' '+x.layer+' '+x.bitrate_kbps+'kbps '+x.sample_rate+'Hz '+x.channels+'ch frame='+x.frame_length+' hex='+x.header_hex);
+      } else {
+        log('SAFARI_AUDIO: MPEG header probe failed '+(x&&x.error||'unknown'));
+      }
+    }).catch(e=>log('SAFARI_AUDIO: MPEG header probe error '+e.message));
+  }catch(e){ log('SAFARI_AUDIO: MPEG header probe exception '+e.message); }
 }
 
-function startIndependentAudio(ch, seq){
+async function startWebAudioMpeg(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
-  const a=$('audio'); if(!a) return;
-  const source=String(ch&&ch.url||'');
   const url=audioStreamUrl(ch);
-  log('SAFARI_AUDIO: source='+source);
+  log('SAFARI_AUDIO: WebAudio PES source='+url);
+  if(!url){ state.webAudioState='no-url'; state.webAudioError='cannot extract multicast /udp/group:port'; log('SAFARI_AUDIO: cannot extract multicast /udp/group:port; WebAudio experiment disabled'); return; }
+  state.audioUrl=url;
   probeIndependentAudio(ch, seq);
-  if(!url){ log('SAFARI_AUDIO: cannot extract multicast /udp/group:port; independent MP3 disabled'); return; }
-  stopIndependentAudio();
-  state.audioUrl=url; state.audioError=''; state.audioPlaying=false;
-  a.onplaying=()=>{ if(seq!==state.seq) return; state.audioPlaying=true; state.audioStartedAt=performance.now(); log('SAFARI_AUDIO: native MP3 playing'); updateDiag(); };
-  a.onwaiting=()=>{ if(seq===state.seq) log('SAFARI_AUDIO: native MP3 waiting'); };
-  a.onerror=()=>{ if(seq!==state.seq) return; state.audioError='HTMLAudioMediaError'; log('SAFARI_AUDIO: native MP3 error code='+(a.error&&a.error.code)); updateDiag(); };
-  a.onloadedmetadata=()=>{ if(seq===state.seq) log('SAFARI_AUDIO: metadata duration='+(isFinite(a.duration)?a.duration:'live')); };
-  a.src=url; a.style.display='block';
-  log('SAFARI_AUDIO: independent native <audio> URL='+url);
+  if(!window.AudioContext && !window.webkitAudioContext){
+    state.webAudioState='unsupported'; state.webAudioError='AudioContext unavailable';
+    log('SAFARI_WEBAUDIO: AudioContext unavailable'); updateDiag(); return;
+  }
   try{
-    const q=a.play();
-    if(q&&q.then) q.then(()=>log('SAFARI_AUDIO: audio.play() resolved')).catch(e=>log('SAFARI_AUDIO: audio.play() rejected '+e.name+': '+e.message));
-  }catch(e){ log('SAFARI_AUDIO: audio.play() threw '+e.name+': '+e.message); }
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    const ctx=new Ctx(); state.webAudioCtx=ctx;
+    state.webAudioState='fetching';
+    log('SAFARI_WEBAUDIO: AudioContext created state='+ctx.state);
+    try{ await ctx.resume(); log('SAFARI_WEBAUDIO: AudioContext resume state='+ctx.state); }catch(e){ log('SAFARI_WEBAUDIO: AudioContext resume failed '+e.name+': '+e.message); }
+    if(seq!==state.seq) return;
+    const r=await fetch(url,{cache:'no-store'});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    const ab=await r.arrayBuffer();
+    if(seq!==state.seq) return;
+    log('SAFARI_WEBAUDIO: fetched MPEG Audio bytes='+ab.byteLength);
+    if(!ab.byteLength) throw new Error('empty MPEG Audio PES extraction');
+    state.webAudioState='decoding';
+    const decoded=await ctx.decodeAudioData(ab.slice(0));
+    if(seq!==state.seq) return;
+    state.webAudioBuffer=decoded;
+    state.webAudioState='decoded';
+    state.audioPlaying=true;
+    state.audioStartedAt=performance.now();
+    log('SAFARI_WEBAUDIO: decode success duration='+decoded.duration.toFixed(3)+'s sampleRate='+decoded.sampleRate+' channels='+decoded.numberOfChannels);
+    const src=ctx.createBufferSource(); src.buffer=decoded; src.connect(ctx.destination); state.webAudioSource=src;
+    src.onended=()=>{ if(seq!==state.seq) return; state.audioPlaying=false; log('SAFARI_WEBAUDIO: buffer playback ended'); updateDiag(); };
+    src.start(0);
+    log('SAFARI_WEBAUDIO: AudioBufferSource started');
+    updateDiag();
+  }catch(e){
+    if(seq!==state.seq) return;
+    state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioError='WebAudioDecodeError';
+    log('SAFARI_WEBAUDIO: '+e.name+': '+e.message);
+    updateDiag();
+  }
 }
 
 function renderGroups(){
@@ -478,7 +503,7 @@ function updateDiag(){
     '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
     '【Chrome计数】 '+chromeCounters(v)+'\n'+
     '【MSE】 '+mseDump()+'\n'+
-    '【独立音频】 nativeMP3='+(state.audioUrl?'on':'off')+' playing='+(state.audioPlaying?'yes':'no')+' error='+(state.audioError||'-')+'\n'+
+    '【独立音频】 WebAudio='+(state.webAudioState||'off')+' playing='+(state.audioPlaying?'yes':'no')+' error='+(state.webAudioError||state.audioError||'-')+'\n'+
     '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive='+(isIOSSafari()?'true':'false')+' stash=384KB\n'+
     '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+effectivePaused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
     '【错误】 '+(state.lastErrorText||'-')+'\n'+
@@ -786,8 +811,7 @@ function safariMseFallbackToVideo(ch, url, seq, failedPlayer){
     if(seq!==state.seq || state.safariFallbackTried!==true || state.player) return;
     log('SAFARI_MSE_FALLBACK: createPlayer mode=video, hasAudio=false + TS filter');
     createPlayer(ch, url, seq, 'video');
-    // Audio was already started from the channel-selection gesture. Keep the
-    // existing native <audio> stream alive across the video-only fallback.
+    // WebAudio experiment is independent of the video-only fallback.
   },250);
 }
 
@@ -818,7 +842,7 @@ function createPlayer(ch, url, seq, mode){
   const config=playerConfig();
   if(mode==='video' && iosSafari){
     try{ config.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
-      if(mode==='video') log('SAFARI_AUDIO: video MSE path is audio-free; independent native MP3 will be started by fallback'); }
+      if(mode==='video') log('SAFARI_AUDIO: video MSE path is audio-free; WebAudio MPEG Audio PES experiment is independent'); }
     catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
   }
   log('CONFIG '+JSON.stringify(config));
@@ -923,6 +947,8 @@ function resetPlayState(){
   state.userPaused=false; state.stopping=false; state.nudgedThisPlay=false;
   state.safariFallbackTried=false;
   state.audioUrl=''; state.audioStartedAt=0; state.audioError=''; state.audioPlaying=false;
+  state.webAudioState='off'; state.webAudioError=''; state.webAudioInfo=null; state.webAudioBuffer=null; state.webAudioSource=null;
+  state.audioDecodeError=false;
   state.stableSince=0; state.stableLogged=false;
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
@@ -945,9 +971,9 @@ function play(ch){
   log('PLAY '+ch.name);
   log('URL '+url);
   log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
-  // Start the independent MP3 element directly from the channel-selection gesture.
-  // The audio CGI itself waits for PAT/PMT, so it is safe to start before video MSE.
-  if(isIOSSafari()) startIndependentAudio(ch, seq);
+  // Start the WebAudio MPEG Audio PES experiment from the channel-selection gesture.
+  // It is independent of the video MSE path and is intentionally best-effort.
+  if(isIOSSafari()) startWebAudioMpeg(ch, seq);
   if(!window.mpegts || !mpegts.isSupported()){
     setStatus('浏览器不支持 MSE MPEG-TS / mpegts.js 未安装');
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);

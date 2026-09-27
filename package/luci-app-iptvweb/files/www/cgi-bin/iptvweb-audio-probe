@@ -1,5 +1,5 @@
 #!/usr/bin/lua
--- rev4.16.3: MPEG Audio frame-header probe.
+-- rev4.17: MPEG Audio frame-header probe.
 -- Returns JSON describing the first MPEG Audio frame found in the IPTV TS.
 
 local function qget(name)
