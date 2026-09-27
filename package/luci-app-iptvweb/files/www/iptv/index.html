@@ -323,8 +323,20 @@ function startDiagTimer(seq){
     updateDiag();
   }, 500);
 }
+function stopWebAudio(){
+  try{ if(state.webAudioSource){ state.webAudioSource.onended=null; state.webAudioSource.stop(0); } }catch(e){}
+  try{ if(state.webAudioSource) state.webAudioSource.disconnect(); }catch(e){}
+  state.webAudioSource=null;
+  try{ if(state.webAudioCtx){ state.webAudioCtx.close(); } }catch(e){}
+  state.webAudioCtx=null;
+  state.webAudioBuffer=null;
+  state.webAudioState='off';
+  state.webAudioError='';
+  state.audioPlaying=false;
+}
+
 function stopPlayer(){
-  stopIndependentAudio();
+  stopWebAudio();
   if(state.analyzeCtl){ try{ state.analyzeCtl.abort(); }catch(e){} state.analyzeCtl=null; }
   if(state.startTimer){ clearTimeout(state.startTimer); state.startTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
@@ -984,7 +996,7 @@ function play(ch){
 
 function stopPlayback(){
   state.stopping=true;
-  stopIndependentAudio(); state.userPaused=false;
+  stopWebAudio(); state.userPaused=false;
   log('STOP: 用户请求停止并断开流');
   stopDiagTimers();
   const p=state.player, v=$('video');
