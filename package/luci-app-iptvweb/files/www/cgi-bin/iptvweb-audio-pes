@@ -94,9 +94,9 @@ local function process(pkt)
   if pmt_pid and pid==pmt_pid then parse_pmt(payload,pusi); return end
   if not audio_pid or pid~=audio_pid then return end
   if pusi then
-    local old=pes_payload(payload); if #old>0 then append_frames(old) end
+    local old=pes_payload(payload); if #old>0 then return append_frames(old) end
   else
-    append_frames(payload)
+    return append_frames(payload)
   end
 end
 local done=false
