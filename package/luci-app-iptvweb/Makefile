@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
-PKG_VERSION:=0.2.2-rev4.17.2
+PKG_VERSION:=0.2.2-rev4.17.3
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
@@ -14,7 +14,7 @@ define Package/luci-app-iptvweb
   CATEGORY:=LuCI
   SUBMENU:=Applications
   TITLE:=IPTV Web Player
-  DEPENDS:=+uhttpd +luci-base
+  DEPENDS:=+uhttpd +luci-base +lua
 endef
 
 define Package/luci-app-iptvweb/description
