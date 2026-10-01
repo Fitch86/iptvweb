@@ -25,7 +25,7 @@ if not udpxy or not udpxy:match('^[%w%.%-]+:%d+$') then os.exit(1) end
 local pipe=io.popen("uclient-fetch -q -O - 'http://"..udpxy.."/udp/"..group..":"..port.."' 2>/dev/null",'r')
 if not pipe then os.exit(1) end
 
-local tsbuf=''; local pmt_pid=nil; local audio_pid=nil; local pesbuf=''; local outbuf=''; local MAX_OUT=262144; local frames=0
+local tsbuf=''; local pmt_pid=nil; local audio_pid=nil; local pesbuf=''; local outbuf=''; local MAX_OUT=65536; local TARGET_FRAMES=80; local frames=0
 local function u8(s,i) return s:byte(i) end
 -- OpenWrt's /usr/bin/lua may be Lua 5.1; avoid Lua 5.3 bitwise operators.
 local function band(a,b)
@@ -81,7 +81,7 @@ local function append_frames(data)
     for i=1,#pesbuf-1 do if pesbuf:byte(i)==0xff and band(pesbuf:byte(i+1),0xe0)==0xe0 then pos=i; break end end
     if not pos then pesbuf=pesbuf:sub(-3); return end
     if pos>1 then pesbuf=pesbuf:sub(pos) end
-    local len=header(pesbuf,1); if not len then pesbuf=pesbuf:sub(2); else if #pesbuf<len then return end; outbuf=outbuf..pesbuf:sub(1,len); pesbuf=pesbuf:sub(len+1); frames=frames+1; if #outbuf>=MAX_OUT then return true end end
+    local len=header(pesbuf,1); if not len then pesbuf=pesbuf:sub(2); else if #pesbuf<len then return end; outbuf=outbuf..pesbuf:sub(1,len); pesbuf=pesbuf:sub(len+1); frames=frames+1; if #outbuf>=MAX_OUT or frames>=TARGET_FRAMES then return true end end
   end
 end
 local function process(pkt)

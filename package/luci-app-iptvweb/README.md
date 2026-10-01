@@ -1,4 +1,4 @@
-# luci-app-iptvweb 0.2.2-rev4.17.4.2
+# luci-app-iptvweb 0.2.2-rev4.18
 
 rev4.17 以 rev4.14/4.16.3 的 Safari H.264 Video-only 路径为基线。视频链不变；新增 MPEG Audio PES 提取实验：路由器从 IPTV MPEG-TS 中定位 PMT 的 MPEG Audio PID，提取完整 MPEG Audio 帧到 `iptvweb-audio-pes`，浏览器 Safari 侧使用 WebAudio `AudioContext.decodeAudioData()` 尝试解码。
 
@@ -10,3 +10,8 @@ rev4.17.2 仅修正音频 CGI 在 OpenWrt Lua 5.1 环境下使用 Lua 5.3 位运
 ## rev4.17.4
 
 仅修复 Lua 运行时依赖：OpenWrt 25.12 的音频 CGI 使用 Lua 5.1，对应 APK 包名为 `lua`。Makefile 增加 `+lua` 依赖；直接运行 `install.sh` 时若系统没有 `lua`，会自动执行 `apk add lua`。Safari H.264 Video-only 播放链、MPEG Audio 提取算法和 WebAudio 实验均未修改。
+
+
+## rev4.18
+
+很小的 MP2 能力验证版：独立音频 CGI 只返回有限数量的完整 MPEG-1 Layer II 帧（约 64 KiB），避免无限流导致 fetch 永远等待；Safari WebAudio 对这段有限 MP2 数据调用 `AudioContext.decodeAudioData()`。视频 H.264 Video-only / Safari MSE fallback 链完全不变。
