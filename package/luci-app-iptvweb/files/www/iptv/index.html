@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.18 Safari Video MSE + MP2 decodeAudioData experiment</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.19 Safari Video MSE + MP2→PCM experiment</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.17：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为 MPEG Audio PES 提取实验：路由器先从 TS/PES 提取原始 MPEG Audio 帧，浏览器用 WebAudio decodeAudioData() 尝试解码，不再使用独立原生 <audio>。
+        rev4.19：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为 MPEG Audio PES 提取实验：路由器先从 TS/PES 提取原始 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 将 MP2 解码为 PCM，再送入 WebAudio；不使用 decodeAudioData() 和独立原生 <audio>。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -84,6 +84,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
   </main>
 </div>
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
+<script src="/luci-static/resources/iptvweb/mpg123-decoder.min.js" charset="UTF-8"></script>
 <script>
 window.addEventListener('error', function(e){
   try{
@@ -100,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.17';
+const REV='4.19';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -110,7 +111,7 @@ const state={
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
-  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioState:'off', webAudioError:'', webAudioInfo:null,
+  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioState:'off', webAudioError:'', webAudioInfo:null,
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
@@ -199,49 +200,72 @@ function probeIndependentAudio(ch, seq){
 async function startWebAudioMpeg(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const url=audioStreamUrl(ch);
-  log('SAFARI_AUDIO: WebAudio PES source='+url);
-  if(!url){ state.webAudioState='no-url'; state.webAudioError='cannot extract multicast /udp/group:port'; log('SAFARI_AUDIO: cannot extract multicast /udp/group:port; WebAudio experiment disabled'); return; }
+  log('SAFARI_AUDIO: MP2→PCM source='+url);
+  if(!url){ state.webAudioState='no-url'; state.webAudioError='cannot extract multicast /udp/group:port'; log('SAFARI_AUDIO: cannot extract multicast /udp/group:port; MP2 decoder disabled'); return; }
   state.audioUrl=url;
   probeIndependentAudio(ch, seq);
   if(!window.AudioContext && !window.webkitAudioContext){
     state.webAudioState='unsupported'; state.webAudioError='AudioContext unavailable';
-    log('SAFARI_WEBAUDIO: AudioContext unavailable'); updateDiag(); return;
+    log('SAFARI_MP2PCM: AudioContext unavailable'); updateDiag(); return;
+  }
+  const decNS=window['mpg123-decoder'];
+  if(!decNS || !decNS.MPEGDecoder){
+    state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable';
+    log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable'); updateDiag(); return;
   }
   try{
     const Ctx=window.AudioContext||window.webkitAudioContext;
     const ctx=new Ctx(); state.webAudioCtx=ctx;
     state.webAudioState='fetching';
-    log('SAFARI_WEBAUDIO: AudioContext created state='+ctx.state);
-    try{ await ctx.resume(); log('SAFARI_WEBAUDIO: AudioContext resume state='+ctx.state); }catch(e){ log('SAFARI_WEBAUDIO: AudioContext resume failed '+e.name+': '+e.message); }
+    log('SAFARI_MP2PCM: AudioContext created state='+ctx.state);
+    try{ await ctx.resume(); log('SAFARI_MP2PCM: AudioContext resume state='+ctx.state); }catch(e){ log('SAFARI_MP2PCM: AudioContext resume failed '+e.name+': '+e.message); }
     if(seq!==state.seq) return;
+
     const controller = new AbortController();
     const fetchTimer = setTimeout(()=>controller.abort(), 7000);
     let r;
-    try {
-      r=await fetch(url,{cache:'no-store',signal:controller.signal});
-    } finally { clearTimeout(fetchTimer); }
+    try { r=await fetch(url,{cache:'no-store',signal:controller.signal}); }
+    finally { clearTimeout(fetchTimer); }
     if(!r.ok) throw new Error('HTTP '+r.status);
     const ab=await r.arrayBuffer();
     if(seq!==state.seq) return;
-    log('SAFARI_WEBAUDIO: fetched finite MPEG Audio bytes='+ab.byteLength+' (rev4.18 MP2 sample)');
     if(!ab.byteLength) throw new Error('empty MPEG Audio PES extraction');
+    log('SAFARI_MP2PCM: fetched finite MPEG Audio bytes='+ab.byteLength);
+
     state.webAudioState='decoding';
-    const decoded=await ctx.decodeAudioData(ab.slice(0));
+    const decoder=new decNS.MPEGDecoder();
+    state.webAudioDecoder=decoder;
+    await decoder.ready;
     if(seq!==state.seq) return;
-    state.webAudioBuffer=decoded;
+    const result=decoder.decode(new Uint8Array(ab));
+    if(!result || !result.channelData || !result.channelData.length || !result.samplesDecoded){
+      throw new Error('MP2 decoder returned no PCM samples');
+    }
+    const channels=result.channelData.length;
+    const samples=result.samplesDecoded;
+    const rate=result.sampleRate||44100;
+    log('SAFARI_MP2PCM: decoded PCM samples='+samples+' rate='+rate+' channels='+channels+(result.errors&&result.errors.length?' errors='+result.errors.length:''));
+    if(seq!==state.seq) return;
+
+    const buffer=ctx.createBuffer(channels, samples, rate);
+    for(let c=0;c<channels;c++){
+      const src=result.channelData[c];
+      if(src) buffer.copyToChannel(src.subarray ? src.subarray(0,samples) : src, c, 0);
+    }
+    state.webAudioBuffer=buffer;
     state.webAudioState='decoded';
     state.audioPlaying=true;
     state.audioStartedAt=performance.now();
-    log('SAFARI_WEBAUDIO: decodeAudioData SUCCESS duration='+decoded.duration.toFixed(3)+'s sampleRate='+decoded.sampleRate+' channels='+decoded.numberOfChannels);
-    const src=ctx.createBufferSource(); src.buffer=decoded; src.connect(ctx.destination); state.webAudioSource=src;
-    src.onended=()=>{ if(seq!==state.seq) return; state.audioPlaying=false; log('SAFARI_WEBAUDIO: buffer playback ended'); updateDiag(); };
+    const src=ctx.createBufferSource();
+    src.buffer=buffer; src.connect(ctx.destination); state.webAudioSource=src;
+    src.onended=()=>{ if(seq!==state.seq) return; state.audioPlaying=false; log('SAFARI_MP2PCM: PCM playback ended'); updateDiag(); };
     src.start(0);
-    log('SAFARI_WEBAUDIO: AudioBufferSource started');
+    log('SAFARI_MP2PCM: PCM AudioBufferSource started duration='+buffer.duration.toFixed(3)+'s');
     updateDiag();
   }catch(e){
     if(seq!==state.seq) return;
-    state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioError='WebAudioDecodeError';
-    log('SAFARI_WEBAUDIO: decodeAudioData/MP2 '+e.name+': '+e.message);
+    state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioError='WebAudioMP2PCMError';
+    log('SAFARI_MP2PCM: '+e.name+': '+e.message);
     updateDiag();
   }
 }
@@ -332,6 +356,8 @@ function stopWebAudio(){
   try{ if(state.webAudioSource){ state.webAudioSource.onended=null; state.webAudioSource.stop(0); } }catch(e){}
   try{ if(state.webAudioSource) state.webAudioSource.disconnect(); }catch(e){}
   state.webAudioSource=null;
+  try{ if(state.webAudioDecoder){ state.webAudioDecoder.free(); } }catch(e){}
+  state.webAudioDecoder=null;
   try{ if(state.webAudioCtx){ state.webAudioCtx.close(); } }catch(e){}
   state.webAudioCtx=null;
   state.webAudioBuffer=null;
@@ -964,7 +990,7 @@ function resetPlayState(){
   state.userPaused=false; state.stopping=false; state.nudgedThisPlay=false;
   state.safariFallbackTried=false;
   state.audioUrl=''; state.audioStartedAt=0; state.audioError=''; state.audioPlaying=false;
-  state.webAudioState='off'; state.webAudioError=''; state.webAudioInfo=null; state.webAudioBuffer=null; state.webAudioSource=null;
+  state.webAudioState='off'; state.webAudioError=''; state.webAudioInfo=null; state.webAudioBuffer=null; state.webAudioSource=null; state.webAudioDecoder=null;
   state.audioDecodeError=false;
   state.stableSince=0; state.stableLogged=false;
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }

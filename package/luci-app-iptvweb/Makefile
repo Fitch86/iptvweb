@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
-PKG_VERSION:=0.2.2-rev4.18
+PKG_VERSION:=0.2.2-rev4.19
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
@@ -56,6 +56,7 @@ define Package/luci-app-iptvweb/install
 
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/iptvweb
 	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/mpegts.min.js $(1)/www/luci-static/resources/iptvweb/mpegts.min.js
+	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/mpg123-decoder.min.js $(1)/www/luci-static/resources/iptvweb/mpg123-decoder.min.js
 endef
 
 $(eval $(call BuildPackage,luci-app-iptvweb))

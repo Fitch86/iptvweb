@@ -40,6 +40,7 @@ cp -f "$FILES/www/cgi-bin/iptvweb-capture" /www/cgi-bin/iptvweb-capture
 cp -f "$FILES/usr/share/luci/menu.d/luci-app-iptvweb.json" /usr/share/luci/menu.d/luci-app-iptvweb.json
 cp -f "$FILES/usr/share/rpcd/acl.d/luci-app-iptvweb.json" /usr/share/rpcd/acl.d/luci-app-iptvweb.json
 cp -f "$FILES/www/luci-static/resources/view/iptvweb.js" /www/luci-static/resources/view/iptvweb.js
+cp -f "$FILES/www/luci-static/resources/iptvweb/mpg123-decoder.min.js" /www/luci-static/resources/iptvweb/mpg123-decoder.min.js
 
 # Keep a working local mpegts.js across reinstalls. Only replace with the
 # stub if no real copy exists yet; install then tries to download 1.8.0.
@@ -77,6 +78,34 @@ else
     fi
 fi
 
+
+# rev4.19: install the local mpg123-decoder WASM bundle. It decodes MPEG
+# Layer I/II/III to PCM in the browser; no CDN request is made at runtime.
+MPG_TMP="/tmp/mpg123-decoder.min.js.iptvweb"
+MPG_URL1="https://cdn.jsdelivr.net/npm/mpg123-decoder@1.0.3/dist/mpg123-decoder.min.js"
+MPG_URL2="https://unpkg.com/mpg123-decoder@1.0.3/dist/mpg123-decoder.min.js"
+MPG_FETCHED=0
+if command -v uclient-fetch >/dev/null 2>&1; then
+    uclient-fetch -q -T 20 -O "$MPG_TMP" "$MPG_URL1" 2>/dev/null && MPG_FETCHED=1 || true
+    [ "$MPG_FETCHED" = 1 ] || (uclient-fetch -q -T 20 -O "$MPG_TMP" "$MPG_URL2" 2>/dev/null && MPG_FETCHED=1 || true)
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -T 20 -O "$MPG_TMP" "$MPG_URL1" && MPG_FETCHED=1 || true
+    [ "$MPG_FETCHED" = 1 ] || (wget -q -T 20 -O "$MPG_TMP" "$MPG_URL2" && MPG_FETCHED=1 || true)
+fi
+if [ "$MPG_FETCHED" = 1 ] && [ -s "$MPG_TMP" ] && [ "$(wc -c < "$MPG_TMP")" -gt 50000 ] && grep -q 'MPEGDecoder' "$MPG_TMP" 2>/dev/null; then
+    mv -f "$MPG_TMP" /www/luci-static/resources/iptvweb/mpg123-decoder.min.js
+else
+    rm -f "$MPG_TMP"
+    if [ -s /www/luci-static/resources/iptvweb/mpg123-decoder.min.js ] && \
+       [ "$(wc -c < /www/luci-static/resources/iptvweb/mpg123-decoder.min.js)" -gt 50000 ] && \
+       grep -q 'MPEGDecoder' /www/luci-static/resources/iptvweb/mpg123-decoder.min.js 2>/dev/null; then
+        echo "NOTE: could not refresh mpg123-decoder 1.0.3; keeping the existing local copy."
+    else
+        echo "ERROR: could not download mpg123-decoder 1.0.3. Router needs Internet access during installation." >&2
+        exit 1
+    fi
+fi
+
 chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-audio /www/cgi-bin/iptvweb-audio-probe /www/cgi-bin/iptvweb-audio-pes /www/cgi-bin/iptvweb-capture
 [ -x /www/cgi-bin/iptvweb-stream ] || { echo "ERROR: iptvweb-stream was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-m3u ] || { echo "ERROR: iptvweb-m3u was not installed" >&2; exit 1; }
@@ -88,10 +117,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.18."
+echo "Installed 0.2.2-rev4.19."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.18: rev4.17.2 audio CGI requires Lua 5.1; package dependency/installer check added; Safari video chain unchanged;"
-echo "        mpegts.js 1.8.2 stays local; long-lived CGI still uses script_timeout=86400."
+echo "rev4.19: Safari video chain unchanged; MPEG Audio PES is decoded locally with mpg123-decoder 1.0.3 (MP2→PCM) then played via WebAudio;"
+echo "        mpegts.js 1.8.2 and mpg123-decoder 1.0.3 stay local; long-lived CGI still uses script_timeout=86400."
 echo "Force-refresh the player page (Ctrl+F5) after installing."

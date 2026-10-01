@@ -33,3 +33,28 @@ else
 fi
 mkdir -p /tmp
 exit 0
+# rev4.19: Fetch the local mpg123-decoder WASM bundle. Runtime playback is
+# local and does not contact a CDN.
+MPG_TARGET=/www/luci-static/resources/iptvweb/mpg123-decoder.min.js
+MPG_TMP=/tmp/mpg123-decoder.min.js.iptvweb
+MPG_URL1='https://cdn.jsdelivr.net/npm/mpg123-decoder@1.0.3/dist/mpg123-decoder.min.js'
+MPG_URL2='https://unpkg.com/mpg123-decoder@1.0.3/dist/mpg123-decoder.min.js'
+mpg_fetch_ok=0
+if command -v uclient-fetch >/dev/null 2>&1; then
+    uclient-fetch -q -O "$MPG_TMP" "$MPG_URL1" 2>/dev/null && mpg_fetch_ok=1 || true
+    if [ "$mpg_fetch_ok" = 0 ]; then
+        uclient-fetch -q -O "$MPG_TMP" "$MPG_URL2" 2>/dev/null && mpg_fetch_ok=1 || true
+    fi
+elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$MPG_TMP" "$MPG_URL1" && mpg_fetch_ok=1 || true
+    if [ "$mpg_fetch_ok" = 0 ]; then
+        wget -q -O "$MPG_TMP" "$MPG_URL2" && mpg_fetch_ok=1 || true
+    fi
+fi
+if [ "$mpg_fetch_ok" = 1 ] && [ -s "$MPG_TMP" ] && [ "$(wc -c < "$MPG_TMP")" -gt 50000 ] && grep -q 'MPEGDecoder' "$MPG_TMP" 2>/dev/null; then
+    mv -f "$MPG_TMP" "$MPG_TARGET"
+    chmod 0644 "$MPG_TARGET"
+else
+    rm -f "$MPG_TMP"
+    echo "iptvweb: WARNING: could not fetch mpg123-decoder 1.0.3; run install.sh again when the router has Internet access." >&2
+fi
