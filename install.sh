@@ -12,7 +12,7 @@ fi
 
 [ "$(id -u)" = 0 ] || { echo "Run as root"; exit 1; }
 
-# rev4.17.3: audio CGI uses Lua 5.1. OpenWrt 25.12 ships it as package "lua".
+# rev4.17.4: audio CGI uses Lua 5.1. OpenWrt 25.12 ships it as package "lua".
 if ! command -v lua >/dev/null 2>&1; then
   command -v apk >/dev/null 2>&1 || { echo "ERROR: apk is required to install Lua 5.1" >&2; exit 1; }
   echo "Lua runtime not found; installing package lua..."
@@ -88,10 +88,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.17.3."
+echo "Installed 0.2.2-rev4.17.4."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.17.3: rev4.17.2 audio CGI requires Lua 5.1; package dependency/installer check added; Safari video chain unchanged;"
+echo "rev4.17.4: rev4.17.2 audio CGI requires Lua 5.1; package dependency/installer check added; Safari video chain unchanged;"
 echo "        mpegts.js 1.8.2 stays local; long-lived CGI still uses script_timeout=86400."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
