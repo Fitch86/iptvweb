@@ -101,7 +101,7 @@ local function process(pkt)
 end
 local done=false
 while not done do
-  local chunk=pipe:read(65536); if not chunk or #chunk==0 then break end
+  local chunk=pipe:read(4096); if not chunk or #chunk==0 then break end
   tsbuf=tsbuf..chunk
   while #tsbuf>=188 and not done do
     if tsbuf:byte(1)~=0x47 then local n=tsbuf:find(string.char(0x47),2,true); if not n then tsbuf=tsbuf:sub(-187); break end; tsbuf=tsbuf:sub(n); if #tsbuf<188 then break end end
