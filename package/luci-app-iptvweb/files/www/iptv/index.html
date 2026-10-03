@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.21 Safari Video MSE + continuous MP2PCM + A/V sync</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.24 MPEG-1 Layer II PCM FIFO + Safari Video-only</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.21：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为连续 MPEG Audio PES 提取：路由器持续输出完整 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 增量解码为 PCM，并通过 WebAudio 连续排程；按视频首帧建立音频锚点，持续监测 A/V 漂移并在异常时重建音频排程。
+        rev4.23.2：Safari 从开始使用 H.264 Video-only；音频通过连续 MPEG Audio PES + 本地 mpg123-decoder 解码。AudioWorklet 可用时使用 AudioWorklet，否则在普通 HTTP LAN 页面使用 ScriptProcessorNode；两者均以 AudioContext 时钟播放，按视频首帧建立音频锚点。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -348,6 +348,10 @@ async function startWebAudioMpeg(ch, seq){
       if(part.done){ state.audioStreamDone=true; break; }
       if(!part.value || !part.value.byteLength) continue;
       const result=decoder.decode(part.value);
+      if(result && result.errors && result.errors.length){
+        state.webAudioError='decoder errors='+result.errors.length;
+        if(state.audioChunks<3) log('SAFARI_MP2PCM: decoder errors='+JSON.stringify(result.errors));
+      }
       if(!result || !result.channelData || !result.channelData.length || !result.samplesDecoded) continue;
       const channels=result.channelData.length;
       const samples=result.samplesDecoded;
@@ -392,7 +396,8 @@ async function startWebAudioMpeg(ch, seq){
 }
 
 function startAudioWorkletClock(seq){
-  if(seq!==state.seq || !state.webAudioCtx || !state.webAudioWorkletNode || state.audioStarted) return;
+  if(seq!==state.seq || !state.webAudioCtx || state.audioStarted) return;
+  if(state.webAudioBackend!=='worklet' && state.webAudioBackend!=='scriptprocessor') return;
   const v=$('video');
   if(!state.firstFrameAt && !state.firstPlayingAt) return;
   state.audioVideoAnchor=Number(v.currentTime||0);
@@ -402,6 +407,9 @@ function startAudioWorkletClock(seq){
   state.audioStartedAt=performance.now()+state.audioStartDelay*1000;
   if(state.webAudioBackend==='worklet' && state.webAudioWorkletNode){
     state.webAudioWorkletNode.port.postMessage({type:'start',startAt});
+  }
+  if(state.webAudioBackend==='scriptprocessor'){
+    log('SAFARI_MP2PCM: ScriptProcessor playback armed startAt='+startAt.toFixed(3)+' videoAnchor='+state.audioVideoAnchor.toFixed(3));
   }
   log('SAFARI_MP2PCM: audio anchor video='+state.audioVideoAnchor.toFixed(3)+' startDelay='+state.audioStartDelay.toFixed(2)+'s backend='+state.webAudioBackend);
 }
@@ -429,7 +437,7 @@ function audioSyncTick(seq){
 }
 
 function resetAudioSchedule(seq,reason){
-  if(seq!==state.seq || !state.webAudioCtx || !state.webAudioWorkletNode) return;
+  if(seq!==state.seq || !state.webAudioCtx || !state.audioStarted) return;
   const ctx=state.webAudioCtx;
   state.audioVideoAnchor=Number($('video').currentTime||0);
   const startAt=ctx.currentTime+0.10;
