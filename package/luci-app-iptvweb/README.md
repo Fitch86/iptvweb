@@ -18,3 +18,19 @@ rev4.17.2 仅修正音频 CGI 在 OpenWrt Lua 5.1 环境下使用 Lua 5.3 位运
 
 ## rev4.20
 Safari audio experiment based on rev4.18.2. The router still extracts a finite MPEG Audio/MP2 sample. The browser no longer calls `decodeAudioData()` for MP2; it loads a local `mpg123-decoder` 1.0.3 WASM bundle, decodes MPEG Layer I/II/III to Float32 PCM, creates an AudioBuffer, and plays it through WebAudio. The decoder bundle is downloaded during installation and served locally; there is no runtime CDN dependency.
+
+## rev4.21
+
+在 rev4.20 的 Safari H.264 Video-only + TS filter 基础上，改为连续 MP2PCM：
+
+- `iptvweb-audio-pes` 持续从 udpxy IPTV MPEG-TS 中提取完整 MPEG Audio 帧，不再只返回一次性短音频块。
+- 浏览器使用本地 `mpg123-decoder 1.0.3` 增量解码 MPEG Layer I/II/III。
+- PCM 通过 WebAudio `AudioBufferSourceNode` 连续排程，保持小延迟队列，避免“一开始有声、音频块播完就没声”。
+- 视频首帧后建立音频锚点；持续估算 A/V 漂移，漂移过大时丢弃已排程音频并重新建立短延迟锚点，避免实时直播延迟无限累积。
+- Safari 视频 TS filter / MSE fallback 不改。
+
+当前 CCTV1 实际音频已确认是 MPEG-1 Layer II，224 kbps，44.1 kHz，2 声道。rev4.21 的目标是验证连续 MP2PCM 在 Safari 上能否长期稳定播放并保持可接受的 A/V 同步。
+
+### 第三方库
+
+源码包中的 `mpegts.min.js` 和 `mpg123-decoder.min.js` 是安装引导标记；根目录 `install.sh` 会在路由器上下载并安装实际本地 JS/WASM 文件。需要路由器安装时能够访问 jsDelivr 或 unpkg；浏览器运行时不需要访问 CDN。

@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.20 Safari Video MSE + MP2PCM stable + A/V sync</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.21 Safari Video MSE + continuous MP2PCM + A/V sync</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.20：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为 MPEG Audio PES 提取实验：路由器先从 TS/PES 提取原始 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 将 MP2 解码为 PCM，再送入 WebAudio；不使用 decodeAudioData() 和独立原生 <audio>。
+        rev4.21：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为连续 MPEG Audio PES 提取：路由器持续输出完整 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 增量解码为 PCM，并通过 WebAudio 连续排程；按视频首帧建立音频锚点，持续监测 A/V 漂移并在异常时重建音频排程。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.20';
+const REV='4.21';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -111,12 +111,12 @@ const state={
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
-  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20,
+  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20, audioAbortController:null, audioReader:null, audioPcmQueue:[], audioQueuedSeconds:0, audioNextTime:0, audioScheduledDuration:0, audioPlayedEstimate:0, audioVideoAnchor:0, audioStarted:false, audioStreamDone:false, audioChunks:0, audioDecodedSamples:0, audioRate:0, audioChannels:0, audioSyncDrift:0, audioSyncResets:0, audioSources:[],
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
   lastVideoCodec:'', lastVideoWidth:0, lastVideoHeight:0,
-  diagTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0
+  diagTimer:0, audioSyncTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0
 };
 
 const $=id=>document.getElementById(id);
@@ -200,103 +200,143 @@ function probeIndependentAudio(ch, seq){
 async function startWebAudioMpeg(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const url=audioStreamUrl(ch);
-  log('SAFARI_AUDIO: MP2→PCM source='+url);
+  log('SAFARI_AUDIO: MP2PCM continuous source='+url);
   if(!url){ state.webAudioState='no-url'; state.webAudioError='cannot extract multicast /udp/group:port'; log('SAFARI_AUDIO: cannot extract multicast /udp/group:port; MP2 decoder disabled'); return; }
-  state.audioUrl=url;
-  probeIndependentAudio(ch, seq);
   if(!window.AudioContext && !window.webkitAudioContext){
-    state.webAudioState='unsupported'; state.webAudioError='AudioContext unavailable';
-    log('SAFARI_MP2PCM: AudioContext unavailable'); updateDiag(); return;
+    state.webAudioState='unsupported'; state.webAudioError='AudioContext unavailable'; log('SAFARI_MP2PCM: AudioContext unavailable'); updateDiag(); return;
   }
   const decNS=window['mpg123-decoder'];
   if(!decNS || !decNS.MPEGDecoder){
-    state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable';
-    log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable'); updateDiag(); return;
+    state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable'; log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable'); updateDiag(); return;
   }
   try{
     const Ctx=window.AudioContext||window.webkitAudioContext;
     const ctx=new Ctx(); state.webAudioCtx=ctx;
-    state.webAudioState='fetching';
+    state.webAudioState='connecting'; state.audioUrl=url;
+    state.audioAbortController=new AbortController();
+    state.audioPcmQueue=[]; state.audioQueuedSeconds=0; state.audioNextTime=0;
+    state.audioScheduledDuration=0; state.audioPlayedEstimate=0; state.audioVideoAnchor=0;
+    state.audioStarted=false; state.audioStreamDone=false; state.audioChunks=0; state.audioDecodedSamples=0;
+    state.audioRate=0; state.audioChannels=0; state.audioSyncDrift=0; state.audioSyncResets=0;
     log('SAFARI_MP2PCM: AudioContext created state='+ctx.state);
     try{ await ctx.resume(); log('SAFARI_MP2PCM: AudioContext resume state='+ctx.state); }catch(e){ log('SAFARI_MP2PCM: AudioContext resume failed '+e.name+': '+e.message); }
     if(seq!==state.seq) return;
 
-    const controller = new AbortController();
-    const fetchTimer = setTimeout(()=>controller.abort(), 7000);
-    let r;
-    try { r=await fetch(url,{cache:'no-store',signal:controller.signal}); }
-    finally { clearTimeout(fetchTimer); }
-    if(!r.ok) throw new Error('HTTP '+r.status);
-    const ab=await r.arrayBuffer();
-    if(seq!==state.seq) return;
-    if(!ab.byteLength) throw new Error('empty MPEG Audio PES extraction');
-    log('SAFARI_MP2PCM: fetched finite MPEG Audio bytes='+ab.byteLength);
-
-    state.webAudioState='decoding';
-    const decoder=new decNS.MPEGDecoder();
+    const decoder=new decNS.MPEGDecoder({enableGapless:false});
     state.webAudioDecoder=decoder;
     await decoder.ready;
     if(seq!==state.seq) return;
-    const result=decoder.decode(new Uint8Array(ab));
-    if(!result || !result.channelData || !result.channelData.length || !result.samplesDecoded){
-      throw new Error('MP2 decoder returned no PCM samples');
-    }
-    const channels=result.channelData.length;
-    const samples=result.samplesDecoded;
-    const rate=result.sampleRate||44100;
-    log('SAFARI_MP2PCM: decoded PCM samples='+samples+' rate='+rate+' channels='+channels+(result.errors&&result.errors.length?' errors='+result.errors.length:''));
-    if(seq!==state.seq) return;
+    state.webAudioState='streaming';
+    log('SAFARI_MP2PCM: decoder ready; continuous MPEG frame stream');
 
-    const buffer=ctx.createBuffer(channels, samples, rate);
-    for(let c=0;c<channels;c++){
-      const src=result.channelData[c];
-      if(src) buffer.copyToChannel(src.subarray ? src.subarray(0,samples) : src, c, 0);
+    const r=await fetch(url,{cache:'no-store',signal:state.audioAbortController.signal});
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    if(!r.body || !r.body.getReader) throw new Error('ReadableStream unavailable');
+    const reader=r.body.getReader();
+    state.audioReader=reader;
+    let pending=new Uint8Array(0);
+
+    while(seq===state.seq){
+      const part=await reader.read();
+      if(part.done){ state.audioStreamDone=true; break; }
+      if(!part.value || !part.value.byteLength) continue;
+      const x=part.value;
+      const merged=new Uint8Array(pending.length+x.length);
+      merged.set(pending,0); merged.set(x,pending.length); pending=merged;
+      // The CGI emits complete MPEG frames, but keep a small carry buffer so
+      // browser/network chunk boundaries can never split a decoder input unit.
+      if(pending.length<731) continue;
+      const input=pending;
+      pending=new Uint8Array(0);
+      const result=decoder.decode(input);
+      if(!result || !result.channelData || !result.channelData.length || !result.samplesDecoded) continue;
+      const channels=result.channelData.length;
+      const samples=result.samplesDecoded;
+      const rate=result.sampleRate||44100;
+      state.audioRate=rate; state.audioChannels=channels; state.audioChunks++; state.audioDecodedSamples+=samples;
+      const buffer=ctx.createBuffer(channels,samples,rate);
+      for(let c=0;c<channels;c++){
+        const src=result.channelData[c];
+        if(src) buffer.copyToChannel(src.subarray ? src.subarray(0,samples) : src,c,0);
+      }
+      state.audioPcmQueue.push(buffer); state.audioQueuedSeconds+=buffer.duration;
+      if(state.audioPcmQueue.length>12){
+        // Never allow an accidental network burst to build an unbounded live latency.
+        log('SAFARI_MP2PCM: PCM queue cap; dropping oldest queued chunk');
+        const drop=state.audioPcmQueue.shift(); state.audioQueuedSeconds-=drop.duration;
+      }
+      if(state.firstFrameAt || state.firstPlayingAt) schedulePcmQueue(seq);
+      updateDiag();
     }
-    state.webAudioBuffer=buffer;
-    state.webAudioState='decoded';
-    state.audioPendingStart=true;
-    state.audioPlaying=false;
-    const src=ctx.createBufferSource();
-    src.buffer=buffer; src.connect(ctx.destination); state.webAudioSource=src;
-    src.onended=()=>{ if(seq!==state.seq) return; state.audioPlaying=false; state.audioPendingStart=false; log('SAFARI_MP2PCM: PCM playback ended'); updateDiag(); };
-    log('SAFARI_MP2PCM: PCM ready duration='+buffer.duration.toFixed(3)+'s; waiting for video first frame');
-    scheduleWebAudioAfterVideo(seq);
-    updateDiag();
+    try{ reader.releaseLock(); }catch(e){}
+    state.audioReader=null;
+    if(state.audioStreamDone) log('SAFARI_MP2PCM: stream ended');
   }catch(e){
-    if(seq!==state.seq) return;
+    if(seq!==state.seq || e.name==='AbortError') return;
     state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioError='WebAudioMP2PCMError';
-    log('SAFARI_MP2PCM: '+e.name+': '+e.message);
-    updateDiag();
+    log('SAFARI_MP2PCM: '+e.name+': '+e.message); updateDiag();
   }
 }
 
-function scheduleWebAudioAfterVideo(seq){
-  if(seq!==state.seq || !state.audioPendingStart || !state.webAudioCtx || !state.webAudioSource) return;
-  if(state.audioStartTimer) return;
-  const v=$('video');
-  const hasVideoFrame=!!state.firstFrameAt;
-  const isPlaying=!!state.firstPlayingAt || (!v.paused && v.readyState>=2);
-  if(!hasVideoFrame && !isPlaying) return;
-  const ctx=state.webAudioCtx;
-  const delay=state.audioStartDelay;
-  const when=ctx.currentTime+delay;
-  state.audioStartTimer=setTimeout(()=>{
-    state.audioStartTimer=0;
-    if(seq!==state.seq || !state.audioPendingStart || !state.webAudioSource) return;
-    try{
-      state.webAudioSource.start(when);
-      state.audioScheduledAt=when;
-      state.audioStartedAt=performance.now()+delay*1000;
-      state.audioPlaying=true;
-      state.audioPendingStart=false;
-      log('SAFARI_MP2PCM: PCM scheduled '+delay.toFixed(2)+'s after video start; startAt='+when.toFixed(3)+' ctx='+ctx.currentTime.toFixed(3));
-      updateDiag();
-    }catch(e){
-      state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioPlaying=false; state.audioPendingStart=false;
-      log('SAFARI_MP2PCM: PCM schedule failed '+e.name+': '+e.message); updateDiag();
-    }
-  }, 0);
+function schedulePcmQueue(seq){
+  if(seq!==state.seq || !state.webAudioCtx || !state.audioPcmQueue.length) return;
+  const ctx=state.webAudioCtx, v=$('video');
+  if(!state.audioStarted){
+    if(!state.firstFrameAt && !state.firstPlayingAt) return;
+    state.audioVideoAnchor=Number(v.currentTime||0);
+    state.audioNextTime=ctx.currentTime+state.audioStartDelay;
+    state.audioStarted=true; state.audioPlaying=true; state.audioPendingStart=false;
+    state.audioStartedAt=performance.now()+state.audioStartDelay*1000;
+    log('SAFARI_MP2PCM: audio anchor video='+state.audioVideoAnchor.toFixed(3)+' startDelay='+state.audioStartDelay.toFixed(2)+'s');
+  }
+  while(state.audioPcmQueue.length){
+    const buffer=state.audioPcmQueue[0];
+    const now=ctx.currentTime;
+    const lead=state.audioNextTime-now;
+    if(lead>0.90) break;
+    state.audioPcmQueue.shift(); state.audioQueuedSeconds-=buffer.duration;
+    const src=ctx.createBufferSource(); src.buffer=buffer; src.connect(ctx.destination);
+    const when=Math.max(state.audioNextTime,now+0.03);
+    const duration=buffer.duration;
+    src.onended=()=>{ try{src.disconnect();}catch(e){} };
+    try{ src.start(when); }catch(e){ state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioPlaying=false; log('SAFARI_MP2PCM: chunk schedule failed '+e.name+': '+e.message); return; }
+    state.audioSources.push(src);
+    state.audioNextTime=when+duration;
+    state.audioScheduledDuration+=duration;
+    if(state.audioSources.length>8){ const old=state.audioSources.shift(); try{old.onended=null;old.disconnect();}catch(e){} }
+  }
+  state.webAudioState='playing';
+  updateDiag();
 }
+
+function audioSyncTick(seq){
+  if(seq!==state.seq || !state.webAudioCtx || !state.audioStarted) return;
+  const ctx=state.webAudioCtx, v=$('video');
+  const now=ctx.currentTime;
+  const queuedAhead=Math.max(0,state.audioNextTime-now);
+  const audioPos=Math.max(0,state.audioScheduledDuration-queuedAhead);
+  const videoPos=Math.max(0,(Number(v.currentTime||0)-state.audioVideoAnchor));
+  const drift=audioPos-videoPos;
+  state.audioPlayedEstimate=audioPos; state.audioSyncDrift=drift;
+  if(Math.abs(drift)>0.35){
+    log('SAFARI_AVSYNC: drift='+drift.toFixed(3)+'s video='+videoPos.toFixed(3)+' audio='+audioPos.toFixed(3)+' queued='+queuedAhead.toFixed(3)+'s');
+    // Drop already queued PCM and restart at a short latency. This avoids accumulating
+    // seconds of live delay while keeping the decoder stream itself continuous.
+    resetAudioSchedule(seq,'drift');
+  }
+  schedulePcmQueue(seq);
+  updateDiag();
+}
+
+function resetAudioSchedule(seq,reason){
+  if(seq!==state.seq || !state.webAudioCtx) return;
+  const ctx=state.webAudioCtx;
+  state.audioSources.forEach(x=>{try{x.onended=null;x.stop(0);x.disconnect();}catch(e){}});
+  state.audioSources=[]; state.audioNextTime=ctx.currentTime+0.10; state.audioScheduledDuration=0; state.audioPlayedEstimate=0; state.audioVideoAnchor=Number($('video').currentTime||0); state.audioSyncResets++;
+  if(reason) log('SAFARI_AVSYNC: schedule reset reason='+reason+' reset#='+state.audioSyncResets);
+}
+
+function scheduleWebAudioAfterVideo(seq){ schedulePcmQueue(seq); }
 
 function renderGroups(){
   const html=state.groups.map(g=>{
@@ -371,6 +411,7 @@ function stopDiagTimers(){
   if(state.stuckTimer){ clearInterval(state.stuckTimer); state.stuckTimer=0; }
   if(state.timelineTimer){ clearInterval(state.timelineTimer); state.timelineTimer=0; }
   if(state.diagTimer){ clearInterval(state.diagTimer); state.diagTimer=0; }
+  if(state.audioSyncTimer){ clearInterval(state.audioSyncTimer); state.audioSyncTimer=0; }
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
 }
 function startDiagTimer(seq){
@@ -382,19 +423,24 @@ function startDiagTimer(seq){
 }
 function stopWebAudio(){
   if(state.audioStartTimer){ clearTimeout(state.audioStartTimer); state.audioStartTimer=0; }
-  try{ if(state.webAudioSource){ state.webAudioSource.onended=null; state.webAudioSource.stop(0); } }catch(e){}
-  try{ if(state.webAudioSource) state.webAudioSource.disconnect(); }catch(e){}
+  if(state.audioSyncTimer){ clearInterval(state.audioSyncTimer); state.audioSyncTimer=0; }
+  try{ if(state.audioAbortController) state.audioAbortController.abort(); }catch(e){}
+  state.audioAbortController=null;
+  try{ if(state.audioReader) state.audioReader.cancel(); }catch(e){}
+  state.audioReader=null;
+  state.audioSources.forEach(x=>{try{x.onended=null;x.stop(0);x.disconnect();}catch(e){}});
+  state.audioSources=[];
+  try{ if(state.webAudioSource){ state.webAudioSource.onended=null; state.webAudioSource.stop(0); state.webAudioSource.disconnect(); } }catch(e){}
   state.webAudioSource=null;
   try{ if(state.webAudioDecoder){ state.webAudioDecoder.free(); } }catch(e){}
   state.webAudioDecoder=null;
   try{ if(state.webAudioCtx){ state.webAudioCtx.close(); } }catch(e){}
   state.webAudioCtx=null;
   state.webAudioBuffer=null;
-  state.webAudioState='off';
-  state.webAudioError='';
-  state.audioPlaying=false;
-  state.audioPendingStart=false;
-  state.audioScheduledAt=0;
+  state.audioPcmQueue=[]; state.audioQueuedSeconds=0; state.audioNextTime=0; state.audioScheduledDuration=0;
+  state.audioPlayedEstimate=0; state.audioVideoAnchor=0; state.audioStarted=false; state.audioStreamDone=false;
+  state.audioChunks=0; state.audioDecodedSamples=0; state.audioRate=0; state.audioChannels=0; state.audioSyncDrift=0;
+  state.webAudioState='off'; state.webAudioError=''; state.audioPlaying=false; state.audioPendingStart=false; state.audioScheduledAt=0;
 }
 
 function stopPlayer(){
@@ -577,7 +623,7 @@ function updateDiag(){
     '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
     '【Chrome计数】 '+chromeCounters(v)+'\n'+
     '【MSE】 '+mseDump()+'\n'+
-    '【独立音频】 WebAudio='+(state.webAudioState||'off')+' playing='+(state.audioPlaying?'yes':'no')+' error='+(state.webAudioError||state.audioError||'-')+'\n'+
+    '【独立音频】 MP2PCM='+(state.webAudioState||'off')+' playing='+(state.audioPlaying?'yes':'no')+' rate='+(state.audioRate||'-')+'Hz ch='+(state.audioChannels||'-')+' chunks='+(state.audioChunks||0)+' queued='+(state.audioQueuedSeconds||0).toFixed(2)+'s drift='+(state.audioSyncDrift||0).toFixed(3)+'s reset='+(state.audioSyncResets||0)+' error='+(state.webAudioError||state.audioError||'-')+'\n'+
     '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive='+(isIOSSafari()?'true':'false')+' stash=384KB\n'+
     '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+effectivePaused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
     '【错误】 '+(state.lastErrorText||'-')+'\n'+
@@ -611,6 +657,7 @@ function attachVideoDiagnostics(v, seq){
     if(ev==='playing'){
       state.playingSince=now; state.lastProgressWall=now; state.lastProgressTime=v.currentTime||0;
       scheduleWebAudioAfterVideo(seq);
+      if(!state.audioSyncTimer) state.audioSyncTimer=setInterval(()=>audioSyncTick(seq),500);
       if(state.waitingStart){
         extra=' waitingRecovered='+((now-state.waitingStart)/1000).toFixed(3)+'s current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
         state.waitingStart=0;
