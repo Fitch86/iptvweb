@@ -27,7 +27,7 @@ fi
 
 mkdir -p /etc/uci-defaults /usr/bin /www/iptv /www/cgi-bin \
   /usr/share/luci/menu.d /usr/share/rpcd/acl.d \
-  /www/luci-static/resources/view /www/luci-static/resources/iptvweb
+  /www/luci-static/resources/view /www/luci-static/resources/iptvweb /www/luci-static/resources/iptvweb/audio-worklet
 
 cp -f "$FILES/usr/bin/iptvweb-fetch" /usr/bin/iptvweb-fetch
 cp -f "$FILES/www/iptv/index.html" /www/iptv/index.html
@@ -41,6 +41,7 @@ cp -f "$FILES/usr/share/luci/menu.d/luci-app-iptvweb.json" /usr/share/luci/menu.
 cp -f "$FILES/usr/share/rpcd/acl.d/luci-app-iptvweb.json" /usr/share/rpcd/acl.d/luci-app-iptvweb.json
 cp -f "$FILES/www/luci-static/resources/view/iptvweb.js" /www/luci-static/resources/view/iptvweb.js
 cp -f "$FILES/www/luci-static/resources/iptvweb/mpg123-decoder.min.js" /www/luci-static/resources/iptvweb/mpg123-decoder.min.js
+cp -f "$FILES/www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js" /www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js
 
 # Keep a working local mpegts.js across reinstalls. Only replace with the
 # stub if no real copy exists yet; install then tries to download 1.8.0.
@@ -117,10 +118,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.21.1."
+echo "Installed 0.2.2-rev4.23."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.21.1: Safari video chain unchanged; MPEG Audio PES is decoded locally with mpg123-decoder 1.0.3 (MP2→PCM) then played via WebAudio;"
+echo "rev4.23: Safari video chain unchanged; MPEG Audio PES is decoded locally with mpg123-decoder 1.0.3 (MP2→PCM) and played by an AudioWorklet stereo PCM ring buffer;"
 echo "        mpegts.js 1.8.2 and mpg123-decoder 1.0.3 stay local; long-lived CGI still uses script_timeout=86400."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
