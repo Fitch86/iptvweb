@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.19 Safari Video MSE + MP2→PCM experiment</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.20 Safari Video MSE + MP2PCM stable + A/V sync</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.19：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为 MPEG Audio PES 提取实验：路由器先从 TS/PES 提取原始 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 将 MP2 解码为 PCM，再送入 WebAudio；不使用 decodeAudioData() 和独立原生 <audio>。
+        rev4.20：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为 MPEG Audio PES 提取实验：路由器先从 TS/PES 提取原始 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 将 MP2 解码为 PCM，再送入 WebAudio；不使用 decodeAudioData() 和独立原生 <audio>。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.19';
+const REV='4.20';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -111,7 +111,7 @@ const state={
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
-  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioState:'off', webAudioError:'', webAudioInfo:null,
+  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20,
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
@@ -254,13 +254,13 @@ async function startWebAudioMpeg(ch, seq){
     }
     state.webAudioBuffer=buffer;
     state.webAudioState='decoded';
-    state.audioPlaying=true;
-    state.audioStartedAt=performance.now();
+    state.audioPendingStart=true;
+    state.audioPlaying=false;
     const src=ctx.createBufferSource();
     src.buffer=buffer; src.connect(ctx.destination); state.webAudioSource=src;
-    src.onended=()=>{ if(seq!==state.seq) return; state.audioPlaying=false; log('SAFARI_MP2PCM: PCM playback ended'); updateDiag(); };
-    src.start(0);
-    log('SAFARI_MP2PCM: PCM AudioBufferSource started duration='+buffer.duration.toFixed(3)+'s');
+    src.onended=()=>{ if(seq!==state.seq) return; state.audioPlaying=false; state.audioPendingStart=false; log('SAFARI_MP2PCM: PCM playback ended'); updateDiag(); };
+    log('SAFARI_MP2PCM: PCM ready duration='+buffer.duration.toFixed(3)+'s; waiting for video first frame');
+    scheduleWebAudioAfterVideo(seq);
     updateDiag();
   }catch(e){
     if(seq!==state.seq) return;
@@ -268,6 +268,34 @@ async function startWebAudioMpeg(ch, seq){
     log('SAFARI_MP2PCM: '+e.name+': '+e.message);
     updateDiag();
   }
+}
+
+function scheduleWebAudioAfterVideo(seq){
+  if(seq!==state.seq || !state.audioPendingStart || !state.webAudioCtx || !state.webAudioSource) return;
+  if(state.audioStartTimer) return;
+  const v=$('video');
+  const hasVideoFrame=!!state.firstFrameAt;
+  const isPlaying=!!state.firstPlayingAt || (!v.paused && v.readyState>=2);
+  if(!hasVideoFrame && !isPlaying) return;
+  const ctx=state.webAudioCtx;
+  const delay=state.audioStartDelay;
+  const when=ctx.currentTime+delay;
+  state.audioStartTimer=setTimeout(()=>{
+    state.audioStartTimer=0;
+    if(seq!==state.seq || !state.audioPendingStart || !state.webAudioSource) return;
+    try{
+      state.webAudioSource.start(when);
+      state.audioScheduledAt=when;
+      state.audioStartedAt=performance.now()+delay*1000;
+      state.audioPlaying=true;
+      state.audioPendingStart=false;
+      log('SAFARI_MP2PCM: PCM scheduled '+delay.toFixed(2)+'s after video start; startAt='+when.toFixed(3)+' ctx='+ctx.currentTime.toFixed(3));
+      updateDiag();
+    }catch(e){
+      state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioPlaying=false; state.audioPendingStart=false;
+      log('SAFARI_MP2PCM: PCM schedule failed '+e.name+': '+e.message); updateDiag();
+    }
+  }, 0);
 }
 
 function renderGroups(){
@@ -353,6 +381,7 @@ function startDiagTimer(seq){
   }, 500);
 }
 function stopWebAudio(){
+  if(state.audioStartTimer){ clearTimeout(state.audioStartTimer); state.audioStartTimer=0; }
   try{ if(state.webAudioSource){ state.webAudioSource.onended=null; state.webAudioSource.stop(0); } }catch(e){}
   try{ if(state.webAudioSource) state.webAudioSource.disconnect(); }catch(e){}
   state.webAudioSource=null;
@@ -364,6 +393,8 @@ function stopWebAudio(){
   state.webAudioState='off';
   state.webAudioError='';
   state.audioPlaying=false;
+  state.audioPendingStart=false;
+  state.audioScheduledAt=0;
 }
 
 function stopPlayer(){
@@ -579,6 +610,7 @@ function attachVideoDiagnostics(v, seq){
     }
     if(ev==='playing'){
       state.playingSince=now; state.lastProgressWall=now; state.lastProgressTime=v.currentTime||0;
+      scheduleWebAudioAfterVideo(seq);
       if(state.waitingStart){
         extra=' waitingRecovered='+((now-state.waitingStart)/1000).toFixed(3)+'s current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
         state.waitingStart=0;
@@ -605,6 +637,7 @@ function attachVideoDiagnostics(v, seq){
       if(!state.firstFrameAt){
         state.firstFrameAt=performance.now();
         log('video.firstFrame rVFC mediaTime='+(meta.mediaTime??'?')+' presentedFrames='+(meta.presentedFrames??'?'));
+        scheduleWebAudioAfterVideo(seq);
       }
       v.requestVideoFrameCallback(cb);
     };

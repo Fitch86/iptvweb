@@ -16,5 +16,5 @@ rev4.17.2 仅修正音频 CGI 在 OpenWrt Lua 5.1 环境下使用 Lua 5.3 位运
 
 很小的 MP2 能力验证版：独立音频 CGI 只返回有限数量的完整 MPEG-1 Layer II 帧（约 64 KiB），避免无限流导致 fetch 永远等待；Safari WebAudio 对这段有限 MP2 数据调用 `AudioContext.decodeAudioData()`。视频 H.264 Video-only / Safari MSE fallback 链完全不变。
 
-## rev4.19
+## rev4.20
 Safari audio experiment based on rev4.18.2. The router still extracts a finite MPEG Audio/MP2 sample. The browser no longer calls `decodeAudioData()` for MP2; it loads a local `mpg123-decoder` 1.0.3 WASM bundle, decodes MPEG Layer I/II/III to Float32 PCM, creates an AudioBuffer, and plays it through WebAudio. The decoder bundle is downloaded during installation and served locally; there is no runtime CDN dependency.
