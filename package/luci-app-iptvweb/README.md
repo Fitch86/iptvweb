@@ -36,7 +36,7 @@ Safari audio experiment based on rev4.18.2. The router still extracts a finite M
 源码包中的 `mpegts.min.js` 和 `mpg123-decoder.min.js` 是安装引导标记；根目录 `install.sh` 会在路由器上下载并安装实际本地 JS/WASM 文件。需要路由器安装时能够访问 jsDelivr 或 unpkg；浏览器运行时不需要访问 CDN。
 
 
-## rev4.24
+## rev4.23.1
 
 Safari MP2PCM 优先 AudioWorklet + 实时 PCM RingBuffer；在普通 HTTP LAN 页面上 AudioWorklet 不可用时自动使用 ScriptProcessor 实时 PCM RingBuffer 回退。保留 rev4.21.1 的 Safari H.264 Video-only TS filter、连续 `iptvweb-audio-pes` 和本地 `mpg123-decoder 1.0.3`。浏览器不再使用 `AudioBufferSourceNode` 逐块排程，也不再通过 queue cap 丢弃旧 PCM。
 
@@ -46,13 +46,3 @@ Safari MP2PCM 优先 AudioWorklet + 实时 PCM RingBuffer；在普通 HTTP LAN �
 - A/V 同步改为比较 Video `currentTime` 与 AudioContext 时钟；普通网络抖动不清空音频，只有较大漂移才重新锚定。
 - 诊断增加 ring、inFlight、underrun、overflow。
 - 不需要 SharedArrayBuffer/Cross-Origin-Isolation。
-
-
-### rev4.24
-修复普通 HTTP LAN 的 iOS Safari：AudioWorklet 不可用时，ScriptProcessor fallback 现在会正确建立音频播放锚点。之前 fallback 虽然解码并入队，但 `startAudioWorkletClock()` 依赖 AudioWorkletNode，导致 `audioStarted` 永远为 false，因此没有实际输出声音。此版同时增加 mpg123 decoder error 诊断。
-
-## rev4.24
-- CCTV1 音频严格锁定为 MPEG-1 Layer II / 224 kbps / 44.1 kHz / 2ch。
-- 路由器端连续帧提取要求有效的下一帧头，降低 MPEG sync 假锁定。
-- Safari MP2→PCM 在真正启动 WebAudio 前先积累约 350ms PCM FIFO。
-- ScriptProcessor/AudioWorklet 均使用 PCM FIFO 的实际播放时钟，不再首帧即启动。
