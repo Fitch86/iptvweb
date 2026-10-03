@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.21';
+const REV='4.21.1';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -111,7 +111,7 @@ const state={
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
-  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20, audioAbortController:null, audioReader:null, audioPcmQueue:[], audioQueuedSeconds:0, audioNextTime:0, audioScheduledDuration:0, audioPlayedEstimate:0, audioVideoAnchor:0, audioStarted:false, audioStreamDone:false, audioChunks:0, audioDecodedSamples:0, audioRate:0, audioChannels:0, audioSyncDrift:0, audioSyncResets:0, audioSources:[],
+  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20, audioAbortController:null, audioReader:null, audioPcmQueue:[], audioQueuedSeconds:0, audioNextTime:0, audioScheduledDuration:0, audioPlayedEstimate:0, audioVideoAnchor:0, audioStartContextTime:0, audioLastResetAt:0, audioStarted:false, audioStreamDone:false, audioChunks:0, audioDecodedSamples:0, audioRate:0, audioChannels:0, audioSyncDrift:0, audioSyncResets:0, audioSources:[],
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
@@ -234,21 +234,16 @@ async function startWebAudioMpeg(ch, seq){
     if(!r.body || !r.body.getReader) throw new Error('ReadableStream unavailable');
     const reader=r.body.getReader();
     state.audioReader=reader;
-    let pending=new Uint8Array(0);
-
     while(seq===state.seq){
       const part=await reader.read();
       if(part.done){ state.audioStreamDone=true; break; }
       if(!part.value || !part.value.byteLength) continue;
-      const x=part.value;
-      const merged=new Uint8Array(pending.length+x.length);
-      merged.set(pending,0); merged.set(x,pending.length); pending=merged;
-      // The CGI emits complete MPEG frames, but keep a small carry buffer so
-      // browser/network chunk boundaries can never split a decoder input unit.
-      if(pending.length<731) continue;
-      const input=pending;
-      pending=new Uint8Array(0);
-      const result=decoder.decode(input);
+      // IMPORTANT: ReadableStream chunk boundaries are arbitrary. Do NOT assume
+      // one read() is aligned to MPEG frame boundaries, and never discard a tail.
+      // mpg123-decoder keeps its own MPEG frame carry state, so feed every network
+      // chunk directly. The previous rev4.21 implementation could silently drop
+      // the partial tail of every chunk, producing bad pitch/speed and artifacts.
+      const result=decoder.decode(part.value);
       if(!result || !result.channelData || !result.channelData.length || !result.samplesDecoded) continue;
       const channels=result.channelData.length;
       const samples=result.samplesDecoded;
@@ -285,6 +280,7 @@ function schedulePcmQueue(seq){
     if(!state.firstFrameAt && !state.firstPlayingAt) return;
     state.audioVideoAnchor=Number(v.currentTime||0);
     state.audioNextTime=ctx.currentTime+state.audioStartDelay;
+    state.audioStartContextTime=state.audioNextTime;
     state.audioStarted=true; state.audioPlaying=true; state.audioPendingStart=false;
     state.audioStartedAt=performance.now()+state.audioStartDelay*1000;
     log('SAFARI_MP2PCM: audio anchor video='+state.audioVideoAnchor.toFixed(3)+' startDelay='+state.audioStartDelay.toFixed(2)+'s');
@@ -314,14 +310,17 @@ function audioSyncTick(seq){
   const ctx=state.webAudioCtx, v=$('video');
   const now=ctx.currentTime;
   const queuedAhead=Math.max(0,state.audioNextTime-now);
-  const audioPos=Math.max(0,state.audioScheduledDuration-queuedAhead);
+  // Both video.currentTime and AudioContext.currentTime are live clocks. Compare
+  // elapsed time from the actual first AudioBufferSource start, rather than using
+  // cumulative scheduled duration. The old formula mixed future queued audio with
+  // already-played audio and therefore reported a large false drift repeatedly.
+  const audioPos=Math.max(0,now-state.audioStartContextTime);
   const videoPos=Math.max(0,(Number(v.currentTime||0)-state.audioVideoAnchor));
   const drift=audioPos-videoPos;
   state.audioPlayedEstimate=audioPos; state.audioSyncDrift=drift;
-  if(Math.abs(drift)>0.35){
+  const sinceReset=state.audioLastResetAt ? (performance.now()-state.audioLastResetAt)/1000 : 999;
+  if(Math.abs(drift)>0.60 && sinceReset>=5){
     log('SAFARI_AVSYNC: drift='+drift.toFixed(3)+'s video='+videoPos.toFixed(3)+' audio='+audioPos.toFixed(3)+' queued='+queuedAhead.toFixed(3)+'s');
-    // Drop already queued PCM and restart at a short latency. This avoids accumulating
-    // seconds of live delay while keeping the decoder stream itself continuous.
     resetAudioSchedule(seq,'drift');
   }
   schedulePcmQueue(seq);
@@ -332,7 +331,14 @@ function resetAudioSchedule(seq,reason){
   if(seq!==state.seq || !state.webAudioCtx) return;
   const ctx=state.webAudioCtx;
   state.audioSources.forEach(x=>{try{x.onended=null;x.stop(0);x.disconnect();}catch(e){}});
-  state.audioSources=[]; state.audioNextTime=ctx.currentTime+0.10; state.audioScheduledDuration=0; state.audioPlayedEstimate=0; state.audioVideoAnchor=Number($('video').currentTime||0); state.audioSyncResets++;
+  state.audioSources=[];
+  state.audioNextTime=ctx.currentTime+0.10;
+  state.audioStartContextTime=state.audioNextTime;
+  state.audioScheduledDuration=0;
+  state.audioPlayedEstimate=0;
+  state.audioVideoAnchor=Number($('video').currentTime||0);
+  state.audioLastResetAt=performance.now();
+  state.audioSyncResets++;
   if(reason) log('SAFARI_AVSYNC: schedule reset reason='+reason+' reset#='+state.audioSyncResets);
 }
 
@@ -438,8 +444,8 @@ function stopWebAudio(){
   state.webAudioCtx=null;
   state.webAudioBuffer=null;
   state.audioPcmQueue=[]; state.audioQueuedSeconds=0; state.audioNextTime=0; state.audioScheduledDuration=0;
-  state.audioPlayedEstimate=0; state.audioVideoAnchor=0; state.audioStarted=false; state.audioStreamDone=false;
-  state.audioChunks=0; state.audioDecodedSamples=0; state.audioRate=0; state.audioChannels=0; state.audioSyncDrift=0;
+  state.audioPlayedEstimate=0; state.audioVideoAnchor=0; state.audioStartContextTime=0; state.audioLastResetAt=0; state.audioStarted=false; state.audioStreamDone=false;
+  state.audioChunks=0; state.audioDecodedSamples=0; state.audioRate=0; state.audioChannels=0; state.audioSyncDrift=0; state.audioLastResetAt=0;
   state.webAudioState='off'; state.webAudioError=''; state.audioPlaying=false; state.audioPendingStart=false; state.audioScheduledAt=0;
 }
 
