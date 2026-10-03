@@ -1,5 +1,5 @@
 #!/usr/bin/lua
--- rev4.23.1-audio-fix2: continuous MPEG audio frame extractor with validated sync search.
+-- rev4.21: continuous MPEG-1/2 Layer I/II/III audio frame extractor for WebAudio.
 -- The CGI stays open and streams complete MPEG audio frames as they arrive.
 
 local function qget(name)
@@ -28,11 +28,10 @@ local pipe=io.popen("uclient-fetch -q -O - 'http://"..udpxy.."/udp/"..group..":"
 if not pipe then os.exit(1) end
 pcall(function() io.stdout:setvbuf('no') end)
 
-io.write('Content-Type: application/octet-stream\r\n')
+io.write('Content-Type: audio/mpeg\r\n')
 io.write('Cache-Control: no-store, no-cache, must-revalidate\r\n')
 io.write('Pragma: no-cache\r\n')
-io.write('X-Content-Type-Options: nosniff\r\n')
-io.write('Connection: close\r\n\r\n')
+io.write('X-Content-Type-Options: nosniff\r\n\r\n')
 io.flush()
 
 local tsbuf=''
@@ -133,13 +132,8 @@ local function emit_ready_frames(force)
   local emitted=0
   while #pesbuf>=4 do
     local pos=nil
-    for i=1,#pesbuf-3 do
-      if pesbuf:byte(i)==0xff and band(pesbuf:byte(i+1),0xe0)==0xe0 then
-        if header(pesbuf,i) then
-          pos=i
-          break
-        end
-      end
+    for i=1,#pesbuf-1 do
+      if pesbuf:byte(i)==0xff and band(pesbuf:byte(i+1),0xe0)==0xe0 then pos=i; break end
     end
     if not pos then
       pesbuf=pesbuf:sub(-3)
