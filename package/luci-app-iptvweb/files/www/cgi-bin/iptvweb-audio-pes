@@ -28,10 +28,11 @@ local pipe=io.popen("uclient-fetch -q -O - 'http://"..udpxy.."/udp/"..group..":"
 if not pipe then os.exit(1) end
 pcall(function() io.stdout:setvbuf('no') end)
 
-io.write('Content-Type: audio/mpeg\r\n')
+io.write('Content-Type: application/octet-stream\r\n')
 io.write('Cache-Control: no-store, no-cache, must-revalidate\r\n')
 io.write('Pragma: no-cache\r\n')
-io.write('X-Content-Type-Options: nosniff\r\n\r\n')
+io.write('X-Content-Type-Options: nosniff\r\n')
+io.write('Connection: close\r\n\r\n')
 io.flush()
 
 local tsbuf=''
