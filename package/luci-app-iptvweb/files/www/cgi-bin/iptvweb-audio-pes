@@ -1,5 +1,5 @@
 #!/usr/bin/lua
--- rev4.23.1-audio-fix1: continuous MPEG-1/2 Layer I/II/III audio frame extractor for WebAudio.
+-- rev4.23.1-audio-fix2: continuous MPEG audio frame extractor with validated sync search.
 -- The CGI stays open and streams complete MPEG audio frames as they arrive.
 
 local function qget(name)
@@ -133,11 +133,12 @@ local function emit_ready_frames(force)
   local emitted=0
   while #pesbuf>=4 do
     local pos=nil
-    -- Find a possible MPEG sync word and require a valid complete header.
-    for i=1,#pesbuf-1 do
+    for i=1,#pesbuf-3 do
       if pesbuf:byte(i)==0xff and band(pesbuf:byte(i+1),0xe0)==0xe0 then
-        local h=header(pesbuf,i)
-        if h then pos=i; break end
+        if header(pesbuf,i) then
+          pos=i
+          break
+        end
       end
     end
     if not pos then
@@ -145,34 +146,23 @@ local function emit_ready_frames(force)
       break
     end
     if pos>1 then pesbuf=pesbuf:sub(pos) end
-    local h=header(pesbuf,1)
-    if not h then
+    local len=header(pesbuf,1)
+    if not len then
       pesbuf=pesbuf:sub(2)
-    elseif #pesbuf<h then
+    elseif #pesbuf<len then
       break
     else
-      -- When the next complete frame is already buffered, validate its
-      -- header as well. This prevents a false ff Ex sync inside MP2 data
-      -- from permanently shifting the MPEG frame boundary.
-      local next_ok=true
-      if #pesbuf>=h+4 then
-        next_ok=(header(pesbuf,h+1)~=nil)
-      end
-      if not next_ok then
-        pesbuf=pesbuf:sub(2)
-      else
-        outbuf=outbuf..pesbuf:sub(1,h)
-        pesbuf=pesbuf:sub(h+1)
-        frames=frames+1
-        frames_since_flush=frames_since_flush+1
-        total_bytes=total_bytes+h
-        emitted=emitted+1
-        if #outbuf>=8192 or frames_since_flush>=12 then
-          io.write(outbuf)
-          io.flush()
-          outbuf=''
-          frames_since_flush=0
-        end
+      outbuf=outbuf..pesbuf:sub(1,len)
+      pesbuf=pesbuf:sub(len+1)
+      frames=frames+1
+      frames_since_flush=frames_since_flush+1
+      total_bytes=total_bytes+len
+      emitted=emitted+1
+      if #outbuf>=8192 or frames_since_flush>=12 then
+        io.write(outbuf)
+        io.flush()
+        outbuf=''
+        frames_since_flush=0
       end
     end
   end
