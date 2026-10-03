@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.21 Safari Video MSE + continuous MP2PCM + A/V sync</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.22 Safari Video-only + continuous MP2PCM + A/V sync</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.21：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为连续 MPEG Audio PES 提取：路由器持续输出完整 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 增量解码为 PCM，并通过 WebAudio 连续排程；按视频首帧建立音频锚点，持续监测 A/V 漂移并在异常时重建音频排程。
+        rev4.22：Safari 从频道点击开始直接使用 rev4.14 验证过的 H.264 Video-only + TS filter，不再先创建带音频的 MSE 再 fallback；独立音频持续 MPEG Audio PES → mpg123 PCM → WebAudio 连续排程。修复 AudioBufferSourceNode 过早 disconnect 导致的音频截断，并持续监测 A/V 漂移。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -294,12 +294,15 @@ function schedulePcmQueue(seq){
     const src=ctx.createBufferSource(); src.buffer=buffer; src.connect(ctx.destination);
     const when=Math.max(state.audioNextTime,now+0.03);
     const duration=buffer.duration;
-    src.onended=()=>{ try{src.disconnect();}catch(e){} };
+    src.onended=()=>{
+      const i=state.audioSources.indexOf(src);
+      if(i>=0) state.audioSources.splice(i,1);
+      try{src.disconnect();}catch(e){}
+    };
     try{ src.start(when); }catch(e){ state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioPlaying=false; log('SAFARI_MP2PCM: chunk schedule failed '+e.name+': '+e.message); return; }
     state.audioSources.push(src);
     state.audioNextTime=when+duration;
     state.audioScheduledDuration+=duration;
-    if(state.audioSources.length>8){ const old=state.audioSources.shift(); try{old.onended=null;old.disconnect();}catch(e){} }
   }
   state.webAudioState='playing';
   updateDiag();
@@ -1097,12 +1100,18 @@ function play(ch){
   $('now').firstChild.textContent=ch.name;
   const url=streamUrl(ch);
   state.avMode=avMode();
+  const safari=isIOSSafari();
+  // Safari has already been proven stable with the rev4.14 Video-only TS path.
+  // Do not create an A/V MSE first: that path can briefly decode audio and then
+  // fail, which interferes with the independent MP2PCM path.
+  if(safari) state.avMode='video';
   log('PLAY '+ch.name);
   log('URL '+url);
-  log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
-  // Start the WebAudio MPEG Audio PES experiment from the channel-selection gesture.
-  // It is independent of the video MSE path and is intentionally best-effort.
-  if(isIOSSafari()) startWebAudioMpeg(ch, seq);
+  log('isLive='+ (safari?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
+  if(safari) {
+    log('SAFARI_DIRECT_VIDEO: skip A/V MSE; use Video-only TS filter from start');
+    startWebAudioMpeg(ch, seq);
+  }
   if(!window.mpegts || !mpegts.isSupported()){
     setStatus('浏览器不支持 MSE MPEG-TS / mpegts.js 未安装');
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);
