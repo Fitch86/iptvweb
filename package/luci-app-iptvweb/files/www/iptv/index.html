@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.17</title>
+<title>OpenWrt IPTV rev4.25</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,7 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.21 Safari Video MSE + continuous MP2PCM + A/V sync</span></h1>
+  <h1>OpenWrt IPTV <span class="small">rev4.25 Safari Video MSE + MP2PCM resample fix + A/V sync</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -74,7 +74,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">
-        rev4.21：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为连续 MPEG Audio PES 提取：路由器持续输出完整 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 增量解码为 PCM，并通过 WebAudio 连续排程；按视频首帧建立音频锚点，持续监测 A/V 漂移并在异常时重建音频排程。
+        rev4.25：修复 Safari MP2PCM 音频变慢的根因——解码 PCM 的采样率被忽略，后端按 AudioContext 时钟 1:1 消费；44.1kHz ctx 播 48kHz 流时音频以 ~0.92 倍速变慢变低。现已在主线程线性插值重采样到 ctx.sampleRate，并输出 ctx 采样率与首 chunk 验证日志。rev4.21：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为连续 MPEG Audio PES 提取：路由器持续输出完整 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 增量解码为 PCM，并通过 WebAudio 连续排程；按视频首帧建立音频锚点，持续监测 A/V 漂移并在异常时重建音频排程。
         一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
       </div>
       <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
@@ -101,7 +101,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.23.1';
+const REV='4.25';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -111,7 +111,7 @@ const state={
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
-  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioWorkletNode:null, webAudioScriptNode:null, webAudioBackend:'none', webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20, audioAbortController:null, audioReader:null, audioPcmQueue:[], audioPcmOffset:0, audioQueuedSeconds:0, audioNextTime:0, audioScheduledDuration:0, audioPlayedEstimate:0, audioVideoAnchor:0, audioStartContextTime:0, audioLastResetAt:0, audioStarted:false, audioStreamDone:false, audioChunks:0, audioDecodedSamples:0, audioRate:0, audioChannels:0, audioSyncDrift:0, audioSyncResets:0, audioSources:[], audioWorkletInFlight:0, audioWorkletMaxInFlight:48, audioWorkletReady:false, audioWorkletWaiters:[], audioRingSeconds:0, audioWorkletUnderruns:0, audioWorkletOverflows:0,
+  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioWorkletNode:null, webAudioScriptNode:null, webAudioBackend:'none', webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20, audioAbortController:null, audioReader:null, audioPcmQueue:[], audioPcmOffset:0, audioQueuedSeconds:0, audioNextTime:0, audioScheduledDuration:0, audioPlayedEstimate:0, audioVideoAnchor:0, audioStartContextTime:0, audioLastResetAt:0, audioStarted:false, audioStreamDone:false, audioChunks:0, audioDecodedSamples:0, audioRate:0, audioChannels:0, audioSyncDrift:0, audioSyncResets:0, audioSources:[], audioWorkletInFlight:0, audioWorkletMaxInFlight:48, audioWorkletReady:false, audioWorkletWaiters:[], audioRingSeconds:0, audioWorkletUnderruns:0, audioWorkletOverflows:0, audioCtxRate:0, audioResampleActive:false, audioResampleAcc:0, audioResamplePos:0,
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
@@ -213,6 +213,29 @@ function notifyWorkletSpace(){
   }
 }
 
+function resampleStereoLinear(stereo, frames, srcRate, dstRate){
+  // Linear-interpolation resampler with cross-chunk phase carry, so total
+  // output duration stays exact over long streams (no cumulative drift).
+  state.audioResampleAcc += frames*dstRate/srcRate;
+  const outFrames=Math.floor(state.audioResampleAcc);
+  if(outFrames<=0) return {pcm:null,frames:0};
+  state.audioResampleAcc-=outFrames;
+  const step=srcRate/dstRate;
+  const out=new Float32Array(outFrames*2);
+  let pos=state.audioResamplePos;
+  for(let i=0;i<outFrames;i++){
+    const ip=pos|0, fr=pos-ip;
+    const i0=Math.min(ip,frames-1), i1=Math.min(ip+1,frames-1);
+    const l0=stereo[i0*2], l1=stereo[i1*2];
+    const r0=stereo[i0*2+1], r1=stereo[i1*2+1];
+    out[i*2]=l0+(l1-l0)*fr;
+    out[i*2+1]=r0+(r1-r0)*fr;
+    pos+=step;
+  }
+  state.audioResamplePos=Math.max(0,pos-frames);
+  return {pcm:out,frames:outFrames};
+}
+
 async function startWebAudioMpeg(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const url=audioStreamUrl(ch);
@@ -236,7 +259,9 @@ async function startWebAudioMpeg(ch, seq){
     state.audioRate=0; state.audioChannels=0; state.audioSyncDrift=0; state.audioSyncResets=0;
     state.audioWorkletInFlight=0; state.audioWorkletWaiters=[]; state.audioWorkletReady=false;
     state.audioRingSeconds=0; state.audioWorkletUnderruns=0; state.audioWorkletOverflows=0;
+    state.audioCtxRate=ctx.sampleRate; state.audioResampleActive=false; state.audioResampleAcc=0; state.audioResamplePos=0;
     log('SAFARI_MP2PCM: AudioContext created state='+ctx.state);
+    log('SAFARI_MP2PCM: AudioContext rate='+ctx.sampleRate+'Hz (playback clock)');
     try{ await ctx.resume(); log('SAFARI_MP2PCM: AudioContext resume state='+ctx.state); }catch(e){ log('SAFARI_MP2PCM: AudioContext resume failed '+e.name+': '+e.message); }
     if(seq!==state.seq) return;
 
@@ -278,7 +303,6 @@ async function startWebAudioMpeg(ch, seq){
             state.audioWorkletOverflows=Number(d.count||state.audioWorkletOverflows+1);
             log('SAFARI_MP2PCM: AudioWorklet ring overflow #'+state.audioWorkletOverflows);
           }
-          updateDiag();
         };
         state.webAudioWorkletNode=node;
         await new Promise(resolve=>{
@@ -324,7 +348,6 @@ async function startWebAudioMpeg(ch, seq){
         state.audioRingSeconds=state.audioQueuedSeconds;
         if(remaining>0){ state.audioWorkletUnderruns++; }
         state.audioPlaying=true;
-        updateDiag();
       };
       state.webAudioScriptNode=sp;
       state.webAudioBackend='scriptprocessor';
@@ -361,13 +384,28 @@ async function startWebAudioMpeg(ch, seq){
         stereo[i*2]=left ? left[i]||0 : 0;
         stereo[i*2+1]=right ? right[i]||0 : stereo[i*2];
       }
+      // The decoded stream rate must match the AudioContext playback clock.
+      // Feeding 48kHz PCM into a 44.1kHz context plays it ~8% slow (lower
+      // pitch); feeding 44.1kHz into 48kHz runs fast. Resample here so both
+      // backends always consume ctx-rate PCM.
+      const ctxRate=ctx.sampleRate;
+      if(state.audioChunks===1){
+        log('SAFARI_MP2PCM: first chunk decoded='+rate+'Hz ch='+channels+' ctx='+ctxRate+'Hz resample='+(rate!==ctxRate?'on':'off'));
+      }
+      let outStereo=stereo, outSamples=samples;
+      if(rate!==ctxRate){
+        state.audioResampleActive=true;
+        const rs=resampleStereoLinear(stereo,samples,rate,ctxRate);
+        if(!rs.pcm || !rs.frames) continue;
+        outStereo=rs.pcm; outSamples=rs.frames;
+      }
       if(state.webAudioBackend==='worklet'){
         // Backpressure: never drop PCM. Keep at most ~1.25s in flight while the
         // AudioWorklet's own ring buffer consumes at the real audio clock.
         await waitForWorkletSpace(seq);
         state.audioWorkletInFlight++;
         const chunkId=state.audioChunks;
-        state.webAudioWorkletNode.port.postMessage({type:'pcm',id:chunkId,data:stereo.buffer,samples,rate},[stereo.buffer]);
+        state.webAudioWorkletNode.port.postMessage({type:'pcm',id:chunkId,data:outStereo.buffer,samples:outSamples,rate:ctxRate},[outStereo.buffer]);
       }else if(state.webAudioBackend==='scriptprocessor'){
         // ScriptProcessor fallback for insecure LAN HTTP. It pulls from this
         // queue at the AudioContext clock, so producer speed cannot change pitch.
@@ -375,11 +413,10 @@ async function startWebAudioMpeg(ch, seq){
           await new Promise(r=>setTimeout(r,20));
         }
         if(seq!==state.seq) return;
-        state.audioPcmQueue.push(stereo);
-        state.audioQueuedSeconds += samples/rate;
+        state.audioPcmQueue.push(outStereo);
+        state.audioQueuedSeconds += outSamples/ctxRate;
         state.audioRingSeconds=state.audioQueuedSeconds;
       }
-      updateDiag();
     }
     try{ reader.releaseLock(); }catch(e){}
     state.audioReader=null;
@@ -559,6 +596,7 @@ function stopWebAudio(){
   state.audioPcmQueue=[]; state.audioPcmOffset=0; state.audioQueuedSeconds=0; state.audioNextTime=0; state.audioScheduledDuration=0;
   state.audioPlayedEstimate=0; state.audioVideoAnchor=0; state.audioStartContextTime=0; state.audioLastResetAt=0; state.audioStarted=false; state.audioStreamDone=false;
   state.audioChunks=0; state.audioDecodedSamples=0; state.audioRate=0; state.audioChannels=0; state.audioSyncDrift=0; state.audioLastResetAt=0;
+  state.audioCtxRate=0; state.audioResampleActive=false; state.audioResampleAcc=0; state.audioResamplePos=0;
   state.webAudioState='off'; state.webAudioError=''; state.audioPlaying=false; state.audioPendingStart=false; state.audioScheduledAt=0;
 }
 
@@ -742,7 +780,7 @@ function updateDiag(){
     '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
     '【Chrome计数】 '+chromeCounters(v)+'\n'+
     '【MSE】 '+mseDump()+'\n'+
-    '【独立音频】 MP2PCM='+(state.webAudioState||'off')+' playing='+(state.audioPlaying?'yes':'no')+' rate='+(state.audioRate||'-')+'Hz ch='+(state.audioChannels||'-')+' chunks='+(state.audioChunks||0)+' ring='+(state.audioRingSeconds||0).toFixed(2)+'s inFlight='+(state.audioWorkletInFlight||0)+' underrun='+(state.audioWorkletUnderruns||0)+' overflow='+(state.audioWorkletOverflows||0)+' drift='+(state.audioSyncDrift||0).toFixed(3)+'s reset='+(state.audioSyncResets||0)+' error='+(state.webAudioError||state.audioError||'-')+'\n'+
+    '【独立音频】 MP2PCM='+(state.webAudioState||'off')+' playing='+(state.audioPlaying?'yes':'no')+' backend='+state.webAudioBackend+' ctx='+(state.audioCtxRate||'-')+'Hz rate='+(state.audioRate||'-')+'Hz resample='+(state.audioResampleActive?'on':'off')+' ch='+(state.audioChannels||'-')+' chunks='+(state.audioChunks||0)+' ring='+(state.audioRingSeconds||0).toFixed(2)+'s inFlight='+(state.audioWorkletInFlight||0)+' underrun='+(state.audioWorkletUnderruns||0)+' overflow='+(state.audioWorkletOverflows||0)+' drift='+(state.audioSyncDrift||0).toFixed(3)+'s reset='+(state.audioSyncResets||0)+' error='+(state.webAudioError||state.audioError||'-')+'\n'+
     '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive='+(isIOSSafari()?'true':'false')+' stash=384KB\n'+
     '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+effectivePaused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
     '【错误】 '+(state.lastErrorText||'-')+'\n'+

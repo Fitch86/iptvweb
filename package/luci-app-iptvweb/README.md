@@ -1,4 +1,8 @@
-# luci-app-iptvweb 0.2.2-rev4.18
+# luci-app-iptvweb 0.2.2-rev4.25
+
+## rev4.25
+
+修复 Safari MP2PCM 音频"连续但变慢、音调变低"的根因：mpg123 解码输出的 PCM 采样率（如 48 kHz）一直被忽略，AudioWorklet 与 ScriptProcessor 两个后端都按 AudioContext 自身时钟 1:1 消费。当设备 AudioContext 默认采样率是 44.1 kHz 时，48 kHz PCM 以 44100/48000 ≈ 0.919 倍速播放——音调变低、语速变慢，并每秒落后视频约 0.08 s。rev4.25 在主线程做线性插值重采样（跨 chunk 相位保持，无累计漂移）到 ctx.sampleRate；两个后端同时生效。新增验证日志：AudioContext rate、first chunk decoded/ctx/resample。诊断面板【独立音频】新增 backend / ctx / resample 字段，并移除音频回调里的逐次 updateDiag（面板刷新交给 500ms diagTimer）。
 
 rev4.17 以 rev4.14/4.16.3 的 Safari H.264 Video-only 路径为基线。视频链不变；新增 MPEG Audio PES 提取实验：路由器从 IPTV MPEG-TS 中定位 PMT 的 MPEG Audio PID，提取完整 MPEG Audio 帧到 `iptvweb-audio-pes`，浏览器 Safari 侧使用 WebAudio `AudioContext.decodeAudioData()` 尝试解码。
 

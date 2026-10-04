@@ -1,6 +1,12 @@
-# luci-app-iptvweb 0.2.2-rev4.6
+# luci-app-iptvweb 0.2.2-rev4.25
 
-OpenWrt LuCI IPTV Web Player。rev4.6 先修复 rev4.2 装完频道列表空白的阻塞问题，再继续做 Windows Chromium 上 CCTV1 那次稳定的 1～2 秒初始化 waiting 对照实验。
+OpenWrt LuCI IPTV Web Player。
+
+## rev4.25：Safari 音频变慢修复
+
+iOS Safari 播放时"声音连续但音调变低、语速变慢"的根因是 MP2PCM 链路没有重采样：mpg123 解码输出的采样率被忽略，AudioContext 时钟按自己的 sampleRate 1:1 消费 PCM。rev4.25 在解码循环里线性插值重采样到 ctx.sampleRate，并在日志/诊断面板输出 ctx 采样率与 resample 状态。视频链与播放参数未动。
+
+rev4.6 先修复 rev4.2 装完频道列表空白的阻塞问题，再继续做 Windows Chromium 上 CCTV1 那次稳定的 1～2 秒初始化 waiting 对照实验。
 
 ## rev4.2 频道列表故障
 

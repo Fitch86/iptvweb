@@ -118,10 +118,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.23.1."
+echo "Installed 0.2.2-rev4.25."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.23.1: Safari video chain unchanged; MPEG Audio PES is decoded locally with mpg123-decoder 1.0.3 (MP2→PCM) and played by an AudioWorklet stereo PCM ring buffer;"
+echo "rev4.25: Safari MP2PCM audio resampled to the AudioContext rate (fixes slow/low-pitch audio when ctx.sampleRate differs from the stream rate); Safari video chain unchanged; rev4.23.1 history: MPEG Audio PES is decoded locally with mpg123-decoder 1.0.3 (MP2→PCM) and played by an AudioWorklet stereo PCM ring buffer;"
 echo "        mpegts.js 1.8.2 and mpg123-decoder 1.0.3 stay local; long-lived CGI still uses script_timeout=86400."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
