@@ -1419,7 +1419,6 @@ function resetPlayState(){
   state.stableSince=0; state.stableLogged=false;
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
-  state.log=[]; $('log').textContent='';
 }
 
 function play(ch){
