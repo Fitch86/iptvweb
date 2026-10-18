@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
-PKG_VERSION:=0.2.2-rev4.25
+PKG_VERSION:=0.2.2-rc1
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
@@ -40,7 +40,6 @@ define Package/luci-app-iptvweb/install
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio $(1)/www/cgi-bin/iptvweb-audio
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-probe $(1)/www/cgi-bin/iptvweb-audio-probe
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-pes $(1)/www/cgi-bin/iptvweb-audio-pes
-	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-capture $(1)/www/cgi-bin/iptvweb-capture
 
 	$(INSTALL_DIR) $(1)/www/iptv
 	$(INSTALL_DATA) ./files/www/iptv/index.html $(1)/www/iptv/index.html
