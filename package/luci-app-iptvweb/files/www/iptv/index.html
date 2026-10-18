@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV rev4.25</title>
+<title>OpenWrt IPTV RC1</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -13,7 +13,7 @@ header h1{font-size:16px;margin:0}
 button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px;cursor:pointer}
 button.danger{background:#7a2e2e}
 .toolbar{width:100%;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-.layout{display:flex;height:calc(100vh - 86px);min-height:0}
+.layout{display:flex;height:calc(100vh - 60px);min-height:0}
 #sidebar{width:290px;flex:0 0 290px;background:#171717;overflow:auto;border-right:1px solid #292929;padding:8px}
 .side-title{font-weight:600;padding:5px 8px 9px}
 .group{margin-bottom:3px}
@@ -32,35 +32,17 @@ main{flex:1;min-width:0;min-height:0;padding:12px;display:flex;flex-direction:co
 video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 .now{width:100%;max-width:1200px;margin:9px auto 0;padding:8px 2px;font-size:15px}
 .hint{color:#999;font-size:12px;margin-top:3px}
-@media(max-width:700px){body{overflow:auto}.layout{height:auto;min-height:calc(100vh - 86px);flex-direction:column}#sidebar{order:2;width:100%;flex:none;max-height:45vh;border-right:0;border-top:1px solid #292929}main{order:1;padding:0 0 8px;overflow:visible}.player{border-radius:0}}
+@media(max-width:700px){body{overflow:auto}.layout{height:auto;min-height:calc(100vh - 60px);flex-direction:column}#sidebar{order:2;width:100%;flex:none;max-height:45vh;border-right:0;border-top:1px solid #292929}main{order:1;padding:0 0 8px;overflow:visible}.player{border-radius:0}}
 </style>
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">rev4.25 Safari Video MSE + MP2PCM resample fix + A/V sync</span></h1>
+  <h1>OpenWrt IPTV <span class="small">RC1 · Safari 自适应音轨播放</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
-  <button id="copyLog">复制日志</button>
   <button id="stopBtn" class="danger">⏹ 停止并断开</button>
-  <button id="clearLog">清空日志</button>
   <span id="status" class="small"></span>
-  <div class="toolbar">
-    <label class="small">播放模式
-      <select id="avMode">
-        <option value="av" selected>1. A/V 正常</option>
-        <option value="video">2. Video-only (hasAudio=false)</option>
-        <option value="muted">3. 保留音轨但静音</option>
-      </select>
-    </label>
-    <label class="small"><input type="checkbox" id="fixAudioGap"> 实验 fixAudioTimestampGap</label>
-    <label class="small"><input type="checkbox" id="nudgeWaiting"> 实验 waiting时微移currentTime</label>
-    <label class="small">显微镜 <select id="microMode"><option value="full" selected>完整</option><option value="compact">精简</option></select></label>
-    <button id="tsAnalyze">浏览器 TS 分析(12s)</button>
-    <button id="tsCapture">路由器抓包 15s</button>
-    <button id="probeCaps">设备解码能力</button>
-    <button id="probeEac3">E-AC-3兼容性</button>
-  </div>
 </header>
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
@@ -73,13 +55,8 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
       </div>
     </div>
     <div class="now" id="now">选择频道开始播放
-      <div class="hint">
-        rev4.25：修复 Safari MP2PCM 音频变慢的根因——解码 PCM 的采样率被忽略，后端按 AudioContext 时钟 1:1 消费；44.1kHz ctx 播 48kHz 流时音频以 ~0.92 倍速变慢变低。现已在主线程线性插值重采样到 ctx.sampleRate，并输出 ctx 采样率与首 chunk 验证日志。rev4.21：以 rev4.14 稳定的视频链为基线。Safari 初始 A/V；MSE 失败后回退到 H.264 Video-only。音频改为连续 MPEG Audio PES 提取：路由器持续输出完整 MPEG Audio 帧，浏览器用本地 mpg123-decoder WASM 增量解码为 PCM，并通过 WebAudio 连续排程；按视频首帧建立音频锚点，持续监测 A/V 漂移并在异常时重建音频排程。
-        一次只改一个实验项。TS 分析/抓包会先停止播放，避免第二个 udpxy 客户端抢流。
-      </div>
-      <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
-      <pre id="tsReport" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
-      <pre id="log" class="hint" style="white-space:pre-wrap;margin:6px 0 0;max-height:240px;overflow:auto;background:#0b0b0b;padding:8px;border-radius:5px;font-size:11px"></pre>
+      <div class="hint">通过 LuCI 配置 M3U 频道列表。选择频道即可播放；停止按钮会断开当前流。</div>
+      <div hidden><pre id="diag"></pre><pre id="tsReport"></pre><pre id="log"></pre></div>
     </div>
   </main>
 </div>
@@ -101,7 +78,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='4.25';
+const REV='RC1';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -726,14 +703,7 @@ function renderGroups(){
 }
 
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
-function log(msg){
-  const line='['+rel()+'s] '+msg;
-  console.log('[IPTV rev'+REV+'] '+line);
-  state.log.push(line);
-  if(state.log.length>500) state.log.shift();
-  const el=$('log');
-  if(el){ el.textContent=state.log.join('\n'); el.scrollTop=el.scrollHeight; }
-}
+function log(msg){}
 function setStatus(t){ $('status').textContent=t||''; }
 function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
 function rangeText(r){
@@ -786,13 +756,7 @@ function stopDiagTimers(){
   if(state.audioSyncTimer){ clearInterval(state.audioSyncTimer); state.audioSyncTimer=0; }
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
 }
-function startDiagTimer(seq){
-  if(state.diagTimer) clearInterval(state.diagTimer);
-  state.diagTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.diagTimer); state.diagTimer=0; return; }
-    updateDiag();
-  }, 500);
-}
+function startDiagTimer(seq){}
 function stopWebAudio(){
   if(state.audioStartTimer){ clearTimeout(state.audioStartTimer); state.audioStartTimer=0; }
   if(state.audioSyncTimer){ clearInterval(state.audioSyncTimer); state.audioSyncTimer=0; }
@@ -969,7 +933,7 @@ function waitingSnapshot(v, ev){
   if(ahead>=1 && v.readyState>=3){
     log('WAITING_WITH_BUFFER 不是缺数据。ahead='+ahead.toFixed(3)+'s readyState='+v.readyState+' → 更像 MSE/A-V sync/decoder，而不是 HTTP/udpxy');
   }
-  if($('nudgeWaiting').checked && ahead>=1 && !state.nudgedThisPlay){
+  if(false && ahead>=1 && !state.nudgedThisPlay){
     state.nudgedThisPlay=true;
     const t=v.currentTime;
     try{
@@ -979,38 +943,7 @@ function waitingSnapshot(v, ev){
   }
 }
 
-function updateDiag(){
-  const v=$('video');
-  let b='-', s='-';
-  try{ b=rangeText(v.buffered); s=rangeText(v.seekable); }catch(e){}
-  const now=performance.now();
-  const dt=state.last.wall?(now-state.last.wall)/1000:0;
-  const rate=state.last.wall?(v.currentTime-state.last.t)/Math.max(dt,0.001):0;
-  state.last={t:v.currentTime, wall:now};
-  const ahead=bufferAhead(v), cls=classifyTimeline();
-  const mi=state.mediaInfo||{};
-  const frame=state.lastFrame||{};
-  const videoOnly=state.avMode==='video-fallback';
-  const shownVideo=mi.videoCodec||state.lastVideoCodec||'-';
-  const shownAudio=videoOnly?'none':(mi.audioCodec||'-');
-  const shownAudioState=videoOnly?'no':(mi.hasAudio?'yes':'?');
-  const shownWidth=mi.width||state.lastVideoWidth||v.videoWidth||'-';
-  const shownHeight=mi.height||state.lastVideoHeight||v.videoHeight||'-';
-  const effectivePaused=(state.playingSince && !state.userPaused && !v.ended) ? false : v.paused;
-  $('diag').textContent=
-    '【状态】 '+cls+(state.classificationReason?' | '+state.classificationReason:'')+'\n'+
-    '【编码】 V='+shownVideo+' / A='+shownAudio+' | '+shownWidth+'x'+shownHeight+' @ '+(mi.fps||'-')+'fps | audio='+shownAudioState+' '+(videoOnly?'-':(mi.audioSampleRate||'-')+'Hz/'+(mi.audioChannelCount||'-')+'ch')+'\n'+
-    '【时间线】 current='+(isFinite(v.currentTime)?v.currentTime.toFixed(3):'NaN')+' | buffered='+b+' | seekable='+s+' | ahead='+(isFinite(ahead)?ahead.toFixed(3):'-')+'s\n'+
-    '【显微镜】 mediaTime='+(frame.mediaTime!=null?Number(frame.mediaTime).toFixed(3):'-')+' | presentedFrames='+(frame.presentedFrames??'-')+' | '+timelineSummary()+'\n'+
-    '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
-    '【Chrome计数】 '+chromeCounters(v)+'\n'+
-    '【MSE】 '+mseDump()+'\n'+
-    '【独立音频】 MP2PCM='+(state.webAudioState||'off')+' playing='+(state.audioPlaying?'yes':'no')+' backend='+state.webAudioBackend+' ctx='+(state.audioCtxRate||'-')+'Hz rate='+(state.audioRate||'-')+'Hz resample='+(state.audioResampleActive?'on':'off')+' ch='+(state.audioChannels||'-')+' chunks='+(state.audioChunks||0)+' ring='+(state.audioRingSeconds||0).toFixed(2)+'s inFlight='+(state.audioWorkletInFlight||0)+' underrun='+(state.audioWorkletUnderruns||0)+' overflow='+(state.audioWorkletOverflows||0)+' drift='+(state.audioSyncDrift||0).toFixed(3)+'s reset='+(state.audioSyncResets||0)+' decCalls='+(state.audioDecodeCalls||0)+' empty='+(state.audioDecodeEmpty||0)+' underrun='+(state.audioWorkletUnderruns||0)+' error='+(state.webAudioError||state.audioError||'-')+'\n'+
-    '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive='+(isIOSSafari()?'true':'false')+' stash=384KB\n'+
-    '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+effectivePaused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
-    '【错误】 '+(state.lastErrorText||'-')+'\n'+
-    '【mpegts】 speed='+(state.stats.speed??'-')+' KB/s loader='+(state.stats.loaderType??'-');
-}
+function updateDiag(){}
 
 function attachVideoDiagnostics(v, seq){
   v.autoplay=false;
@@ -1086,7 +1019,7 @@ function playerConfig(){
     liveBufferLatencyChasing:false,
     liveBufferLatencyChasingOnPaused:false,
     liveSync:false,
-    fixAudioTimestampGap: !!$('fixAudioGap').checked,
+    fixAudioTimestampGap: false,
     accurateSeek:false
   };
 }
@@ -1967,18 +1900,18 @@ async function load(){
 $('refresh').onclick=load;
 $('jumpLive').onclick=jumpToLatest;
 $('reinit').onclick=reinit;
-$('copyLog').onclick=copyDiagnostics;
+
 $('stopBtn').onclick=stopPlayback;
 $('stopBtn2').onclick=stopPlayback;
-$('clearLog').onclick=()=>{ state.log=[]; $('log').textContent=''; };
-$('microMode').onchange=()=>log('显微镜模式='+$('microMode').value);
-$('avMode').onchange=()=>{ state.avMode=avMode(); log('AV_MODE='+state.avMode+' (single-variable experiment)'); if(state.current) play(state.current); };
-$('fixAudioGap').onchange=()=>{ log('EXPERIMENT fixAudioTimestampGap='+$('fixAudioGap').checked); if(state.current) play(state.current); };
-$('nudgeWaiting').onchange=()=>log('EXPERIMENT nudgeOnWaiting='+$('nudgeWaiting').checked);
-$('probeCaps').onclick=probeCapabilities;
-$('probeEac3').onclick=probeEac3Capabilities;
-$('tsAnalyze').onclick=analyzeTsInBrowser;
-$('tsCapture').onclick=captureOnRouter;
+
+
+
+
+
+
+
+
+
 load();
 </script>
 </body>
