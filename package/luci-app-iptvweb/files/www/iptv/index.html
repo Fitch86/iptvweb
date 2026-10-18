@@ -111,7 +111,7 @@ const state={
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
-  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioWorkletNode:null, webAudioScriptNode:null, webAudioBackend:'none', webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20, audioAbortController:null, audioReader:null, audioPcmQueue:[], audioPcmOffset:0, audioQueuedSeconds:0, audioNextTime:0, audioScheduledDuration:0, audioPlayedEstimate:0, audioVideoAnchor:0, audioStartContextTime:0, audioLastResetAt:0, audioStarted:false, audioStreamDone:false, audioChunks:0, audioDecodedSamples:0, audioRate:0, audioChannels:0, audioSyncDrift:0, audioSyncResets:0, audioSources:[], audioWorkletInFlight:0, audioWorkletMaxInFlight:48, audioWorkletReady:false, audioWorkletWaiters:[], audioRingSeconds:0, audioWorkletUnderruns:0, audioWorkletOverflows:0, audioCtxRate:0, audioResampleActive:false, audioResampleAcc:0, audioResamplePos:0,
+  webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioWorkletNode:null, webAudioScriptNode:null, webAudioBackend:'none', webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20, audioAbortController:null, audioReader:null, audioPcmQueue:[], audioPcmOffset:0, audioQueuedSeconds:0, audioNextTime:0, audioScheduledDuration:0, audioPlayedEstimate:0, audioVideoAnchor:0, audioStartContextTime:0, audioLastResetAt:0, audioStarted:false, audioStreamDone:false, audioChunks:0, audioDecodedSamples:0, audioRate:0, audioChannels:0, audioSyncDrift:0, audioSyncResets:0, audioSources:[], audioWorkletInFlight:0, audioWorkletMaxInFlight:48, audioWorkletReady:false, audioWorkletWaiters:[], audioRingSeconds:0, audioWorkletUnderruns:0, audioWorkletOverflows:0, audioCtxRate:0, audioResampleActive:false, audioResampleAcc:0, audioResamplePos:0, audioDecodeCalls:0, audioDecodeEmpty:0, audioDecodeErrors:0, audioLastDecodeWall:0, audioDecodeWallMs:0, audioLastDiagWall:0, audioLastDiagChunks:0, audioLastDiagSamples:0, audioLastDiagUnderruns:0, audioMpegBuffer:new Uint8Array(0), audioMpegFrames:0, audioMpegResyncBytes:0, audioDiagTimer:0,
   timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
@@ -236,6 +236,67 @@ function resampleStereoLinear(stereo, frames, srcRate, dstRate){
   return {pcm:out,frames:outFrames};
 }
 
+function parseMpegAudioFrameHeader(a,o=0){
+  if(!a || o+4>a.length || a[o]!==0xff || (a[o+1]&0xe0)!==0xe0) return null;
+  const b1=a[o+1], b2=a[o+2], b3=a[o+3];
+  const verBits=(b1>>3)&3, layerBits=(b1>>1)&3;
+  if(verBits===1 || layerBits===0) return null;
+  const version=verBits===3?'MPEG1':(verBits===2?'MPEG2':'MPEG2.5');
+  const layer=layerBits===3?'I':(layerBits===2?'II':'III');
+  const brIdx=(b2>>4)&15, srIdx=(b2>>2)&3, pad=(b2>>1)&1;
+  const srTable={MPEG1:[44100,48000,32000],MPEG2:[22050,24000,16000],'MPEG2.5':[11025,12000,8000]};
+  const brTable={
+    MPEG1:[0,32,40,48,56,64,80,96,112,128,160,192,224,256,320,0],
+    MPEG2:[0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0],
+    'MPEG2.5':[0,8,16,24,32,40,48,56,64,80,96,112,128,144,160,0]
+  };
+  const sampleRate=(srTable[version]||[])[srIdx]||0;
+  const bitrate=(brTable[version]||[])[brIdx]||0;
+  if(!sampleRate || !bitrate || brIdx===15 || srIdx===3) return null;
+  let frameLength;
+  if(layer==='I') frameLength=(Math.floor(12*bitrate*1000/sampleRate)+pad)*4;
+  else frameLength=Math.floor((version==='MPEG1'?144:72)*bitrate*1000/sampleRate)+pad;
+  const mode=(b3>>6)&3;
+  return {version,layer,bitrateKbps:bitrate,sampleRate,frameLength,padding:pad,channels:mode===3?1:2};
+}
+
+function takeMpegAudioFrames(maxFrames=8){
+  const frames=[];
+  let b=state.audioMpegBuffer;
+  while(frames.length<maxFrames && b.length>=4){
+    let h=parseMpegAudioFrameHeader(b,0);
+    if(!h){
+      let found=-1;
+      for(let i=1;i+4<=b.length;i++){
+        if(parseMpegAudioFrameHeader(b,i)){ found=i; break; }
+      }
+      if(found<0){
+        // Keep the last 3 bytes in case a sync/header straddles the next fetch chunk.
+        const keep=b.length>3?b.subarray(b.length-3):b;
+        state.audioMpegResyncBytes += b.length-keep.length;
+        b=new Uint8Array(keep); break;
+      }
+      state.audioMpegResyncBytes += found;
+      b=b.subarray(found);
+      h=parseMpegAudioFrameHeader(b,0);
+      if(!h) break;
+    }
+    if(b.length<h.frameLength) break;
+    frames.push(b.slice(0,h.frameLength));
+    state.audioMpegFrames++;
+    b=b.subarray(h.frameLength);
+  }
+  state.audioMpegBuffer=b;
+  return frames;
+}
+
+function appendMpegAudioBytes(part){
+  const old=state.audioMpegBuffer||new Uint8Array(0);
+  const b=new Uint8Array(old.length+part.length);
+  b.set(old,0); b.set(part,old.length);
+  state.audioMpegBuffer=b;
+}
+
 async function startWebAudioMpeg(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const url=audioStreamUrl(ch);
@@ -259,9 +320,10 @@ async function startWebAudioMpeg(ch, seq){
     state.audioRate=0; state.audioChannels=0; state.audioSyncDrift=0; state.audioSyncResets=0;
     state.audioWorkletInFlight=0; state.audioWorkletWaiters=[]; state.audioWorkletReady=false;
     state.audioRingSeconds=0; state.audioWorkletUnderruns=0; state.audioWorkletOverflows=0;
-    state.audioCtxRate=ctx.sampleRate; state.audioResampleActive=false; state.audioResampleAcc=0; state.audioResamplePos=0;
+    state.audioCtxRate=ctx.sampleRate; state.audioResampleActive=false; state.audioResampleAcc=0; state.audioResamplePos=0; state.audioMpegBuffer=new Uint8Array(0); state.audioMpegFrames=0; state.audioMpegResyncBytes=0;
     log('SAFARI_MP2PCM: AudioContext created state='+ctx.state);
     log('SAFARI_MP2PCM: AudioContext rate='+ctx.sampleRate+'Hz (playback clock)');
+    state.audioCtxRate=ctx.sampleRate;
     try{ await ctx.resume(); log('SAFARI_MP2PCM: AudioContext resume state='+ctx.state); }catch(e){ log('SAFARI_MP2PCM: AudioContext resume failed '+e.name+': '+e.message); }
     if(seq!==state.seq) return;
 
@@ -322,36 +384,18 @@ async function startWebAudioMpeg(ch, seq){
       log('SAFARI_MP2PCM: AudioWorklet unavailable; using ScriptProcessor fallback');
     }
     if(state.webAudioBackend==='none'){
-      if(!ctx.createScriptProcessor) throw new Error('AudioWorklet and ScriptProcessor unavailable');
-      const sp=ctx.createScriptProcessor(2048,0,2);
-      sp.connect(ctx.destination);
-      sp.onaudioprocess=(ev)=>{
-        if(seq!==state.seq) return;
-        const outL=ev.outputBuffer.getChannelData(0);
-        const outR=ev.outputBuffer.numberOfChannels>1 ? ev.outputBuffer.getChannelData(1) : outL;
-        outL.fill(0); if(outR!==outL) outR.fill(0);
-        if(!state.audioStarted || ctx.currentTime < state.audioStartContextTime) return;
-        let remaining=outL.length, outPos=0;
-        while(remaining>0 && state.audioPcmQueue.length){
-          const q=state.audioPcmQueue[0];
-          const frames=Math.min(remaining,q.length/2-state.audioPcmOffset);
-          for(let i=0;i<frames;i++){
-            const ix=(state.audioPcmOffset+i)*2;
-            outL[outPos+i]=q[ix]||0;
-            if(outR!==outL) outR[outPos+i]=q[ix+1]||q[ix]||0;
-          }
-          state.audioPcmOffset+=frames;
-          state.audioQueuedSeconds=Math.max(0,state.audioQueuedSeconds-frames/(state.audioRate||44100));
-          if(state.audioPcmOffset*2>=q.length){ state.audioPcmQueue.shift(); state.audioPcmOffset=0; }
-          remaining-=frames; outPos+=frames;
-        }
-        state.audioRingSeconds=state.audioQueuedSeconds;
-        if(remaining>0){ state.audioWorkletUnderruns++; }
-        state.audioPlaying=true;
-      };
-      state.webAudioScriptNode=sp;
-      state.webAudioBackend='scriptprocessor';
-      log('SAFARI_MP2PCM: ScriptProcessor fallback ready buffer=2048');
+      // Plain HTTP iOS Safari cannot use AudioWorklet. Do not use
+      // ScriptProcessor here: its main-thread callback is sensitive to the
+      // fetch/decoder event loop and was causing repeated PCM underruns.
+      state.webAudioBackend='buffersource';
+      state.audioScheduleQueue=[];
+      state.audioSchedulePendingSamples=0;
+      state.audioScheduleCursor=0;
+      state.audioScheduleStarted=false;
+      state.audioScheduledSources=[];
+      state.audioQueuedSeconds=0;
+      state.audioRingSeconds=0;
+      log('SAFARI_MP2PCM: AudioBufferSource fallback ready scheduler=audio-thread');
     }
 
     const decoder=new decNS.MPEGDecoder({enableGapless:false});
@@ -366,58 +410,83 @@ async function startWebAudioMpeg(ch, seq){
     if(!r.body || !r.body.getReader) throw new Error('ReadableStream unavailable');
     const reader=r.body.getReader();
     state.audioReader=reader;
-    while(seq===state.seq){
-      const part=await reader.read();
-      if(part.done){ state.audioStreamDone=true; break; }
-      if(!part.value || !part.value.byteLength) continue;
-      const result=decoder.decode(part.value);
-      if(!result || !result.channelData || !result.channelData.length || !result.samplesDecoded) continue;
-      const channels=result.channelData.length;
-      const samples=result.samplesDecoded;
-      const rate=result.sampleRate||44100;
-      state.audioRate=rate; state.audioChannels=channels; state.audioChunks++; state.audioDecodedSamples+=samples;
-      // Interleave decoder output into a transferable stereo Float32Array.
-      const stereo=new Float32Array(samples*2);
-      const left=result.channelData[0]||null;
-      const right=result.channelData[1]||left;
-      for(let i=0;i<samples;i++){
-        stereo[i*2]=left ? left[i]||0 : 0;
-        stereo[i*2+1]=right ? right[i]||0 : stereo[i*2];
-      }
-      // The decoded stream rate must match the AudioContext playback clock.
-      // Feeding 48kHz PCM into a 44.1kHz context plays it ~8% slow (lower
-      // pitch); feeding 44.1kHz into 48kHz runs fast. Resample here so both
-      // backends always consume ctx-rate PCM.
-      const ctxRate=ctx.sampleRate;
-      if(state.audioChunks===1){
-        log('SAFARI_MP2PCM: first chunk decoded='+rate+'Hz ch='+channels+' ctx='+ctxRate+'Hz resample='+(rate!==ctxRate?'on':'off'));
-      }
-      let outStereo=stereo, outSamples=samples;
-      if(rate!==ctxRate){
-        state.audioResampleActive=true;
-        const rs=resampleStereoLinear(stereo,samples,rate,ctxRate);
-        if(!rs.pcm || !rs.frames) continue;
-        outStereo=rs.pcm; outSamples=rs.frames;
-      }
-      if(state.webAudioBackend==='worklet'){
-        // Backpressure: never drop PCM. Keep at most ~1.25s in flight while the
-        // AudioWorklet's own ring buffer consumes at the real audio clock.
-        await waitForWorkletSpace(seq);
-        state.audioWorkletInFlight++;
-        const chunkId=state.audioChunks;
-        state.webAudioWorkletNode.port.postMessage({type:'pcm',id:chunkId,data:outStereo.buffer,samples:outSamples,rate:ctxRate},[outStereo.buffer]);
-      }else if(state.webAudioBackend==='scriptprocessor'){
-        // ScriptProcessor fallback for insecure LAN HTTP. It pulls from this
-        // queue at the AudioContext clock, so producer speed cannot change pitch.
-        while(seq===state.seq && state.audioQueuedSeconds>1.25){
-          await new Promise(r=>setTimeout(r,20));
-        }
-        if(seq!==state.seq) return;
-        state.audioPcmQueue.push(outStereo);
-        state.audioQueuedSeconds += outSamples/ctxRate;
-        state.audioRingSeconds=state.audioQueuedSeconds;
-      }
-    }
+	while(seq===state.seq){
+	  const part=await reader.read();
+	  if(part.done){ state.audioStreamDone=true; break; }
+	  if(!part.value || !part.value.byteLength) continue;
+	  
+	  // ★ 直接把收到的字节喂给 decoder，不要前端自己切帧
+	  const decodeWall0=performance.now();
+	  let result;
+	  try{
+		result = decoder.decode(part.value);   // ← 用 decode 而不是 decodeFrame
+		state.audioDecodeCalls++;
+	  }catch(e){
+		state.audioDecodeErrors++;
+		log('SAFARI_MP2PCM: decode ERROR #'+state.audioDecodeErrors+' '+e.name+': '+e.message+' bytes='+part.value.byteLength);
+		continue;
+	  }
+	  state.audioDecodeWallMs+=performance.now()-decodeWall0;
+	  state.audioLastDecodeWall=performance.now();
+	  
+	  if(!result || !result.samplesDecoded){
+		state.audioDecodeEmpty++;
+		continue;
+	  }
+	  
+	  const samples = result.samplesDecoded;
+	  const rate = result.sampleRate || 48000;
+	  const channels = result.channelData.length;
+	  state.audioRate=rate; state.audioChannels=channels;
+	  state.audioChunks++; state.audioDecodedSamples+=samples;
+	  
+	  // 交错 L/R
+	  const stereo=new Float32Array(samples*2);
+	  const left = result.channelData[0] || null;
+	  const right = result.channelData[1] || left;
+	  for(let i=0;i<samples;i++){
+		stereo[i*2]   = left  ? (left[i]||0)  : 0;
+		stereo[i*2+1] = right ? (right[i]||0) : stereo[i*2];
+	  }
+	  
+	  const ctxRate=ctx.sampleRate;
+	  if(state.audioChunks===1){
+		log('SAFARI_MP2PCM: first batch decoded='+rate+'Hz ch='+channels+' ctx='+ctxRate+'Hz resample='+(rate!==ctxRate?'on':'off')+' samples='+samples+' inputBytes='+part.value.byteLength);
+	  }
+	  
+	  let outStereo=stereo, outSamples=samples;
+	  if(rate!==ctxRate){
+		state.audioResampleActive=true;
+		const rs=resampleStereoLinear(stereo,samples,rate,ctxRate);
+		if(!rs.pcm || !rs.frames) continue;
+		outStereo=rs.pcm; outSamples=rs.frames;
+	  }
+	  
+	  // ... 原有的 worklet/buffersource 入队逻辑保持不变
+	  if(state.webAudioBackend==='worklet'){
+		await waitForWorkletSpace(seq);
+		state.audioWorkletInFlight++;
+		const chunkId=state.audioChunks;
+		state.webAudioWorkletNode.port.postMessage({type:'pcm',id:chunkId,data:outStereo.buffer,samples:outSamples,rate:ctxRate},[outStereo.buffer]);
+	  }else if(state.webAudioBackend==='buffersource'){
+		state.audioScheduleQueue.push({pcm:outStereo,samples:outSamples});
+		state.audioSchedulePendingSamples+=outSamples;
+		state.audioQueuedSeconds=state.audioSchedulePendingSamples/ctxRate;
+		state.audioRingSeconds=state.audioQueuedSeconds;
+		if(!state.audioStarted && state.firstFrameAt && state.audioQueuedSeconds>=0.75) startAudioWorkletClock(seq);
+		if(state.audioStarted) scheduleBufferSourceQueue(seq);
+	  }
+	  
+	  // 诊断日志（保留）
+	  const nowDiag=performance.now();
+	  if(nowDiag-(state.audioLastDiagWall||0)>=1000){
+		const dt=Math.max(0.001,(nowDiag-(state.audioLastDiagWall||nowDiag))/1000);
+		const dc=state.audioChunks-(state.audioLastDiagChunks||0);
+		const ds=state.audioDecodedSamples-(state.audioLastDiagSamples||0);
+		log('SAFARI_MP2PCM: PCMSTAT chunks='+state.audioChunks+' dChunks='+dc+' samples='+state.audioDecodedSamples+' dSamples='+ds+' rate='+rate+' ctx='+ctxRate+' queue='+state.audioQueuedSeconds.toFixed(3)+'s decodeCalls='+state.audioDecodeCalls+' empty='+state.audioDecodeEmpty+' errors='+state.audioDecodeErrors+' wallSamplesPerSec='+(ds/dt).toFixed(0));
+		state.audioLastDiagWall=nowDiag; state.audioLastDiagChunks=state.audioChunks; state.audioLastDiagSamples=state.audioDecodedSamples;
+	  }
+	}
     try{ reader.releaseLock(); }catch(e){}
     state.audioReader=null;
     if(state.audioStreamDone) log('SAFARI_MP2PCM: stream ended');
@@ -431,7 +500,7 @@ async function startWebAudioMpeg(ch, seq){
 function startAudioWorkletClock(seq){
   if(seq!==state.seq || !state.webAudioCtx || state.audioStarted) return;
   if(state.webAudioBackend==='worklet' && !state.webAudioWorkletNode) return;
-  if(state.webAudioBackend!=='worklet' && state.webAudioBackend!=='scriptprocessor') return;
+  if(state.webAudioBackend!=='worklet' && state.webAudioBackend!=='scriptprocessor' && state.webAudioBackend!=='buffersource') return;
   const v=$('video');
   if(!state.firstFrameAt && !state.firstPlayingAt) return;
   state.audioVideoAnchor=Number(v.currentTime||0);
@@ -441,8 +510,41 @@ function startAudioWorkletClock(seq){
   state.audioStartedAt=performance.now()+state.audioStartDelay*1000;
   if(state.webAudioBackend==='worklet' && state.webAudioWorkletNode){
     state.webAudioWorkletNode.port.postMessage({type:'start',startAt});
+  }else if(state.webAudioBackend==='buffersource'){
+    state.audioScheduleCursor=startAt;
+    state.audioScheduleStarted=true;
+    scheduleBufferSourceQueue(seq);
   }
   log('SAFARI_MP2PCM: audio anchor video='+state.audioVideoAnchor.toFixed(3)+' startDelay='+state.audioStartDelay.toFixed(2)+'s backend='+state.webAudioBackend);
+}
+
+function scheduleBufferSourceQueue(seq){
+  if(seq!==state.seq || !state.webAudioCtx || state.webAudioBackend!=='buffersource' || !state.audioScheduleStarted) return;
+  const ctx=state.webAudioCtx;
+  const now=ctx.currentTime;
+  if(state.audioScheduleCursor < now+0.02) state.audioScheduleCursor=now+0.02;
+  while(state.audioScheduleQueue.length){
+    const q=state.audioScheduleQueue.shift();
+    const frames=q.samples|0;
+    if(!frames) continue;
+    const ab=ctx.createBuffer(2,frames,ctx.sampleRate);
+    const left=new Float32Array(frames), right=new Float32Array(frames);
+    for(let i=0;i<frames;i++){
+      const l=q.pcm[i*2]||0;
+      left[i]=l; right[i]=q.pcm[i*2+1]||l;
+    }
+    ab.copyToChannel(left,0); ab.copyToChannel(right,1);
+    const src=ctx.createBufferSource();
+    src.buffer=ab; src.connect(ctx.destination);
+    const at=Math.max(state.audioScheduleCursor,ctx.currentTime+0.01);
+    try{ src.start(at); }catch(e){ state.audioDecodeErrors++; try{src.disconnect();}catch(_){}; continue; }
+    state.audioScheduledSources.push(src);
+    src.onended=()=>{ try{src.disconnect();}catch(_){}; const i=state.audioScheduledSources.indexOf(src); if(i>=0) state.audioScheduledSources.splice(i,1); };
+    state.audioScheduleCursor=at+frames/ctx.sampleRate;
+    state.audioSchedulePendingSamples=Math.max(0,state.audioSchedulePendingSamples-frames);
+  }
+  state.audioQueuedSeconds=Math.max(0,state.audioScheduleCursor-ctx.currentTime);
+  state.audioRingSeconds=state.audioQueuedSeconds;
 }
 
 function schedulePcmQueue(seq){
@@ -468,7 +570,7 @@ function audioSyncTick(seq){
 }
 
 function resetAudioSchedule(seq,reason){
-  if(seq!==state.seq || !state.webAudioCtx || !state.webAudioWorkletNode) return;
+  if(seq!==state.seq || !state.webAudioCtx) return;
   const ctx=state.webAudioCtx;
   state.audioVideoAnchor=Number($('video').currentTime||0);
   const startAt=ctx.currentTime+0.10;
@@ -479,6 +581,10 @@ function resetAudioSchedule(seq,reason){
     state.webAudioWorkletNode.port.postMessage({type:'reset',startAt});
   }else if(state.webAudioBackend==='scriptprocessor'){
     state.audioPcmQueue=[]; state.audioPcmOffset=0; state.audioQueuedSeconds=0; state.audioRingSeconds=0;
+  }else if(state.webAudioBackend==='buffersource'){
+    for(const src of state.audioScheduledSources||[]){ try{src.stop();}catch(_){} try{src.disconnect();}catch(_){} }
+    state.audioScheduledSources=[]; state.audioScheduleQueue=[]; state.audioSchedulePendingSamples=0;
+    state.audioScheduleCursor=ctx.currentTime+0.10; state.audioQueuedSeconds=0; state.audioRingSeconds=0; state.audioScheduleStarted=true;
   }
   if(reason) log('SAFARI_AVSYNC: '+state.webAudioBackend+' re-anchor reason='+reason+' reset#='+state.audioSyncResets);
 }
@@ -505,7 +611,7 @@ function log(msg){
   const line='['+rel()+'s] '+msg;
   console.log('[IPTV rev'+REV+'] '+line);
   state.log.push(line);
-  if(state.log.length>220) state.log.shift();
+  if(state.log.length>500) state.log.shift();
   const el=$('log');
   if(el){ el.textContent=state.log.join('\n'); el.scrollTop=el.scrollHeight; }
 }
@@ -596,7 +702,7 @@ function stopWebAudio(){
   state.audioPcmQueue=[]; state.audioPcmOffset=0; state.audioQueuedSeconds=0; state.audioNextTime=0; state.audioScheduledDuration=0;
   state.audioPlayedEstimate=0; state.audioVideoAnchor=0; state.audioStartContextTime=0; state.audioLastResetAt=0; state.audioStarted=false; state.audioStreamDone=false;
   state.audioChunks=0; state.audioDecodedSamples=0; state.audioRate=0; state.audioChannels=0; state.audioSyncDrift=0; state.audioLastResetAt=0;
-  state.audioCtxRate=0; state.audioResampleActive=false; state.audioResampleAcc=0; state.audioResamplePos=0;
+  state.audioCtxRate=0; state.audioResampleActive=false; state.audioResampleAcc=0; state.audioResamplePos=0; state.audioMpegBuffer=new Uint8Array(0); state.audioMpegFrames=0; state.audioMpegResyncBytes=0; state.audioDecodeCalls=0; state.audioDecodeEmpty=0; state.audioDecodeErrors=0; state.audioLastDecodeWall=0; state.audioDecodeWallMs=0; state.audioLastDiagWall=0; state.audioLastDiagChunks=0; state.audioLastDiagSamples=0; state.audioLastDiagUnderruns=0;
   state.webAudioState='off'; state.webAudioError=''; state.audioPlaying=false; state.audioPendingStart=false; state.audioScheduledAt=0;
 }
 
@@ -780,7 +886,7 @@ function updateDiag(){
     '【A/V】 decoded='+(state.stats.decodedFrames??'-')+' dropped='+(state.stats.droppedFrames??'-')+' | Δ/s='+(isFinite(rate)?rate.toFixed(3):'-')+' | waiting='+state.waitingCount+' stalled='+state.stallCount+' recover='+state.recoveries+'\n'+
     '【Chrome计数】 '+chromeCounters(v)+'\n'+
     '【MSE】 '+mseDump()+'\n'+
-    '【独立音频】 MP2PCM='+(state.webAudioState||'off')+' playing='+(state.audioPlaying?'yes':'no')+' backend='+state.webAudioBackend+' ctx='+(state.audioCtxRate||'-')+'Hz rate='+(state.audioRate||'-')+'Hz resample='+(state.audioResampleActive?'on':'off')+' ch='+(state.audioChannels||'-')+' chunks='+(state.audioChunks||0)+' ring='+(state.audioRingSeconds||0).toFixed(2)+'s inFlight='+(state.audioWorkletInFlight||0)+' underrun='+(state.audioWorkletUnderruns||0)+' overflow='+(state.audioWorkletOverflows||0)+' drift='+(state.audioSyncDrift||0).toFixed(3)+'s reset='+(state.audioSyncResets||0)+' error='+(state.webAudioError||state.audioError||'-')+'\n'+
+    '【独立音频】 MP2PCM='+(state.webAudioState||'off')+' playing='+(state.audioPlaying?'yes':'no')+' backend='+state.webAudioBackend+' ctx='+(state.audioCtxRate||'-')+'Hz rate='+(state.audioRate||'-')+'Hz resample='+(state.audioResampleActive?'on':'off')+' ch='+(state.audioChannels||'-')+' chunks='+(state.audioChunks||0)+' ring='+(state.audioRingSeconds||0).toFixed(2)+'s inFlight='+(state.audioWorkletInFlight||0)+' underrun='+(state.audioWorkletUnderruns||0)+' overflow='+(state.audioWorkletOverflows||0)+' drift='+(state.audioSyncDrift||0).toFixed(3)+'s reset='+(state.audioSyncResets||0)+' decCalls='+(state.audioDecodeCalls||0)+' empty='+(state.audioDecodeEmpty||0)+' underrun='+(state.audioWorkletUnderruns||0)+' error='+(state.webAudioError||state.audioError||'-')+'\n'+
     '【实验】 avMode='+state.avMode+' fixAudioTimestampGap='+$('fixAudioGap').checked+' nudge='+$('nudgeWaiting').checked+' isLive='+(isIOSSafari()?'true':'false')+' stash=384KB\n'+
     '【播放器】 ready='+v.readyState+' network='+v.networkState+' paused='+effectivePaused+' ended='+v.ended+' duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration))+'\n'+
     '【错误】 '+(state.lastErrorText||'-')+'\n'+
@@ -828,7 +934,7 @@ function attachVideoDiagnostics(v, seq){
     }
     if(ev==='progress') extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
     if(ev==='error' && v.error) extra=' code='+v.error.code+' '+(v.error.message||'');
-    log('video.'+ev+extra);
+    // Video event logs are intentionally suppressed here; keep audio diagnostics visible.
     if(ev==='playing' && !state.firstPlayingAt) state.firstPlayingAt=now;
     updateDiag();
   }));
@@ -1179,7 +1285,9 @@ function createPlayer(ch, url, seq, mode){
         if(/PTS/i.test(text)) state.ts.pts++;
         if(/DTS/i.test(text)) state.ts.dts++;
         if(/continuity|discontinuity/i.test(text)) state.ts.continuity++;
-        if($('microMode').value==='full') log('TSLOG '+text.slice(0,700));
+        // TSLOG is intentionally suppressed to prevent video/transport diagnostics from
+        // pushing the MP2PCM diagnostic lines out of the on-page log buffer.
+        if(false && $('microMode').value==='full') log('TSLOG '+text.slice(0,700));
       });
     }catch(e){ log('TSLOG listener install failed '+e.message); }
   }

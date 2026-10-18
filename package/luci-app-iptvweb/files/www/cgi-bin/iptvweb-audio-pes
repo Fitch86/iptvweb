@@ -1,6 +1,5 @@
 #!/usr/bin/lua
--- rev4.21: continuous MPEG-1/2 Layer I/II/III audio frame extractor for WebAudio.
--- The CGI stays open and streams complete MPEG audio frames as they arrive.
+-- rev4.26: strict MP2 frame validation, signature locking
 
 local function qget(name)
   local q=os.getenv('QUERY_STRING') or ''
@@ -41,9 +40,8 @@ local audio_pid=nil
 local pesbuf=''
 local outbuf=''
 local frames=0
-local total_bytes=0
 local frames_since_flush=0
-local first_frame_logged=false
+local first_sig=nil
 
 local function u8(s,i) return s:byte(i) end
 local function band(a,b)
@@ -110,11 +108,19 @@ local function header(s,i)
   local si=band(rshift(x3,2),3)
   if vi==1 or li==0 or bi==0 or bi==15 or si==3 then return nil end
   local srates={ [3]={44100,48000,32000}, [2]={22050,24000,16000}, [0]={11025,12000,8000} }
-  local sr=srates[vi] and srates[vi][si]
+  local sr=srates[vi] and srates[vi][si+1]
   if not sr then return nil end
-  local br1={0,32,40,48,56,64,80,96,112,128,160,192,224,256,320}
-  local br2={0,8,16,24,32,40,48,56,64,80,96,112,128,144,160}
-  local kbps=(vi==3 and br1[bi+1] or br2[bi+1])
+  local mpeg1_l1={0,32,64,96,128,160,192,224,256,288,320,352,384,416,448}
+  local mpeg1_l23={0,32,48,56,64,80,96,112,128,160,192,224,256,320,384}
+  local mpeg2_l1={0,32,48,56,64,80,96,112,128,144,160,176,192,224,256}
+  local mpeg2_l23={0,8,16,24,32,40,48,56,64,80,96,112,128,144,160}
+  local tbl
+  if vi==3 then
+    tbl=(li==3) and mpeg1_l1 or mpeg1_l23
+  else
+    tbl=(li==3) and mpeg2_l1 or mpeg2_l23
+  end
+  local kbps=tbl[bi+1]
   if not kbps or kbps==0 then return nil end
   local pad=band(rshift(x3,1),1)
   local len
@@ -126,48 +132,72 @@ local function header(s,i)
     len=math.floor((72*kbps*1000/sr)+pad)
   end
   if len<4 or len>4096 then return nil end
-  return len
+  local sig = vi..':'..li..':'..kbps..':'..sr
+  if first_sig ~= nil and sig ~= first_sig then return nil end
+  return { len=len, sig=sig }
+end
+
+local function next_header(s,start)
+  local p=start
+  while true do
+    local cur=s:find(string.char(0xff),p,true)
+    if not cur then return nil end
+    local h=header(s,cur)
+    if h then return cur,h end
+    p=cur+1
+  end
 end
 
 local function emit_ready_frames(force)
-  local emitted=0
-  while #pesbuf>=4 do
-    local pos=nil
-    for i=1,#pesbuf-1 do
-      if pesbuf:byte(i)==0xff and band(pesbuf:byte(i+1),0xe0)==0xe0 then pos=i; break end
-    end
+  while #pesbuf >= 4 do
+    local pos, h = next_header(pesbuf, 1)
     if not pos then
-      pesbuf=pesbuf:sub(-3)
+      if #pesbuf > 8192 then pesbuf = pesbuf:sub(-4096) end
       break
     end
-    if pos>1 then pesbuf=pesbuf:sub(pos) end
-    local len=header(pesbuf,1)
-    if not len then
-      pesbuf=pesbuf:sub(2)
-    elseif #pesbuf<len then
-      break
+    if pos > 1 then pesbuf = pesbuf:sub(pos) end
+    
+    -- 数据不足一帧，等
+    if #pesbuf < h.len then break end
+    
+    local verified = false
+    
+    if #pesbuf >= h.len + 4 then
+      -- 严格模式：校验下一帧
+      local next_h = header(pesbuf, h.len + 1)
+      if next_h and next_h.sig == h.sig then
+        verified = true
+      else
+        -- 校验失败：真假帧头，丢 1 字节重找
+        pesbuf = pesbuf:sub(2)
+      end
     else
-      outbuf=outbuf..pesbuf:sub(1,len)
-      pesbuf=pesbuf:sub(len+1)
-      frames=frames+1
-      frames_since_flush=frames_since_flush+1
-      total_bytes=total_bytes+len
-      emitted=emitted+1
-      if #outbuf>=8192 or frames_since_flush>=12 then
-        io.write(outbuf)
-        io.flush()
-        outbuf=''
-        frames_since_flush=0
+      -- 数据不够校验
+      if first_sig and h.sig == first_sig then
+        -- 已经锁定过参数，这一帧和已知参数一致，相信它
+        verified = true
+      else
+        -- 还没锁定，严格等待
+        break
+      end
+    end
+    
+    if verified then
+      if first_sig == nil then first_sig = h.sig end
+      outbuf = outbuf .. pesbuf:sub(1, h.len)
+      pesbuf = pesbuf:sub(h.len + 1)
+      frames = frames + 1
+      frames_since_flush = frames_since_flush + 1
+      if #outbuf >= 4096 or frames_since_flush >= 8 then
+        io.write(outbuf); io.flush()
+        outbuf = ''; frames_since_flush = 0
       end
     end
   end
-  if force and #outbuf>0 then
-    io.write(outbuf)
-    io.flush()
-    outbuf=''
-    frames_since_flush=0
+  if force and #outbuf > 0 then
+    io.write(outbuf); io.flush()
+    outbuf = ''; frames_since_flush = 0
   end
-  return emitted
 end
 
 local function process(pkt)
@@ -182,14 +212,15 @@ local function process(pkt)
   if pid==0 then parse_pat(payload,pusi); return end
   if pmt_pid and pid==pmt_pid then parse_pmt(payload,pusi); return end
   if not audio_pid or pid~=audio_pid then return end
+  
   if pusi then
-    -- Keep the previous PES payload in pesbuf, then append the new PES payload.
-    -- This is sufficient for the frame-oriented MPEG audio stream and avoids
-    -- waiting for a complete PES before sending audio downstream.
-    local cur=pes_payload(payload)
-    if #cur>0 then emit_ready_frames(true); pesbuf=pesbuf..cur end
+    -- PUSI：剥离 PES header 后追加（不清空残留）
+    local cur = pes_payload(payload)
+    if #cur > 0 then
+      pesbuf = pesbuf .. cur
+    end
   else
-    pesbuf=pesbuf..payload
+    pesbuf = pesbuf .. payload
   end
   emit_ready_frames(false)
 end
