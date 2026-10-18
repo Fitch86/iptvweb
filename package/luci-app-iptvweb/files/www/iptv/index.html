@@ -3,11 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV RC1</title>
+<title>OpenWrt IPTV RC1.4</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
 header{min-height:50px;padding:6px 14px;background:#181818;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid #292929}
+#diagPanel{display:none;position:fixed;z-index:20;right:8px;bottom:8px;width:min(720px,calc(100vw - 16px));max-height:42vh;background:#101010;border:1px solid #555;border-radius:8px;padding:8px;box-shadow:0 4px 24px #000b}#diagPanel.open{display:flex;flex-direction:column;gap:6px}#diagPanel textarea{width:100%;height:30vh;min-height:120px;resize:vertical;background:#080808;color:#ddd;border:1px solid #444;font:11px/1.35 ui-monospace,monospace}#diagPanel .diagbar{display:flex;flex-wrap:wrap;gap:6px}#diagPanel .diagbar button{padding:5px 8px}
 header h1{font-size:16px;margin:0}
 .small{color:#999;font-size:12px}
 button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px;cursor:pointer}
@@ -37,13 +38,18 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">RC1 · Safari 自适应音轨播放</span></h1>
+  <h1>OpenWrt IPTV <span class="small">RC1.5 · 点击控制修正与精简诊断</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
   <button id="stopBtn" class="danger">⏹ 停止并断开</button>
+  <button id="diagToggle" type="button">诊断日志：关</button>
   <span id="status" class="small"></span>
 </header>
+<section id="diagPanel" aria-label="诊断日志">
+  <div class="diagbar"><strong style="margin-right:auto">精简诊断日志（默认关闭）</strong><button id="diagCopy" type="button">复制日志</button><button id="diagClear" type="button">清空</button><button id="diagHide" type="button">关闭</button></div>
+  <textarea id="diagOutput" readonly spellcheck="false" aria-label="诊断日志内容" placeholder="开启诊断日志后，重新选择有问题的频道以收集日志。"></textarea>
+</section>
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
   <main>
@@ -77,9 +83,9 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='RC1';
+const REV='RC1.5';
 const state={
-  items:[], groups:[], active:'', current:null, player:null, seq:0,
+  items:[], groups:[], active:'', current:null, player:null, seq:0, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
@@ -274,7 +280,7 @@ async function detectSafariAudioRoute(ch, seq) {
 
     // 只有明确识别为 MPEG Audio 才走独立解码。
     if (info.pmt_found === true && (streamType === 3 || streamType === 4)) {
-      return { kind: 'mpeg-audio', streamType, info };
+      return { kind: 'mpeg-audio', streamType, hasVideo: info.has_video !== false, info };
     }
 
     // AAC、未知类型、probe 不完整都保留 A/V 音轨。
@@ -399,9 +405,9 @@ async function startWebAudioMpeg(ch, seq){
     state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable'; log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable');  return;
   }
   try{
-    //const Ctx=window.AudioContext||window.webkitAudioContext;
-    //const ctx=new Ctx({latencyHint:'interactive'}); state.webAudioCtx=ctx;
-	let ctx=state.webAudioCtx;
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!Ctx) throw new Error('AudioContext unavailable');
+    let ctx=state.webAudioCtx;
     if (!ctx || ctx.state === 'closed') {
       ctx = new Ctx({latencyHint:'interactive'});
     }
@@ -563,12 +569,13 @@ async function startWebAudioMpeg(ch, seq){
 		state.audioWorkletInFlight++;
 		const chunkId=state.audioChunks;
 		state.webAudioWorkletNode.port.postMessage({type:'pcm',id:chunkId,data:outStereo.buffer,samples:outSamples,rate:ctxRate},[outStereo.buffer]);
+        if(state.safariAudioOnly && !state.audioStarted && state.audioChunks>=8) startAudioWorkletClock(seq);
 	  }else if(state.webAudioBackend==='buffersource'){
 		state.audioScheduleQueue.push({pcm:outStereo,samples:outSamples});
 		state.audioSchedulePendingSamples+=outSamples;
 		state.audioQueuedSeconds=state.audioSchedulePendingSamples/ctxRate;
 		state.audioRingSeconds=state.audioQueuedSeconds;
-		if(!state.audioStarted && state.firstFrameAt && state.audioQueuedSeconds>=0.75) startAudioWorkletClock(seq);
+		if(!state.audioStarted && (state.safariAudioOnly || state.firstFrameAt || state.firstPlayingAt) && state.audioQueuedSeconds>=0.75) startAudioWorkletClock(seq);
 		if(state.audioStarted) scheduleBufferSourceQueue(seq);
 	  }
 	  
@@ -597,7 +604,7 @@ function startAudioWorkletClock(seq){
   if(state.webAudioBackend==='worklet' && !state.webAudioWorkletNode) return;
   if(state.webAudioBackend!=='worklet' && state.webAudioBackend!=='scriptprocessor' && state.webAudioBackend!=='buffersource') return;
   const v=$('video');
-  if(!state.firstFrameAt && !state.firstPlayingAt) return;
+  if(!state.safariAudioOnly && !state.firstFrameAt && !state.firstPlayingAt) return;
   state.audioVideoAnchor=Number(v.currentTime||0);
   const startAt=state.webAudioCtx.currentTime+state.audioStartDelay;
   state.audioStartContextTime=startAt;
@@ -702,17 +709,45 @@ function renderGroups(){
 }
 
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
-function log(msg){}
+function renderDiag(){
+  const out=$('diagOutput'); if(!out) return;
+  out.value=state.log.join('\n'); out.scrollTop=out.scrollHeight;
+}
+function log(msg){
+  if(!state.diagEnabled) return;
+  const ch=state.current&&state.current.name?' ['+state.current.name+']':'';
+  state.log.push('+'+rel()+'s'+ch+' '+String(msg));
+  if(state.log.length>800) state.log.splice(0,state.log.length-800);
+  renderDiag();
+}
+function videoSnapshot(reason){
+  const v=$('video'); let ranges=[];
+  try{for(let i=0;i<v.buffered.length;i++) ranges.push([+v.buffered.start(i).toFixed(3),+v.buffered.end(i).toFixed(3)]);}catch(_){}
+  log('VIDEO '+reason+' '+JSON.stringify({paused:v.paused,ended:v.ended,readyState:v.readyState,networkState:v.networkState,currentTime:+(v.currentTime||0).toFixed(3),duration:Number.isFinite(v.duration)?+v.duration.toFixed(3):String(v.duration),videoWidth:v.videoWidth,videoHeight:v.videoHeight,buffered:ranges,error:v.error?{code:v.error.code,message:v.error.message}:null,player:!!state.player,route:state.safariAudioRoute,avMode:state.avMode}));
+}
+function installDiagConsoleHook(){
+  if(state.diagConsoleHooked) return; state.diagConsoleHooked=true;
+  ['log','info','warn','error'].forEach(method=>{
+    const original=console[method]; if(typeof original!=='function') return;
+    console[method]=function(...args){
+      original.apply(console,args); if(!state.diagEnabled) return;
+      const line=args.map(x=>typeof x==='string'?x:(()=>{try{return JSON.stringify(x)}catch(_){return String(x)}})()).join(' ');
+      if(/mpegts|TSDemuxer|MSEController|MP4Remuxer|TransmuxingController|MediaSource|SourceBuffer/i.test(line)) log('CONSOLE.'+method+' '+line);
+    };
+  });
+}
+function setDiagEnabled(on){
+  state.diagEnabled=!!on; $('diagPanel').classList.toggle('open',state.diagEnabled);
+  $('diagToggle').textContent='诊断日志：'+(state.diagEnabled?'开':'关');
+  if(state.diagEnabled){
+    state.log=[]; installDiagConsoleHook();
+    log('DIAG START '+new Date().toISOString()+' ua='+navigator.userAgent);
+    log('CAPS '+JSON.stringify({MediaSource:!!window.MediaSource,ManagedMediaSource:!!window.ManagedMediaSource,requestVideoFrameCallback:'requestVideoFrameCallback' in $('video'),mpegts:!!window.mpegts,mpegtsSupported:!!(window.mpegts&&mpegts.isSupported&&mpegts.isSupported())}));
+    videoSnapshot('diagnostic enabled');
+  }
+}
 function setStatus(t){ $('status').textContent=t||''; }
 function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
-function rangeText(r){
-  try{
-    if(!r||!r.length) return '-';
-    const a=[];
-    for(let i=0;i<r.length;i++) a.push(r.start(i).toFixed(3)+'-'+r.end(i).toFixed(3));
-    return a.join(' | ');
-  }catch(e){ return 'ERR:'+e.message; }
-}
 function bufferAhead(v){
   try{
     if(!v.buffered.length) return 0;
@@ -723,44 +758,11 @@ function bufferAhead(v){
     return 0;
   }catch(e){ return 0; }
 }
-function chromeCounters(v){
-  const g=k=> (k in v) ? v[k] : '-';
-  return 'decV='+g('webkitVideoDecodedByteCount')+' decA='+g('webkitAudioDecodedByteCount')+' frames='+g('webkitDecodedFrameCount')+' drop='+g('webkitDroppedFrameCount');
-}
-function mseDump(){
-  try{
-    const p=state.player; if(!p) return '-';
-    const ctl=p._msectl || p._mseController || null;
-    if(!ctl) return 'no _msectl';
-    const sbs=ctl._sourceBuffers || ctl.sourceBuffers;
-    if(!sbs) return 'no sourceBuffers';
-    const parts=[];
-    const keys=(!Array.isArray(sbs) && typeof sbs==='object') ? Object.keys(sbs) : null;
-    if(keys){
-      for(const k of keys){
-        const sb=sbs[k];
-        if(!sb){ parts.push(k+':null'); continue; }
-        parts.push(k+' type='+(sb.type||'?')+' buffered='+rangeText(sb.buffered)+' updating='+!!sb.updating+' tsOffset='+Number(sb.timestampOffset||0).toFixed(4));
-      }
-      return parts.join(' || ') || 'empty';
-    }
-    return String(sbs);
-  }catch(e){ return 'ERR:'+e.message; }
-}
-
 function stopDiagTimers(){
   if(state.stuckTimer){ clearInterval(state.stuckTimer); state.stuckTimer=0; }
   if(state.timelineTimer){ clearInterval(state.timelineTimer); state.timelineTimer=0; }
   if(state.diagTimer){ clearInterval(state.diagTimer); state.diagTimer=0; }
-  if(state.audioSyncTimer){ clearInterval(state.audioSyncTimer); state.audioSyncTimer=0; }
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
-}
-function startDiagTimer(seq){
-  if(state.diagTimer) clearInterval(state.diagTimer);
-  state.diagTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.diagTimer); state.diagTimer=0; return; }
-    
-  }, 500);
 }
 function stopWebAudio(){
   if(state.audioStartTimer){ clearTimeout(state.audioStartTimer); state.audioStartTimer=0; }
@@ -796,7 +798,6 @@ function stopWebAudio(){
 
 function stopPlayer(){
   stopWebAudio();
-  if(state.analyzeCtl){ try{ state.analyzeCtl.abort(); }catch(e){} state.analyzeCtl=null; }
   if(state.startTimer){ clearTimeout(state.startTimer); state.startTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
   stopDiagTimers();
@@ -809,200 +810,114 @@ function stopPlayer(){
   }
 }
 
+function isDesktopChrome(){
+  const ua=navigator.userAgent||'';
+  return /Chrome\//.test(ua) && !/Edg\//.test(ua) && !/Android|Mobile|CrOS/i.test(ua);
+}
 function installGestureHooks(){
   if(state.gestureHooksInstalled) return;
   state.gestureHooksInstalled=true;
   const v=$('video');
-  v.addEventListener('click', ()=>gesturePlay('video-click'), {passive:true});
-  const b=$('recoverBtn');
-  if(b) b.onclick=()=>gesturePlay('recovery-button');
+  // Desktop Chrome's native video click action can race a custom toggle.
+  // Use the page's click handler there; retain native controls on other browsers.
+  // Keep native controls available on desktop Chrome (fullscreen/volume/seek).
+  v.controls=true;
+  // Let native controls work, but take ownership of clicks on the video surface.
+  // Chrome's built-in video click action can run after pointerup and undo our toggle
+  // (observed pause -> play about 300 ms later). Handle only click in capture phase
+  // and cancel the browser default for the picture area.
+  v.addEventListener('click',event=>{
+    if(event.target!==v) return;
+    if(v.controls && Number.isFinite(event.offsetY) && event.offsetY > v.clientHeight-44) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if(typeof event.stopImmediatePropagation==='function') event.stopImmediatePropagation();
+    const now=performance.now();
+    if(now-state.diagLastSurfaceToggleAt<350) return;
+    state.diagLastSurfaceToggleAt=now;
+    log('VIDEO surface click-captured offset='+event.offsetX+','+event.offsetY+' defaultPrevented='+event.defaultPrevented);
+    toggleVideoPlayback();
+  },{capture:true});
 }
-function gesturePlay(reason){
+function toggleVideoPlayback(){
   const v=$('video'), p=state.player;
-  state.userGestureCount++;
-  state.userPaused=false;
-  log('USER_GESTURE '+reason+' paused='+v.paused+' current='+v.currentTime.toFixed(3)+' readyState='+v.readyState+' bufferAhead='+bufferAhead(v).toFixed(3));
-  if(p){
-    startTimelineMicroscope(state.seq);
-    startStuckMonitor(state.seq);
-    startDiagTimer(state.seq);
-  }
-  if(!p) return;
-  try{
-    const q=p.play();
-    if(q&&q.then) q.then(()=>log('GESTURE player.play resolved')).catch(e=>log('GESTURE player.play rejected '+e.name+': '+e.message));
-  }catch(e){ log('GESTURE player.play threw '+e.name+': '+e.message); }
-}
-function recoverPlayback(reason){
-  const v=$('video'), p=state.player, now=performance.now();
-  if(!p) return;
-  if(state.recoveries>=2){ log('RECOVERY skipped limit=2 reason='+reason); return; }
-  if(now-state.lastRecoveryAt<3000){ log('RECOVERY skipped cooldown reason='+reason); return; }
-  state.lastRecoveryAt=now; state.recoveries++;
-  log('RECOVERY #'+state.recoveries+' reason='+reason+' paused='+v.paused+' current='+v.currentTime.toFixed(3)+' readyState='+v.readyState+' bufferAhead='+bufferAhead(v).toFixed(3));
-  try{
-    const q=p.play();
-    if(q&&q.then) q.then(()=>log('RECOVERY player.play resolved')).catch(e=>log('RECOVERY player.play rejected '+e.name+': '+e.message));
-  }catch(e){ log('RECOVERY player.play threw '+e.name+': '+e.message); }
-}
-function startStuckMonitor(seq){
-  if(state.stuckTimer) clearInterval(state.stuckTimer);
-  state.lastProgressWall=performance.now();
-  state.lastProgressTime=$('video').currentTime||0;
-  state.playingSince=0;
-  state.stuckTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.stuckTimer); return; }
-    const v=$('video'), now=performance.now();
-    if(v.paused||v.ended){ state.lastProgressWall=now; state.lastProgressTime=v.currentTime||0; return; }
-    const t=v.currentTime||0;
-    if(t>state.lastProgressTime+0.05){ state.lastProgressTime=t; state.lastProgressWall=now; return; }
-    if(state.playingSince && now-state.playingSince>=2500 && now-state.lastProgressWall>=2000){
-      recoverPlayback('time-not-advancing');
-      state.playingSince=now;
+  const audioOnly=state.safariAudioOnly && state.safariAudioRoute==='mpeg-audio';
+  if(audioOnly){
+    const ctx=state.webAudioCtx;
+    if(!ctx || ctx.state==='closed') return;
+    if(ctx.state==='running'){
+      state.userPaused=true;
+      try{ const q=ctx.suspend(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
+      setStatus('广播已暂停');
+    }else{
+      state.userPaused=false;
+      try{ const q=ctx.resume(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
+      setStatus('广播播放中');
     }
-  }, 500);
-}
-
-function classifyTimeline(){
-  const v=$('video'), now=performance.now(), tl=state.timeline;
-  let reason='', c='STARTING';
-  const recent=tl.filter(x=>now-x.wall<4000);
-  const decoded=state.stats && Number(state.stats.decodedFrames||0);
-  const buffered=bufferAhead(v);
-  const playing=!!state.firstPlayingAt && !v.paused && !v.ended;
-  if(state.userPaused && v.paused){ c='USER PAUSED'; reason='用户主动暂停'; state.classification=c; state.classificationReason=reason; return c; }
-  if(v.error||state.lastErrorText){ c='MEDIA ERROR'; reason=state.lastErrorText||('video.error code='+v.error.code); }
-  else if(state.audioDecodeError){ c='AUDIO DECODE ERROR'; reason='mpegts audio decode failure'; }
-  else if(playing && recent.length>=2){
-    const a=recent[0], b=recent[recent.length-1];
-    const dt=(b.wall-a.wall)/1000, ct=b.currentTime-a.currentTime, pf=b.presentedFrames-a.presentedFrames;
-    if(dt>=1.5 && ct<0.08){
-      if(pf<=0 && decoded>10){ c='DECODER/TIMELINE STUCK'; reason='currentTime 与 presentedFrames 均不推进'; }
-      else { c='TIMELINE STUCK'; reason='有 buffer，但 currentTime 不推进'; }
-    } else if(ct>0.08 || pf>0){ c='PLAYBACK OK'; reason='时间线持续推进'; }
+    return;
   }
-  if(c==='STARTING' && recent.length>=2){
-    const a=recent[0], b=recent[recent.length-1], dt=(b.wall-a.wall)/1000, ct=b.currentTime-a.currentTime;
-    if(dt>=1.5 && ct<0.08 && buffered>1){ c='BUFFER GROWING NO PLAY'; reason='bufferAhead 在增长，但播放时间线未推进'; }
+  if(!p){
+    // Fallback for a browser-native media element if the player object is not ready.
+    if(v.paused || v.ended){ try{ const q=v.play(); if(q&&q.catch) q.catch(()=>{}); }catch(e){} }
+    else { try{ v.pause(); }catch(e){} }
+    return;
   }
-  if(c==='STARTING' && state.firstPlayingAt){ c='PLAY STARTED'; reason='已触发 playing'; }
-  if(c==='STARTING' && state.mediaInfo){ c='MEDIA DETECTED'; reason='已识别编码'; }
-  state.classification=c; state.classificationReason=reason; state.classificationAt=now;
-  return c;
-}
-function timelineSample(source){
-  const v=$('video'), now=performance.now(), st=state.stats||{};
-  let presented=0, mediaTime=null;
-  if(state.lastFrame){ presented=Number(state.lastFrame.presentedFrames||0); mediaTime=Number(state.lastFrame.mediaTime); }
-  const item={
-    wall:now, rel:state.playStarted?(now-state.playStarted)/1000:0,
-    currentTime:Number(v.currentTime||0), mediaTime:isFinite(mediaTime)?mediaTime:null,
-    presentedFrames:presented, decodedFrames:Number(st.decodedFrames||0),
-    droppedFrames:Number(st.droppedFrames||0), buffered:rangeText(v.buffered),
-    ahead:bufferAhead(v), readyState:v.readyState, paused:v.paused, source:source||'timer'
-  };
-  state.timeline.push(item); if(state.timeline.length>240) state.timeline.shift();
-  return item;
-}
-function startTimelineMicroscope(seq){
-  if(state.timelineTimer) clearInterval(state.timelineTimer);
-  state.timeline=[]; state.lastFrame=null;
-  state.timelineTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.timelineTimer); return; }
-    timelineSample('250ms'); classifyTimeline(); 
-  }, 250);
-}
-function timelineSummary(){
-  const a=state.timeline; if(a.length<2) return '样本不足';
-  const first=a[0], last=a[a.length-1];
-  const dt=(last.wall-first.wall)/1000;
-  return 'Δwall='+dt.toFixed(2)+'s Δcurrent='+(last.currentTime-first.currentTime).toFixed(3)+'s Δpresented='+(last.presentedFrames-first.presentedFrames)+' Δdecoded='+((last.decodedFrames-first.decodedFrames)||0);
-}
-
-function waitingSnapshot(v, ev){
-  const ahead=bufferAhead(v);
-  const line=[
-    'WAITING_SNAPSHOT ev='+ev,
-    'current='+v.currentTime.toFixed(3),
-    'ahead='+ahead.toFixed(3)+'s',
-    'readyState='+v.readyState,
-    'networkState='+v.networkState,
-    'paused='+v.paused,
-    'buffered='+rangeText(v.buffered),
-    'seekable='+rangeText(v.seekable),
-    'duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration)),
-    chromeCounters(v),
-    'mse='+mseDump()
-  ].join(' ');
-  log(line);
-  if(ahead>=1 && v.readyState>=3){
-    log('WAITING_WITH_BUFFER 不是缺数据。ahead='+ahead.toFixed(3)+'s readyState='+v.readyState+' → 更像 MSE/A-V sync/decoder，而不是 HTTP/udpxy');
+  const shouldPause=!v.paused && !v.ended;
+  if(shouldPause){
+    state.userPaused=true;
+    try{ p.pause(); }catch(e){}
+    try{ v.pause(); }catch(e){}
+    if(state.webAudioCtx && state.safariAudioRoute==='mpeg-audio'){
+      try{ const q=state.webAudioCtx.suspend(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
+    }
+    setStatus('已暂停');
+    return;
   }
-  if(false && $('nudgeWaiting').checked && ahead>=1 && !state.nudgedThisPlay){
-    state.nudgedThisPlay=true;
-    const t=v.currentTime;
-    try{
-      v.currentTime=t;
-      log('NUDGE applied currentTime='+t.toFixed(3)+' (same value; Chrome MSE unblock experiment)');
-    }catch(e){ log('NUDGE failed '+e.message); }
+  state.userPaused=false;
+  if(state.webAudioCtx && state.safariAudioRoute==='mpeg-audio'){
+    try{ const q=state.webAudioCtx.resume(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
   }
+  try{
+    const q=p.play();
+    if(q&&q.catch) q.catch(()=>{ try{ const r=v.play(); if(r&&r.catch) r.catch(()=>{}); }catch(e){} });
+  }catch(e){ try{ const q=v.play(); if(q&&q.catch) q.catch(()=>{}); }catch(_){} }
 }
 
 function attachVideoDiagnostics(v, seq){
-  v.autoplay=false;
-  v.removeAttribute('autoplay');
-  const events=['loadstart','durationchange','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','suspend','progress','seeking','seeked','timeupdate','ratechange','volumechange','ended','emptied','error'];
-  events.forEach(ev=>v.addEventListener(ev, ()=>{
+  v.autoplay=false; v.removeAttribute('autoplay');
+  if(state.diagEnabled) videoSnapshot('attachVideoDiagnostics');
+  ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','seeking','seeked','ended','emptied','abort','durationchange','resize','error'].forEach(name=>{
+    v.addEventListener(name,()=>{if(seq===state.seq && state.diagEnabled) videoSnapshot('event='+name);});
+  });
+  v.addEventListener('pause', ()=>{
+    if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
+    state.userPaused=true;
+  });
+  v.addEventListener('play', ()=>{
     if(seq!==state.seq) return;
-    const now=performance.now();
-    let extra='';
-    if(ev==='play' && !state.playIssuedAt) extra=' SOURCE=unexpected-autoplay';
-    if(ev==='pause' && state.playIssuedAt && !state.stopping){
-      state.userPaused=true; stopDiagTimers();
-      log('USER_PAUSED: 停止诊断采样');
-    }
-    if(ev==='play' && state.userPaused){
-      state.userPaused=false;
-      startTimelineMicroscope(seq); startStuckMonitor(seq); startDiagTimer(seq);
-      log('USER_RESUMED');
-    }
-    if(ev==='waiting'){
-      state.waitingCount++;
-      if(!state.waitingStart) state.waitingStart=now;
-      extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s readyState='+v.readyState;
-      waitingSnapshot(v, 'waiting');
-    }
-    if(ev==='playing'){
-      state.playingSince=now; state.lastProgressWall=now; state.lastProgressTime=v.currentTime||0;
-      scheduleWebAudioAfterVideo(seq);
-      if(!state.audioSyncTimer) state.audioSyncTimer=setInterval(()=>audioSyncTick(seq),500);
-      if(state.waitingStart){
-        extra=' waitingRecovered='+((now-state.waitingStart)/1000).toFixed(3)+'s current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-        state.waitingStart=0;
-      }
-      extra += ' mse='+mseDump();
-    }
-    if(ev==='stalled'){
-      state.stallCount++;
-      extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-      waitingSnapshot(v, 'stalled');
-    }
-    if(ev==='progress') extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-    if(ev==='error' && v.error) extra=' code='+v.error.code+' '+(v.error.message||'');
-    // Video event logs are intentionally suppressed here; keep audio diagnostics visible.
-    if(ev==='playing' && !state.firstPlayingAt) state.firstPlayingAt=now;
-    
-  }));
+    state.userPaused=false;
+  });
+  v.addEventListener('playing', ()=>{
+    if(seq!==state.seq) return;
+    if(!state.firstPlayingAt) state.firstPlayingAt=performance.now();
+    scheduleWebAudioAfterVideo(seq);
+    if(!state.audioSyncTimer) state.audioSyncTimer=setInterval(()=>audioSyncTick(seq),500);
+  });
   if('requestVideoFrameCallback' in v){
     const cb=(now, meta)=>{
       if(seq!==state.seq) return;
-      state.lastFrame={wall:performance.now(), mediaTime:Number(meta.mediaTime), presentedFrames:Number(meta.presentedFrames||0)};
+      state.lastFrame={wall:performance.now(),mediaTime:Number(meta.mediaTime),presentedFrames:Number(meta.presentedFrames||0)};
       if(meta.width) state.lastVideoWidth=meta.width;
       if(meta.height) state.lastVideoHeight=meta.height;
       if(!state.firstFrameAt){
         state.firstFrameAt=performance.now();
-        log('video.firstFrame rVFC mediaTime='+(meta.mediaTime??'?')+' presentedFrames='+(meta.presentedFrames??'?'));
+        log('VIDEO first requestVideoFrameCallback mediaTime='+Number(meta.mediaTime).toFixed(3)+' presentedFrames='+Number(meta.presentedFrames||0)+' size='+v.videoWidth+'x'+v.videoHeight);
         scheduleWebAudioAfterVideo(seq);
+      }
+      const frameWall=performance.now();
+      if(state.diagEnabled && (!state.diagLastFrameLog || frameWall-state.diagLastFrameLog>5000)){
+        state.diagLastFrameLog=frameWall;
+        log('VIDEO frame mediaTime='+Number(meta.mediaTime).toFixed(3)+' presentedFrames='+Number(meta.presentedFrames||0)+' size='+v.videoWidth+'x'+v.videoHeight+' readyState='+v.readyState);
       }
       v.requestVideoFrameCallback(cb);
     };
@@ -1049,9 +964,9 @@ function makeSafariVideoOnlyLoader(){
       this._seekHandler=seekHandler; this._config=config||{};
       this._status=0; this._needStash=false; this._aborter=null;
       this._buffer=new Uint8Array(0); this._byteStart=0; this._outBytes=0;
-      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._pcrPid=null;
+      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._videoPids=new Set(); this._pcrPid=null;
       this._sectionBuf=new Map(); this._sectionNeed=new Map(); this._sectionType=new Map();
-      this._started=false; this._closed=false;
+      this._started=false; this._closed=false; this._diagLastStats=0; this._diagInBytes=0; this._diagOutPackets=0; this._diagVideoPackets=new Set();
     }
     open(dataSource, range){
       this._status=1; this._dataSource=dataSource; this._range=range||{};
@@ -1077,6 +992,7 @@ function makeSafariVideoOnlyLoader(){
           const q=await reader.read();
           if(q.done) break;
           if(!q.value || !q.value.length) continue;
+          this._diagInBytes+=q.value.byteLength;
           const out=this._filterChunk(q.value);
           if(out.length){
             const ab=out.buffer.slice(out.byteOffset,out.byteOffset+out.byteLength);
@@ -1105,34 +1021,62 @@ function makeSafariVideoOnlyLoader(){
     }
     _filterChunk(chunk){
       this._appendBuffer(chunk);
-      const packets=[]; let off=0;
-      while(this._buffer.length-off>=188){
-        if(this._buffer[off]!==0x47){
-          const n=this._buffer.indexOf(0x47,off+1);
-          if(n<0){ off=this._buffer.length; break; }
-          off=n;
-          if(this._buffer.length-off<188) break;
+      const packets=[];
+      let off=0;
+      const b=this._buffer;
+      // Establish TS packet alignment using repeated 188-byte sync bytes.
+      if(!this._syncLocked){
+        let found=-1;
+        const need=b.length>=188*3 ? 3 : 2;
+        const last=b.length-188*(need-1);
+        for(let i=0;i<last;i++){
+          if(b[i]!==0x47 || b[i+188]!==0x47) continue;
+          if(need===3 && b[i+376]!==0x47) continue;
+          found=i; break;
         }
-        if(this._buffer.length-off<188) break;
-        let ok=true;
-        for(let i=1;i<4;i++){ if(this._buffer[off+i]===undefined){ok=false;break;} }
-        if(!ok) break;
-        packets.push(this._buffer.slice(off,off+188)); off+=188;
+        if(found<0){
+          if(b.length>188*3) this._buffer=b.slice(-188*2);
+          return new Uint8Array(0);
+        }
+        off=found;
+        this._syncLocked=true;
+        log('SAFARI_TS_FILTER: TS sync locked offset='+found+' chunkBytes='+chunk.length);
       }
-      this._buffer=this._buffer.slice(off);
+      while(b.length-off>=188){
+        if(b[off]!==0x47 || (b.length-off>=376 && b[off+188]!==0x47)){
+          this._syncLocked=false;
+          break;
+        }
+        const pkt=b.slice(off,off+188);
+        if(((pkt[3]>>4)&3)===0){ this._syncLocked=false; break; }
+        packets.push(pkt);
+        off+=188;
+      }
+      this._buffer=b.slice(off);
+      if(!this._syncLocked && this._buffer.length>188*3) this._buffer=this._buffer.slice(-188*2);
       const out=[];
       for(const pkt of packets){
         const pid=((pkt[1]&0x1f)<<8)|pkt[2];
-        if(pid===0){ this._inspectPAT(pkt); out.push(pkt); continue; }
+        if(pid===0){ const old=this._pmtPid; this._inspectPAT(pkt); if(old!==this._pmtPid) log('SAFARI_TS_FILTER: PAT PMT PID='+this._pmtPid); out.push(pkt); continue; }
         if(this._pmtPid!=null && pid===this._pmtPid){
           const rp=this._rewritePMTPacket(pkt);
           if(rp) out.push(rp);
           continue;
         }
-        if(this._videoPid!=null && pid===this._videoPid){ out.push(pkt); continue; }
+        if((this._videoPids.size && this._videoPids.has(pid)) || (this._videoPid!=null && pid===this._videoPid)){
+          out.push(pkt); this._diagOutPackets++;
+          if(!this._diagVideoPackets.has(pid)){this._diagVideoPackets.add(pid);log('SAFARI_TS_FILTER: first video packet PID='+pid+' CC='+(pkt[3]&15)+' PUSI='+!!(pkt[1]&0x40));}
+          continue;
+        }
         if(this._pcrPid!=null && pid===this._pcrPid){ out.push(pkt); continue; }
       }
-      const total=out.length*188; const ret=new Uint8Array(total);
+      const total=out.length*188;
+      const now=performance.now();
+      if(state.diagEnabled && now-this._diagLastStats>5000){
+        this._diagLastStats=now;
+        log('SAFARI_TS_FILTER: stats inBytes='+this._diagInBytes+' outBytes='+this._outBytes+' videoPackets='+this._diagOutPackets+' sync='+!!this._syncLocked+' pmtPid='+this._pmtPid+' videoPids='+Array.from(this._videoPids).join(',')+' pcrPid='+this._pcrPid+' bufferedBytes='+this._buffer.length);
+      }
+      const ret=new Uint8Array(total);
       for(let i=0;i<out.length;i++) ret.set(out[i],i*188);
       return ret;
     }
@@ -1182,9 +1126,13 @@ function makeSafariVideoOnlyLoader(){
         const st=section[i], ep=((section[i+1]&0x1f)<<8)|section[i+2];
         const eil=((section[i+3]&0x0f)<<8)|section[i+4];
         if(i+5+eil>section.length-4) break;
-        const keep=(st===0x1b || st===0x24 || st===0x02 || st===0x10 || st===0x1f || st===0x20);
-        if(keep){ es.push(section.slice(i,i+5+eil)); if(this._videoPid==null) this._videoPid=ep; }
+        const keep=(st===0x01 || st===0x02 || st===0x10 || st===0x1b || st===0x20 || st===0x24 || st===0x42 || st===0xd1 || st===0xd4 || st===0xea || st===0x1f);
+        if(keep){ es.push(section.slice(i,i+5+eil)); this._videoPids.add(ep); if(this._videoPid==null) this._videoPid=ep; }
         i+=5+eil;
+      }
+      if(!this._loggedPmt){
+        this._loggedPmt=true;
+        log('SAFARI_TS_FILTER: PMT version='+((section[5]>>1)&0x1f)+' PCR PID='+pcr+' videoStreams='+es.map(e=>'0x'+e[0].toString(16)+':'+(((e[1]&0x1f)<<8)|e[2])).join(','));
       }
       if(this._videoPid==null || !es.length) return pkt;
       const body=section.slice(0,12+pil);
@@ -1321,7 +1269,6 @@ function createPlayer(ch, url, seq, mode){
     if(info&&info.width) state.lastVideoWidth=info.width;
     if(info&&info.height) state.lastVideoHeight=info.height;
     log('MEDIA_INFO '+JSON.stringify(info));
-    log('MSE after MEDIA_INFO '+mseDump());
     const vc=info&&info.videoCodec?info.videoCodec:'';
     const ac=info&&info.audioCodec?info.audioCodec:'';
     setStatus((mode==='video'?(state.safariFallbackTried?'Safari回退 Video-only · ':'Video-only · '):mode==='muted'?'Muted-AV · ':'A/V · ')+(vc||'')+(ac?' · '+ac:''));
@@ -1336,38 +1283,8 @@ function createPlayer(ch, url, seq, mode){
       log(name+(info?' '+JSON.stringify(info):''));
     });
   });
-  if(mpegts.LoggingControl && mpegts.LoggingControl.addLogListener){
-    try{
-      mpegts.LoggingControl.addLogListener((type, msg)=>{
-        if(seq!==state.seq) return;
-        const text=String(msg||'');
-        if(!/PMT|PTS|DTS|timestamp|continuity|discontinuity|PCR|PES|private|SourceBuffer|timestampOffset/i.test(text)) return;
-        if(/PTS/i.test(text)) state.ts.pts++;
-        if(/DTS/i.test(text)) state.ts.dts++;
-        if(/continuity|discontinuity/i.test(text)) state.ts.continuity++;
-        // TSLOG is intentionally suppressed to prevent video/transport diagnostics from
-        // pushing the MP2PCM diagnostic lines out of the on-page log buffer.
-        if(false && $('microMode').value==='full') log('TSLOG '+text.slice(0,700));
-      });
-    }catch(e){ log('TSLOG listener install failed '+e.message); }
-  }
-  startTimelineMicroscope(seq);
-  p.attachMediaElement(v); log('attachMediaElement');
-  p.load(); log('player.load()');
-  startStuckMonitor(seq); startDiagTimer(seq);
-  const startStableMonitor=()=>{
-    if(!isIOSSafari() || mode!=='video') return;
-    if(state.stableTimer) clearTimeout(state.stableTimer);
-    state.stableSince=performance.now(); state.stableLogged=false;
-    state.stableTimer=setTimeout(()=>{
-      if(seq!==state.seq || state.player!==p || v.paused || v.readyState<2) return;
-      state.stableTimer=0; state.stableLogged=true;
-      log('SAFARI_VIDEO_ONLY_STABLE: continuous playback >=30s');
-      setStatus('Safari Video-only · 稳定播放 ≥30s');
-      
-    },30000);
-  };
-  v.addEventListener('playing', startStableMonitor, {once:true});
+  p.attachMediaElement(v);
+  p.load();
   const start=()=>{
     if(seq!==state.seq || state.playIssuedAt) return;
     state.startTimer=0;
@@ -1405,9 +1322,11 @@ function resetPlayState(){
 
 function play(ch){
   const seq=++state.seq;
+  state.safariAudioOnly=false;
   state.current=ch; state.active=ch.group; renderGroups();
   stopPlayer();
   const v=$('video');
+  v.controls=true;
   installGestureHooks();
   try{ v.pause(); }catch(e){}
   v.autoplay=false; v.removeAttribute('autoplay'); v.removeAttribute('src'); v.load();
@@ -1415,6 +1334,7 @@ function play(ch){
   resetPlayState();
   $('now').firstChild.textContent=ch.name;
   const url=streamUrl(ch);
+  log('PLAY name='+ch.name+' url='+url+' seq='+seq+' ua='+navigator.userAgent);
   //state.avMode=isIOSSafari() ? 'video' : avMode();
   //log('PLAY '+ch.name);
   //log('URL '+url);
@@ -1433,12 +1353,20 @@ function play(ch){
 
 	  if (route.kind === 'mpeg-audio') {
 		state.safariAudioRoute = 'mpeg-audio';
-		state.avMode = 'video';
+        state.safariAudioOnly = route.hasVideo === false;
+		state.avMode = state.safariAudioOnly ? 'audio-only' : 'video';
 
 		log('SAFARI route=video-only + MPEG Audio stream_type=' +
 			route.streamType);
 
 		startWebAudioMpeg(ch, seq);
+        if(state.safariAudioOnly){
+          const v=$('video');
+          v.controls=false;
+          try{ v.pause(); v.removeAttribute('src'); v.load(); }catch(e){}
+          setStatus('Safari 广播音频 · MPEG Audio');
+          return;
+        }
 		createPlayer(ch, url, seq, 'video');
 	  } else {
 		state.safariAudioRoute = 'av-mse';
@@ -1561,6 +1489,11 @@ $('reinit').onclick=reinit;
 
 $('stopBtn').onclick=stopPlayback;
 $('stopBtn2').onclick=stopPlayback;
+$('recoverBtn').onclick=toggleVideoPlayback;
+$('diagToggle').onclick=()=>setDiagEnabled(!state.diagEnabled);
+$('diagHide').onclick=()=>setDiagEnabled(false);
+$('diagClear').onclick=()=>{state.log=[];renderDiag();};
+$('diagCopy').onclick=async()=>{const text=state.log.join('\n');try{await navigator.clipboard.writeText(text);$('diagCopy').textContent='已复制';setTimeout(()=>$('diagCopy').textContent='复制日志',1200);}catch(e){const out=$('diagOutput');out.focus();out.select();let ok=false;try{ok=document.execCommand('copy');}catch(_){}$('diagCopy').textContent=ok?'已复制，请检查':'已选中日志';setTimeout(()=>$('diagCopy').textContent='复制日志',1500);}};
 
 
 

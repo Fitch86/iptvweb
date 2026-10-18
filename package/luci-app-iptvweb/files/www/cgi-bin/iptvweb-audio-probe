@@ -104,6 +104,7 @@ local function pmt(payload,pusi)
   if pos>entries_end+1 then return end
   local mpeg=nil
   local aac=nil
+  local video=nil
   while pos+4<=entries_end do
     local st=u8(payload,pos)
     local pid=(band(u8(payload,pos+1),31)*256)+u8(payload,pos+2)
@@ -122,6 +123,9 @@ local function pmt(payload,pusi)
     elseif st==17 then
       item.codec='AAC-LATM'
       aac=aac or item
+    elseif st==1 or st==2 or st==16 or st==27 or st==36 or st==66 then
+      -- MPEG-1/2, MPEG-4, AVC/H.264, HEVC/H.265, AVS video ES.
+      video=video or item
     end
     pos=pos+5+eil
   end
@@ -129,10 +133,10 @@ local function pmt(payload,pusi)
   -- 避免 video-only 路径把 AAC 音轨删掉。
   local selected=aac or mpeg
   if selected then
-    result={pid=selected.pid,st=selected.st,codec=selected.codec}
+    result={pid=selected.pid,st=selected.st,codec=selected.codec,video=video}
   else
     -- PMT 已解析，但没有识别出上述音频类型；前端应默认 A/V。
-    result={pid=nil,st=nil,codec='unknown'}
+    result={pid=nil,st=nil,codec='unknown',video=video}
   end
 end
 local function jsonstr(s)
@@ -251,9 +255,13 @@ print('Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n')
 if result then
   local pid=result.pid and tostring(result.pid) or 'null'
   local st=result.st and tostring(result.st) or 'null'
+  local video_pid=result.video and tostring(result.video.pid) or 'null'
+  local has_video=result.video and 'true' or 'false'
   print('{"ok":true,"pmt_found":true,"audio_pid":'..pid..
         ',"pmt_stream_type":'..st..
-        ',"codec":'..jsonstr(result.codec)..'}')
+        ',"codec":'..jsonstr(result.codec)..
+        ',"has_video":'..has_video..
+        ',"video_pid":'..video_pid..'}')
 else
   print('{"ok":false,"pmt_found":false,"error":"PAT/PMT not found"}')
 end
