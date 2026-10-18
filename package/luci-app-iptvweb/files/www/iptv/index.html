@@ -778,7 +778,8 @@ function installGestureHooks(){
   const v=$('video');
   // Desktop Chrome's native video click action can race a custom toggle.
   // Use the page's click handler there; retain native controls on other browsers.
-  if(isDesktopChrome()) v.controls=false;
+  // Keep native controls available on desktop Chrome (fullscreen/volume/seek).
+  v.controls=true;
   v.addEventListener('click', event=>{
     if(event.target!==v) return;
     // Avoid treating a click on the native control strip as a second toggle.
@@ -902,7 +903,7 @@ function makeSafariVideoOnlyLoader(){
       this._seekHandler=seekHandler; this._config=config||{};
       this._status=0; this._needStash=false; this._aborter=null;
       this._buffer=new Uint8Array(0); this._byteStart=0; this._outBytes=0;
-      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._pcrPid=null;
+      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._videoPids=new Set(); this._pcrPid=null;
       this._sectionBuf=new Map(); this._sectionNeed=new Map(); this._sectionType=new Map();
       this._started=false; this._closed=false;
     }
@@ -999,7 +1000,7 @@ function makeSafariVideoOnlyLoader(){
           if(rp) out.push(rp);
           continue;
         }
-        if(this._videoPid!=null && pid===this._videoPid){ out.push(pkt); continue; }
+        if((this._videoPids.size && this._videoPids.has(pid)) || (this._videoPid!=null && pid===this._videoPid)){ out.push(pkt); continue; }
         if(this._pcrPid!=null && pid===this._pcrPid){ out.push(pkt); continue; }
       }
       const total=out.length*188; const ret=new Uint8Array(total);
@@ -1052,8 +1053,8 @@ function makeSafariVideoOnlyLoader(){
         const st=section[i], ep=((section[i+1]&0x1f)<<8)|section[i+2];
         const eil=((section[i+3]&0x0f)<<8)|section[i+4];
         if(i+5+eil>section.length-4) break;
-        const keep=(st===0x01 || st===0x02 || st===0x10 || st===0x1b || st===0x20 || st===0x24 || st===0x42 || st===0xd1 || st===0xea || st===0x1f);
-        if(keep){ es.push(section.slice(i,i+5+eil)); if(this._videoPid==null) this._videoPid=ep; }
+        const keep=(st===0x01 || st===0x02 || st===0x10 || st===0x1b || st===0x20 || st===0x24 || st===0x42 || st===0xd1 || st===0xd4 || st===0xea || st===0x1f);
+        if(keep){ es.push(section.slice(i,i+5+eil)); this._videoPids.add(ep); if(this._videoPid==null) this._videoPid=ep; }
         i+=5+eil;
       }
       if(this._videoPid==null || !es.length) return pkt;
@@ -1248,7 +1249,7 @@ function play(ch){
   state.current=ch; state.active=ch.group; renderGroups();
   stopPlayer();
   const v=$('video');
-  v.controls=!isDesktopChrome();
+  v.controls=true;
   installGestureHooks();
   try{ v.pause(); }catch(e){}
   v.autoplay=false; v.removeAttribute('autoplay'); v.removeAttribute('src'); v.load();
