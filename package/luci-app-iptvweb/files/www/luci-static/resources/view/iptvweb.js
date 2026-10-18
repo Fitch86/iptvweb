@@ -24,7 +24,7 @@ return view.extend({
         o.rmempty = false;
         o.description = _('Host:port, for example 192.168.1.1:4022. The template {{your_udpxy_address}} in the M3U is replaced with this value.');
         o.validate = function(section_id, value) {
-            var match = value.match(/^(\\[[0-9a-fA-F:.]+\\]|[^:\\s]+):([0-9]{1,5})$/);
+            var match = value.match(/^(\[[0-9a-fA-F:.]+\]|[^:\s]+):([0-9]{1,5})$/);
             if (!match)
                 return _('Enter a valid hostname or IP address followed by :port, e.g. 192.168.1.1:4022.');
 
@@ -48,7 +48,7 @@ return view.extend({
                 return true;
             }
 
-            if (host.length > 253 || !/^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/.test(host))
+            if (host.length > 253 || !/^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/.test(host))
                 return _('Enter a valid hostname or IP address.');
             return true;
         };
