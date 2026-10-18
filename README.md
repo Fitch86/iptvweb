@@ -1,147 +1,71 @@
-# luci-app-iptvweb 0.2.2-rev4.25
+# IPTV Web for OpenWrt — RC1
 
-OpenWrt LuCI IPTV Web Player。
+轻量级 OpenWrt LuCI IPTV 网页播放器。通过 M3U 读取频道列表，并使用路由器上的 udpxy HTTP 转发组播 MPEG-TS；浏览器端使用 mpegts.js / Media Source Extensions 播放视频。
 
-## rev4.25：Safari 音频变慢修复
+> **RC1 是测试候选版，不代表所有设备、浏览器和频道组合均已验证。** 当前基线来自仓库 `main` 的 rev4.25。此分支主要清理诊断界面和实验入口，并保留当前 Safari 音轨分流及播放实现。
 
-iOS Safari 播放时"声音连续但音调变低、语速变慢"的根因是 MP2PCM 链路没有重采样：mpg123 解码输出的采样率被忽略，AudioContext 时钟按自己的 sampleRate 1:1 消费 PCM。rev4.25 在解码循环里线性插值重采样到 ctx.sampleRate，并在日志/诊断面板输出 ctx 采样率与 resample 状态。视频链与播放参数未动。
+## 功能
 
-rev4.6 先修复 rev4.2 装完频道列表空白的阻塞问题，再继续做 Windows Chromium 上 CCTV1 那次稳定的 1～2 秒初始化 waiting 对照实验。
+- 在 LuCI 中配置 M3U 播放列表地址。
+- 按频道分组显示列表，支持刷新、重新初始化、跳到直播最新帧和停止断流。
+- 通过本机 CGI 将 `/udp/组播地址:端口` 转为浏览器可读取的 HTTP MPEG-TS 流。
+- 普通桌面浏览器使用原有 mpegts.js A/V 播放路径。
+- iOS/iPadOS Safari 根据 PMT 中的音轨类型选择播放路径：
+  - MPEG-1/2 Audio（stream_type `0x03/0x04`）：视频使用无音轨 MSE 路径，音频由本地 mpg123-decoder 解码为 PCM，再由 Web Audio 连续播放。
+  - AAC（常见 stream_type `0x0F/0x11`）或探测结果未知：保留原生 A/V MSE 路径，不强制切换为 Video-only。
+- MP2PCM 会把解码采样率转换到 AudioContext 的输出采样率，避免采样率不一致时出现音频变慢、音调偏低的问题。
+- 播放器资源安装到路由器本地；正常播放不依赖浏览器运行时访问 CDN。
+- 安装时保留现有 `/etc/config/iptvweb`，避免覆盖用户已配置的 M3U 地址。
 
-## rev4.2 频道列表故障
+## 当前 Safari 路径说明
 
-rev4.2 的诊断 IIFE 在定义 `stop` 之前调用了 `reset()`：
+Safari 路径的关键点不是对所有频道一律禁用 MSE 音轨，而是先判断音轨类型。AAC/未知音轨继续使用原生 A/V；只有确认 MPEG Audio 后，才启用独立 MP2PCM。这样可以保留 HEVC + AAC 4K 频道的原生音视频链路，同时为普通 MPEG Audio 频道提供独立音频解码。
 
-```js
-R.reset = function () { R.stop(); /* ... */ };
-R.reset();          // TypeError: R.stop is not a function
-R.stop = function () { /* ... */ };
-```
+音轨探测接口 `/cgi-bin/iptvweb-audio-probe` 是运行时分流所需的功能组件，**不是可删除的调试探针**。RC1 移除面向用户的诊断面板、能力探测按钮、TS 分析/抓包入口及实验开关，但保留正常播放所需的音轨识别和音频解码组件。
 
-这是运行时异常，不是语法错误。异常会中断整页脚本，`load()` 根本不会执行，所以侧栏频道为空、状态栏也不提示 M3U 失败。本地已用同样脚本复现：`TypeError: R.stop is not a function`。
+## 历史脉络
 
-顺带两个会污染测试的问题一并去掉：
-
-- `play()` 里调用了未定义的 `startRawTsProbe()`，即便频道列表修好也会在点播时再崩一次。
-- 播放时自动再 `fetch` 同一条 `/cgi-bin/iptvweb-stream` 做 TS 探针，等于第二个 udpxy 客户端。rev4.6 只在你点「浏览器 TS 分析」或「路由器抓包」且先停止播放后才抓 TS。
-
-另外，rev4.2 的 `install.sh` 每次都会覆盖 `/etc/config/iptvweb`。如果 LuCI 里填过自定义 M3U，装完会被还原成默认 `myepg.org`。rev4.6 不再覆盖已有配置。
-
-装完请 **Ctrl+F5** 强制刷新 `http://192.168.1.1/iptv/`。
-
-## 初始化 waiting 的判断（不是“还不能播”）
-
-CCTV1：MPEG-TS / H.264 High@4.1 1080p25 / MP3 48 kHz stereo。  
-Windows 10 Chrome/Edge 153：首帧约 1.9s，随后稳定两次 waiting，再连续流畅。Firefox、Android、Win11 Chrome、VLC 正常。4K HEVC 在同一套 Chromium 上立即连续播放。`buffered` 可以已经是几十秒、`readyState=4`，仍然 waiting。
-
-### 1. 最可能发生在哪一层
-
-| 层 | 可能性 | 理由 |
-| --- | --- | --- |
-| HTTP / udpxy | 低 | 组播和 VLC 正常；waiting 时 buffer 已经很大 |
-| MPEG-TS 本身 | 中（要验证 PTS/GOP） | 可能有 A/V 起始 PTS 差或 RAI/GOP≈1–2s，但 Firefox 吃同一条流不卡 |
-| mpegts.js demux | 中 | `isLive=false` 把 duration 显示成当前 buffered 长度；`fixAudioTimestampGap` 默认是 true，当前实验基线却关掉了 |
-| MSE SourceBuffer | 高 | `video.buffered` 是音视频 track 的交集；Chrome 对 MP3-in-fMP4 / timestampOffset 更挑剔 |
-| Chromium media pipeline / A/V sync | **最高** | 典型：已有编码数据，但下一个可同步的 A/V 帧对还没就绪 |
-| H.264 decoder | 低-中 | 已经有 firstFrame；refFrames=1，基本不是 B 帧重排 |
-| MP3 decoder | **高** | 只有 H.264+MP3 的普通频道中招；4K（往往不是 MP3）立刻播 |
-| 纯网络抖动 | 排除 | 每次重选 CCTV1 行为几乎相同 |
-
-结论：这是 **Windows Chromium + MSE + H.264/MP3 初始化路径**，不是 IPTV 网络。HTML5 的 `waiting` 不等于“没有字节”。Chrome 在下面情况也会 waiting：
-
-- 音视频 SourceBuffer 在 `currentTime` 处还对不齐
-- MP3 解码器 / audio renderer 还在 preroll
-- coded frame processing 暂时不产出可渲染帧
-- 解码队列空了，即使 MSE 里已经有几十秒 fMP4
-
-所以 `buffered=0–58s`、`readyState=4` 仍然 waiting 完全说得通：缺的是 **可播放的解码帧对**，不是 TS 字节。
-
-mpegts.js 文档里 `fixAudioTimestampGap` **默认 true**（用静音帧填音频时间戳空洞）。当前基线显式设成 `false`。这是下一步最值得做的单变量，但不要和 video-only 同时改。
-
-### 2. 下一组最小变量实验（一次只改一项）
-
-基线保持：
-
-```
-isLive:false
-enableWorker:true
-enableWorkerForMSE:false
-enableStashBuffer:true
-stashInitialSize:384*1024
-lazyLoad:true
-fixAudioTimestampGap:false
-```
-
-不要改硬件加速、不要改回 `isLive=true`、不要动 CDN / Worker URL。
-
-按这个顺序测 CCTV1，每次只改一项，复制日志：
-
-1. **A/V 正常**（基线）。看 `WAITING_SNAPSHOT`：若 `ahead>=1s` 且 `readyState>=3`，日志会明确写“不是缺数据”。
-2. **Video-only (`hasAudio=false`)**。若 waiting 消失 → 音频轨 / A-V sync / MP3。若还在 → GOP/H.264/MSE 视频轨。
-3. **保留音轨但静音**（`hasAudio` 仍 true，`video.muted=true`）。若 video-only 好、静音仍卡 → 问题在 demux/MSE 音频路径，不是扬声器。
-4. 回到 A/V，只勾选 **fixAudioTimestampGap**。
-5. 再单独试 **waiting 时微移 currentTime**（Chrome MSE 已知 unblock 手法，默认关）。
-6. 停止播放后点 **浏览器 TS 分析(12s)**，看 `A-V start delta` 和 RAI 间隔。
-7. 需要 ffprobe 时再点 **路由器抓包 15s**，然后从电脑 scp。
-
-对照时请看日志里的：
-
-- `WAITING_SNAPSHOT` / `WAITING_WITH_BUFFER`
-- `decV` / `decA`（Chrome `webkit*DecodedByteCount`）
-- `mse=` 里 audio/video SourceBuffer 各自的 `buffered` 和 `timestampOffset`
-
-若 waiting 时 `decV` 在涨、`decA` 不动 → MP3 解码器没在吐帧。  
-若两个 SourceBuffer 的 buffered 起点差 1～2 秒 → Chrome 在等交集。
-
-### 3. 在 OpenWrt 上抓原始 TS
-
-先 **停止网页播放**，避免第二个 udpxy 客户端。
-
-播放器按钮「路由器抓包 15s」会写 `/tmp/iptvweb-capture.ts`。或手动：
-
-```sh
-# 先停掉网页播放。CCTV1 组播按你的实际地址改。
-killall uclient-fetch 2>/dev/null || true
-uclient-fetch -O /tmp/iptvweb-capture.ts 'http://127.0.0.1:4022/udp/233.50.201.118:5140' &
-PID=$!
-sleep 15
-kill $PID
-ls -l /tmp/iptvweb-capture.ts
-```
-
-电脑上：
-
-```sh
-scp root@192.168.1.1:/tmp/iptvweb-capture.ts .
-
-ffprobe -hide_banner \
-  -show_entries stream=index,codec_name,codec_type,profile,level,width,height,r_frame_rate,start_time,start_pts,sample_rate,channels \
-  -of json iptvweb-capture.ts
-
-# GOP / IDR：看 pict_type=I 的间隔（秒）
-ffprobe -v error -select_streams v:0 \
-  -show_entries frame=pict_type,key_frame,pkt_pts_time,pkt_dts_time \
-  -of csv=p=0 -read_intervals %+12 iptvweb-capture.ts
-
-# 音频包时间戳
-ffprobe -v error -select_streams a:0 \
-  -show_entries packet=pts_time,dts_time,duration_time,size \
-  -of csv=p=0 -read_intervals %+5 iptvweb-capture.ts
-```
-
-若已装 tsduck：
-
-```sh
-tsanalyze iptvweb-capture.ts
-tsp -I file iptvweb-capture.ts -P continuity -P pcrbitrate -O drop
-```
-
-关注：第一个视频 PTS、第一个音频 PTS、两者差值、第一个 IDR 距 PAT/PMT 多远、GOP 是否约 1～2 秒、是否有 PCR/CC discontinuity。
+| 版本阶段 | 主要变化 |
+| --- | --- |
+| rev4.2–rev4.6 | 修复频道列表脚本运行时异常、播放时未定义函数调用和配置覆盖问题；避免播放期间额外抓取同一条组播流。 |
+| rev4.7 | 已知可正常播放浙江卫视 4K 的 A/V 基线：HEVC Main10 3840×2160@50，AAC-LC 48 kHz 双声道；播放参数使用 `isLive=false`、384 KiB stash，默认关闭 `fixAudioTimestampGap`。 |
+| rev4.8–rev4.14 | 探索 iOS Safari ManagedMediaSource、实时流参数及 A/V 失败后的兼容路径。不同版本的实验结果不应混为同一个基线。 |
+| rev4.16.3–rev4.21 | 以 Safari Video-only 视频路径为基础，逐步验证 MPEG Audio PES 提取和独立音频解码；修复 OpenWrt Lua 5.1 兼容性及连续音频问题。 |
+| rev4.23.1 | 将独立 PCM 播放改为 AudioWorklet / ScriptProcessor 环形缓冲方案，改善连续播放与队列控制。 |
+| rev4.25 | 修复 MP2PCM 输入采样率与 AudioContext 采样率不一致导致的变慢、变调问题；当前代码进一步按 PMT 音轨类型分流，AAC/未知音轨保留 A/V MSE。 |
+| RC1 | 保留当前播放实现，清理诊断界面和手动实验入口，作为日常播放测试候选包。 |
 
 ## 安装
+
+推荐在 OpenWrt 路由器上以 root 执行仓库中的安装脚本：
 
 ```sh
 sh install.sh
 ```
 
-然后强制刷新 `http://192.168.1.1/iptv/`。M3U 仍在 LuCI → Services → IPTV Web。
+脚本会安装播放器、CGI 和本地音频组件，并尝试下载 mpegts.js 1.8.2 与 mpg123-decoder 1.0.3。首次安装时路由器需要能够访问 jsDelivr 或 unpkg；若下载失败，请在路由器恢复网络访问后重新运行安装脚本。
+
+安装后打开：
+
+```
+http://192.168.1.1/iptv/
+```
+
+在 LuCI 的 **Services → IPTV Web** 中配置 M3U 地址。升级后若页面仍显示旧版，请在浏览器中强制刷新（桌面浏览器可使用 Ctrl+F5）。
+
+## RC1 测试建议
+
+1. **iOS/iPadOS Safari：浙江卫视 4K** — 检查画面、AAC 声音和连续播放是否正常。
+2. **iOS/iPadOS Safari：CCTV1 等 MPEG Audio 普通频道** — 检查是否有声、音调和语速是否正常，以及长时间播放是否中断。
+3. **桌面 Chrome/Edge、Firefox** — 检查普通频道和 4K 频道的基本播放。
+4. 切换频道、停止播放、刷新页面，确认流连接会正确关闭且频道列表仍可用。
+5. 检查升级安装是否保留原有 M3U 配置。
+
+RC1 页面不再显示诊断日志或 TS 抓包工具。若测试遇到问题，请记录设备/浏览器版本、频道名称、是否有画面和声音、发生时间及是否能稳定复现。
+
+## 项目结构
+
+- `package/luci-app-iptvweb/`：LuCI/OpenWrt 包定义和运行文件。
+- `package/luci-app-iptvweb/files/www/iptv/index.html`：网页播放器。
+- `package/luci-app-iptvweb/files/www/cgi-bin/`：M3U、MPEG-TS 转发与音频相关 CGI。
+- `install.sh`：面向现有 OpenWrt 系统的安装脚本。
