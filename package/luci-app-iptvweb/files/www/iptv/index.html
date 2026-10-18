@@ -56,7 +56,6 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">通过 LuCI 配置 M3U 频道列表。选择频道即可播放；停止按钮会断开当前流。</div>
-      <div hidden><pre id="diag"></pre><pre id="tsReport"></pre><pre id="log"></pre></div>
     </div>
   </main>
 </div>
@@ -82,18 +81,18 @@ const REV='RC1';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
-  log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
+  waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
   lastRecoveryAt:0, lastProgressWall:0, lastProgressTime:0, playingSince:0,
   stuckTimer:0, gestureHooksInstalled:false, mediaInfo:null, lastErrorText:'',
   audioDecodeError:false, ts:{pts:0,dts:0,continuity:0,privateAudio:[]},
   audioEl:null, audioUrl:'', audioStartedAt:0, audioError:'', audioPlaying:false,
   webAudioCtx:null, webAudioBuffer:null, webAudioSource:null, webAudioDecoder:null, webAudioWorkletNode:null, webAudioScriptNode:null, webAudioBackend:'none', webAudioState:'off', webAudioError:'', webAudioInfo:null, audioPendingStart:false, audioStartTimer:0, audioScheduledAt:0, audioStartDelay:0.20, audioAbortController:null, audioReader:null, audioPcmQueue:[], audioPcmOffset:0, audioQueuedSeconds:0, audioNextTime:0, audioScheduledDuration:0, audioPlayedEstimate:0, audioVideoAnchor:0, audioStartContextTime:0, audioLastResetAt:0, audioStarted:false, audioStreamDone:false, audioChunks:0, audioDecodedSamples:0, audioRate:0, audioChannels:0, audioSyncDrift:0, audioSyncResets:0, audioSources:[], audioWorkletInFlight:0, audioWorkletMaxInFlight:48, audioWorkletReady:false, audioWorkletWaiters:[], audioRingSeconds:0, audioWorkletUnderruns:0, audioWorkletOverflows:0, audioCtxRate:0, audioResampleActive:false, audioResampleAcc:0, audioResamplePos:0, audioDecodeCalls:0, audioDecodeEmpty:0, audioDecodeErrors:0, audioLastDecodeWall:0, audioDecodeWallMs:0, audioLastDiagWall:0, audioLastDiagChunks:0, audioLastDiagSamples:0, audioLastDiagUnderruns:0, audioMpegBuffer:new Uint8Array(0), audioMpegFrames:0, audioMpegResyncBytes:0, audioDiagTimer:0,
-  timeline:[], timelineTimer:0, lastFrame:null, classification:'STARTING',
+  lastFrame:null, classification:'STARTING',
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
   lastVideoCodec:'', lastVideoWidth:0, lastVideoHeight:0,
-  diagTimer:0, audioSyncTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0,safariAudioRoute: 'unknown'
+  audioSyncTimer:0, avMode:'av', safariFallbackTried:false, safariFallbackTimer:0,safariAudioRoute: 'unknown'
 };
 
 const $=id=>document.getElementById(id);
@@ -704,7 +703,6 @@ function renderGroups(){
 
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
 function log(msg){}
-function updateDiag(){}
 function setStatus(t){ $('status').textContent=t||''; }
 function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
 function rangeText(r){
