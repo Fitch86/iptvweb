@@ -1,7 +1,7 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
-PKG_VERSION:=0.2.2-rc1.1
+PKG_VERSION:=0.2.2-rc1.2
 PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
