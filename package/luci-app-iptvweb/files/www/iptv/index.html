@@ -38,7 +38,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">RC1.4 · 可选精简诊断</span></h1>
+  <h1>OpenWrt IPTV <span class="small">RC1.5 · 点击控制修正与精简诊断</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
@@ -83,7 +83,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='RC1.4';
+const REV='RC1.5';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -822,16 +822,22 @@ function installGestureHooks(){
   // Use the page's click handler there; retain native controls on other browsers.
   // Keep native controls available on desktop Chrome (fullscreen/volume/seek).
   v.controls=true;
-  const onSurfaceActivation=event=>{
+  // Let native controls work, but take ownership of clicks on the video surface.
+  // Chrome's built-in video click action can run after pointerup and undo our toggle
+  // (observed pause -> play about 300 ms later). Handle only click in capture phase
+  // and cancel the browser default for the picture area.
+  v.addEventListener('click',event=>{
     if(event.target!==v) return;
     if(v.controls && Number.isFinite(event.offsetY) && event.offsetY > v.clientHeight-44) return;
-    const now=performance.now(); if(now-state.diagLastSurfaceToggleAt<350) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if(typeof event.stopImmediatePropagation==='function') event.stopImmediatePropagation();
+    const now=performance.now();
+    if(now-state.diagLastSurfaceToggleAt<350) return;
     state.diagLastSurfaceToggleAt=now;
-    log('VIDEO surface '+event.type+' offset='+event.offsetX+','+event.offsetY);
+    log('VIDEO surface click-captured offset='+event.offsetX+','+event.offsetY+' defaultPrevented='+event.defaultPrevented);
     toggleVideoPlayback();
-  };
-  v.addEventListener('pointerup',onSurfaceActivation,{passive:true});
-  v.addEventListener('click',onSurfaceActivation,{passive:true});
+  },{capture:true});
 }
 function toggleVideoPlayback(){
   const v=$('video'), p=state.player;
