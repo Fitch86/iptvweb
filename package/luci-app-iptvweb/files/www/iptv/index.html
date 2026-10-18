@@ -706,14 +706,6 @@ function rel(){return state.playStarted?((performance.now()-state.playStarted)/1
 function log(msg){}
 function setStatus(t){ $('status').textContent=t||''; }
 function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
-function rangeText(r){
-  try{
-    if(!r||!r.length) return '-';
-    const a=[];
-    for(let i=0;i<r.length;i++) a.push(r.start(i).toFixed(3)+'-'+r.end(i).toFixed(3));
-    return a.join(' | ');
-  }catch(e){ return 'ERR:'+e.message; }
-}
 function bufferAhead(v){
   try{
     if(!v.buffered.length) return 0;
@@ -724,44 +716,11 @@ function bufferAhead(v){
     return 0;
   }catch(e){ return 0; }
 }
-function chromeCounters(v){
-  const g=k=> (k in v) ? v[k] : '-';
-  return 'decV='+g('webkitVideoDecodedByteCount')+' decA='+g('webkitAudioDecodedByteCount')+' frames='+g('webkitDecodedFrameCount')+' drop='+g('webkitDroppedFrameCount');
-}
-function mseDump(){
-  try{
-    const p=state.player; if(!p) return '-';
-    const ctl=p._msectl || p._mseController || null;
-    if(!ctl) return 'no _msectl';
-    const sbs=ctl._sourceBuffers || ctl.sourceBuffers;
-    if(!sbs) return 'no sourceBuffers';
-    const parts=[];
-    const keys=(!Array.isArray(sbs) && typeof sbs==='object') ? Object.keys(sbs) : null;
-    if(keys){
-      for(const k of keys){
-        const sb=sbs[k];
-        if(!sb){ parts.push(k+':null'); continue; }
-        parts.push(k+' type='+(sb.type||'?')+' buffered='+rangeText(sb.buffered)+' updating='+!!sb.updating+' tsOffset='+Number(sb.timestampOffset||0).toFixed(4));
-      }
-      return parts.join(' || ') || 'empty';
-    }
-    return String(sbs);
-  }catch(e){ return 'ERR:'+e.message; }
-}
-
 function stopDiagTimers(){
   if(state.stuckTimer){ clearInterval(state.stuckTimer); state.stuckTimer=0; }
   if(state.timelineTimer){ clearInterval(state.timelineTimer); state.timelineTimer=0; }
   if(state.diagTimer){ clearInterval(state.diagTimer); state.diagTimer=0; }
-  if(state.audioSyncTimer){ clearInterval(state.audioSyncTimer); state.audioSyncTimer=0; }
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
-}
-function startDiagTimer(seq){
-  if(state.diagTimer) clearInterval(state.diagTimer);
-  state.diagTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.diagTimer); state.diagTimer=0; return; }
-    
-  }, 500);
 }
 function stopWebAudio(){
   if(state.audioStartTimer){ clearTimeout(state.audioStartTimer); state.audioStartTimer=0; }
@@ -797,7 +756,6 @@ function stopWebAudio(){
 
 function stopPlayer(){
   stopWebAudio();
-  if(state.analyzeCtl){ try{ state.analyzeCtl.abort(); }catch(e){} state.analyzeCtl=null; }
   if(state.startTimer){ clearTimeout(state.startTimer); state.startTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
   stopDiagTimers();
@@ -815,8 +773,6 @@ function installGestureHooks(){
   state.gestureHooksInstalled=true;
   const v=$('video');
   v.addEventListener('click', event=>{ if(event.target===v) toggleVideoPlayback(); }, {passive:true});
-  const b=$('recoverBtn');
-  if(b) b.onclick=()=>gesturePlay('recovery-button');
 }
 function toggleVideoPlayback(){
   const v=$('video'), p=state.player;
@@ -841,191 +797,31 @@ function toggleVideoPlayback(){
   }catch(e){ try{ const q=v.play(); if(q&&q.catch) q.catch(()=>{}); }catch(_){} }
 }
 
-function gesturePlay(reason){
-  const v=$('video'), p=state.player;
-  state.userGestureCount++;
-  state.userPaused=false;
-  log('USER_GESTURE '+reason+' paused='+v.paused+' current='+v.currentTime.toFixed(3)+' readyState='+v.readyState+' bufferAhead='+bufferAhead(v).toFixed(3));
-  if(p){
-    startTimelineMicroscope(state.seq);
-    startStuckMonitor(state.seq);
-    startDiagTimer(state.seq);
-  }
-  if(!p) return;
-  try{
-    const q=p.play();
-    if(q&&q.then) q.then(()=>log('GESTURE player.play resolved')).catch(e=>log('GESTURE player.play rejected '+e.name+': '+e.message));
-  }catch(e){ log('GESTURE player.play threw '+e.name+': '+e.message); }
-}
-function recoverPlayback(reason){
-  const v=$('video'), p=state.player, now=performance.now();
-  if(!p) return;
-  if(state.recoveries>=2){ log('RECOVERY skipped limit=2 reason='+reason); return; }
-  if(now-state.lastRecoveryAt<3000){ log('RECOVERY skipped cooldown reason='+reason); return; }
-  state.lastRecoveryAt=now; state.recoveries++;
-  log('RECOVERY #'+state.recoveries+' reason='+reason+' paused='+v.paused+' current='+v.currentTime.toFixed(3)+' readyState='+v.readyState+' bufferAhead='+bufferAhead(v).toFixed(3));
-  try{
-    const q=p.play();
-    if(q&&q.then) q.then(()=>log('RECOVERY player.play resolved')).catch(e=>log('RECOVERY player.play rejected '+e.name+': '+e.message));
-  }catch(e){ log('RECOVERY player.play threw '+e.name+': '+e.message); }
-}
-function startStuckMonitor(seq){
-  if(state.stuckTimer) clearInterval(state.stuckTimer);
-  state.lastProgressWall=performance.now();
-  state.lastProgressTime=$('video').currentTime||0;
-  state.playingSince=0;
-  state.stuckTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.stuckTimer); return; }
-    const v=$('video'), now=performance.now();
-    if(v.paused||v.ended){ state.lastProgressWall=now; state.lastProgressTime=v.currentTime||0; return; }
-    const t=v.currentTime||0;
-    if(t>state.lastProgressTime+0.05){ state.lastProgressTime=t; state.lastProgressWall=now; return; }
-    if(state.playingSince && now-state.playingSince>=2500 && now-state.lastProgressWall>=2000){
-      recoverPlayback('time-not-advancing');
-      state.playingSince=now;
-    }
-  }, 500);
-}
-
-function classifyTimeline(){
-  const v=$('video'), now=performance.now(), tl=state.timeline;
-  let reason='', c='STARTING';
-  const recent=tl.filter(x=>now-x.wall<4000);
-  const decoded=state.stats && Number(state.stats.decodedFrames||0);
-  const buffered=bufferAhead(v);
-  const playing=!!state.firstPlayingAt && !v.paused && !v.ended;
-  if(state.userPaused && v.paused){ c='USER PAUSED'; reason='用户主动暂停'; state.classification=c; state.classificationReason=reason; return c; }
-  if(v.error||state.lastErrorText){ c='MEDIA ERROR'; reason=state.lastErrorText||('video.error code='+v.error.code); }
-  else if(state.audioDecodeError){ c='AUDIO DECODE ERROR'; reason='mpegts audio decode failure'; }
-  else if(playing && recent.length>=2){
-    const a=recent[0], b=recent[recent.length-1];
-    const dt=(b.wall-a.wall)/1000, ct=b.currentTime-a.currentTime, pf=b.presentedFrames-a.presentedFrames;
-    if(dt>=1.5 && ct<0.08){
-      if(pf<=0 && decoded>10){ c='DECODER/TIMELINE STUCK'; reason='currentTime 与 presentedFrames 均不推进'; }
-      else { c='TIMELINE STUCK'; reason='有 buffer，但 currentTime 不推进'; }
-    } else if(ct>0.08 || pf>0){ c='PLAYBACK OK'; reason='时间线持续推进'; }
-  }
-  if(c==='STARTING' && recent.length>=2){
-    const a=recent[0], b=recent[recent.length-1], dt=(b.wall-a.wall)/1000, ct=b.currentTime-a.currentTime;
-    if(dt>=1.5 && ct<0.08 && buffered>1){ c='BUFFER GROWING NO PLAY'; reason='bufferAhead 在增长，但播放时间线未推进'; }
-  }
-  if(c==='STARTING' && state.firstPlayingAt){ c='PLAY STARTED'; reason='已触发 playing'; }
-  if(c==='STARTING' && state.mediaInfo){ c='MEDIA DETECTED'; reason='已识别编码'; }
-  state.classification=c; state.classificationReason=reason; state.classificationAt=now;
-  return c;
-}
-function timelineSample(source){
-  const v=$('video'), now=performance.now(), st=state.stats||{};
-  let presented=0, mediaTime=null;
-  if(state.lastFrame){ presented=Number(state.lastFrame.presentedFrames||0); mediaTime=Number(state.lastFrame.mediaTime); }
-  const item={
-    wall:now, rel:state.playStarted?(now-state.playStarted)/1000:0,
-    currentTime:Number(v.currentTime||0), mediaTime:isFinite(mediaTime)?mediaTime:null,
-    presentedFrames:presented, decodedFrames:Number(st.decodedFrames||0),
-    droppedFrames:Number(st.droppedFrames||0), buffered:rangeText(v.buffered),
-    ahead:bufferAhead(v), readyState:v.readyState, paused:v.paused, source:source||'timer'
-  };
-  state.timeline.push(item); if(state.timeline.length>240) state.timeline.shift();
-  return item;
-}
-function startTimelineMicroscope(seq){
-  if(state.timelineTimer) clearInterval(state.timelineTimer);
-  state.timeline=[]; state.lastFrame=null;
-  state.timelineTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.timelineTimer); return; }
-    timelineSample('250ms'); classifyTimeline(); 
-  }, 250);
-}
-function timelineSummary(){
-  const a=state.timeline; if(a.length<2) return '样本不足';
-  const first=a[0], last=a[a.length-1];
-  const dt=(last.wall-first.wall)/1000;
-  return 'Δwall='+dt.toFixed(2)+'s Δcurrent='+(last.currentTime-first.currentTime).toFixed(3)+'s Δpresented='+(last.presentedFrames-first.presentedFrames)+' Δdecoded='+((last.decodedFrames-first.decodedFrames)||0);
-}
-
-function waitingSnapshot(v, ev){
-  const ahead=bufferAhead(v);
-  const line=[
-    'WAITING_SNAPSHOT ev='+ev,
-    'current='+v.currentTime.toFixed(3),
-    'ahead='+ahead.toFixed(3)+'s',
-    'readyState='+v.readyState,
-    'networkState='+v.networkState,
-    'paused='+v.paused,
-    'buffered='+rangeText(v.buffered),
-    'seekable='+rangeText(v.seekable),
-    'duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration)),
-    chromeCounters(v),
-    'mse='+mseDump()
-  ].join(' ');
-  log(line);
-  if(ahead>=1 && v.readyState>=3){
-    log('WAITING_WITH_BUFFER 不是缺数据。ahead='+ahead.toFixed(3)+'s readyState='+v.readyState+' → 更像 MSE/A-V sync/decoder，而不是 HTTP/udpxy');
-  }
-  if(false && $('nudgeWaiting').checked && ahead>=1 && !state.nudgedThisPlay){
-    state.nudgedThisPlay=true;
-    const t=v.currentTime;
-    try{
-      v.currentTime=t;
-      log('NUDGE applied currentTime='+t.toFixed(3)+' (same value; Chrome MSE unblock experiment)');
-    }catch(e){ log('NUDGE failed '+e.message); }
-  }
-}
-
 function attachVideoDiagnostics(v, seq){
   v.autoplay=false;
   v.removeAttribute('autoplay');
-  const events=['loadstart','durationchange','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','suspend','progress','seeking','seeked','timeupdate','ratechange','volumechange','ended','emptied','error'];
-  events.forEach(ev=>v.addEventListener(ev, ()=>{
+  v.addEventListener('pause', ()=>{
+    if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
+    state.userPaused=true;
+  });
+  v.addEventListener('play', ()=>{
     if(seq!==state.seq) return;
-    const now=performance.now();
-    let extra='';
-    if(ev==='play' && !state.playIssuedAt) extra=' SOURCE=unexpected-autoplay';
-    if(ev==='pause' && state.playIssuedAt && !state.stopping){
-      state.userPaused=true; stopDiagTimers();
-      log('USER_PAUSED: 停止诊断采样');
-    }
-    if(ev==='play' && state.userPaused){
-      state.userPaused=false;
-      startTimelineMicroscope(seq); startStuckMonitor(seq); startDiagTimer(seq);
-      log('USER_RESUMED');
-    }
-    if(ev==='waiting'){
-      state.waitingCount++;
-      if(!state.waitingStart) state.waitingStart=now;
-      extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s readyState='+v.readyState;
-      waitingSnapshot(v, 'waiting');
-    }
-    if(ev==='playing'){
-      state.playingSince=now; state.lastProgressWall=now; state.lastProgressTime=v.currentTime||0;
-      scheduleWebAudioAfterVideo(seq);
-      if(!state.audioSyncTimer) state.audioSyncTimer=setInterval(()=>audioSyncTick(seq),500);
-      if(state.waitingStart){
-        extra=' waitingRecovered='+((now-state.waitingStart)/1000).toFixed(3)+'s current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-        state.waitingStart=0;
-      }
-      extra += ' mse='+mseDump();
-    }
-    if(ev==='stalled'){
-      state.stallCount++;
-      extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-      waitingSnapshot(v, 'stalled');
-    }
-    if(ev==='progress') extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-    if(ev==='error' && v.error) extra=' code='+v.error.code+' '+(v.error.message||'');
-    // Video event logs are intentionally suppressed here; keep audio diagnostics visible.
-    if(ev==='playing' && !state.firstPlayingAt) state.firstPlayingAt=now;
-    
-  }));
+    state.userPaused=false;
+  });
+  v.addEventListener('playing', ()=>{
+    if(seq!==state.seq) return;
+    if(!state.firstPlayingAt) state.firstPlayingAt=performance.now();
+    scheduleWebAudioAfterVideo(seq);
+    if(!state.audioSyncTimer) state.audioSyncTimer=setInterval(()=>audioSyncTick(seq),500);
+  });
   if('requestVideoFrameCallback' in v){
     const cb=(now, meta)=>{
       if(seq!==state.seq) return;
-      state.lastFrame={wall:performance.now(), mediaTime:Number(meta.mediaTime), presentedFrames:Number(meta.presentedFrames||0)};
+      state.lastFrame={wall:performance.now(),mediaTime:Number(meta.mediaTime),presentedFrames:Number(meta.presentedFrames||0)};
       if(meta.width) state.lastVideoWidth=meta.width;
       if(meta.height) state.lastVideoHeight=meta.height;
       if(!state.firstFrameAt){
         state.firstFrameAt=performance.now();
-        log('video.firstFrame rVFC mediaTime='+(meta.mediaTime??'?')+' presentedFrames='+(meta.presentedFrames??'?'));
         scheduleWebAudioAfterVideo(seq);
       }
       v.requestVideoFrameCallback(cb);
@@ -1362,7 +1158,6 @@ function createPlayer(ch, url, seq, mode){
     if(info&&info.width) state.lastVideoWidth=info.width;
     if(info&&info.height) state.lastVideoHeight=info.height;
     log('MEDIA_INFO '+JSON.stringify(info));
-    log('MSE after MEDIA_INFO '+mseDump());
     const vc=info&&info.videoCodec?info.videoCodec:'';
     const ac=info&&info.audioCodec?info.audioCodec:'';
     setStatus((mode==='video'?(state.safariFallbackTried?'Safari回退 Video-only · ':'Video-only · '):mode==='muted'?'Muted-AV · ':'A/V · ')+(vc||'')+(ac?' · '+ac:''));
@@ -1377,38 +1172,8 @@ function createPlayer(ch, url, seq, mode){
       log(name+(info?' '+JSON.stringify(info):''));
     });
   });
-  if(mpegts.LoggingControl && mpegts.LoggingControl.addLogListener){
-    try{
-      mpegts.LoggingControl.addLogListener((type, msg)=>{
-        if(seq!==state.seq) return;
-        const text=String(msg||'');
-        if(!/PMT|PTS|DTS|timestamp|continuity|discontinuity|PCR|PES|private|SourceBuffer|timestampOffset/i.test(text)) return;
-        if(/PTS/i.test(text)) state.ts.pts++;
-        if(/DTS/i.test(text)) state.ts.dts++;
-        if(/continuity|discontinuity/i.test(text)) state.ts.continuity++;
-        // TSLOG is intentionally suppressed to prevent video/transport diagnostics from
-        // pushing the MP2PCM diagnostic lines out of the on-page log buffer.
-        if(false && $('microMode').value==='full') log('TSLOG '+text.slice(0,700));
-      });
-    }catch(e){ log('TSLOG listener install failed '+e.message); }
-  }
-  startTimelineMicroscope(seq);
-  p.attachMediaElement(v); log('attachMediaElement');
-  p.load(); log('player.load()');
-  startStuckMonitor(seq); startDiagTimer(seq);
-  const startStableMonitor=()=>{
-    if(!isIOSSafari() || mode!=='video') return;
-    if(state.stableTimer) clearTimeout(state.stableTimer);
-    state.stableSince=performance.now(); state.stableLogged=false;
-    state.stableTimer=setTimeout(()=>{
-      if(seq!==state.seq || state.player!==p || v.paused || v.readyState<2) return;
-      state.stableTimer=0; state.stableLogged=true;
-      log('SAFARI_VIDEO_ONLY_STABLE: continuous playback >=30s');
-      setStatus('Safari Video-only · 稳定播放 ≥30s');
-      
-    },30000);
-  };
-  v.addEventListener('playing', startStableMonitor, {once:true});
+  p.attachMediaElement(v);
+  p.load();
   const start=()=>{
     if(seq!==state.seq || state.playIssuedAt) return;
     state.startTimer=0;
