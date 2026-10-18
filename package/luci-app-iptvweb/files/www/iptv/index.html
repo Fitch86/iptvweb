@@ -56,9 +56,6 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
     </div>
     <div class="now" id="now">选择频道开始播放
       <div class="hint">通过 LuCI 配置 M3U 频道列表。选择频道即可播放；停止按钮会断开当前流。</div>
-      <pre id="diag" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
-      <pre id="tsReport" class="hint" style="white-space:pre-wrap;margin:6px 0 0;font-family:ui-monospace,monospace"></pre>
-      <pre id="log" class="hint" style="white-space:pre-wrap;margin:6px 0 0;max-height:240px;overflow:auto;background:#0b0b0b;padding:8px;border-radius:5px;font-size:11px"></pre>
     </div>
   </main>
 </div>
@@ -395,11 +392,11 @@ async function startWebAudioMpeg(ch, seq){
   log('SAFARI_AUDIO: MP2PCM continuous source='+url);
   if(!url){ state.webAudioState='no-url'; state.webAudioError='cannot extract multicast /udp/group:port'; log('SAFARI_AUDIO: cannot extract multicast /udp/group:port; MP2 decoder disabled'); return; }
   if(!window.AudioContext && !window.webkitAudioContext){
-    state.webAudioState='unsupported'; state.webAudioError='AudioContext unavailable'; log('SAFARI_MP2PCM: AudioContext unavailable'); updateDiag(); return;
+    state.webAudioState='unsupported'; state.webAudioError='AudioContext unavailable'; log('SAFARI_MP2PCM: AudioContext unavailable');  return;
   }
   const decNS=window['mpg123-decoder'];
   if(!decNS || !decNS.MPEGDecoder){
-    state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable'; log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable'); updateDiag(); return;
+    state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable'; log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable');  return;
   }
   try{
     //const Ctx=window.AudioContext||window.webkitAudioContext;
@@ -591,7 +588,7 @@ async function startWebAudioMpeg(ch, seq){
   }catch(e){
     if(seq!==state.seq || e.name==='AbortError') return;
     state.webAudioState='decode-error'; state.webAudioError=e.name+': '+e.message; state.audioError='WebAudioMP2PCMError';
-    log('SAFARI_MP2PCM: '+e.name+': '+e.message); updateDiag();
+    log('SAFARI_MP2PCM: '+e.name+': '+e.message); 
   }
 }
 
@@ -664,7 +661,7 @@ function audioSyncTick(seq){
     log('SAFARI_AVSYNC: drift='+drift.toFixed(3)+'s video='+videoPos.toFixed(3)+' audio='+audioPos.toFixed(3)+' ring='+state.audioRingSeconds.toFixed(3)+'s');
     resetAudioSchedule(seq,'drift');
   }
-  updateDiag();
+  
 }
 
 function resetAudioSchedule(seq,reason){
@@ -762,7 +759,7 @@ function startDiagTimer(seq){
   if(state.diagTimer) clearInterval(state.diagTimer);
   state.diagTimer=setInterval(()=>{
     if(seq!==state.seq){ clearInterval(state.diagTimer); state.diagTimer=0; return; }
-    updateDiag();
+    
   }, 500);
 }
 function stopWebAudio(){
@@ -912,7 +909,7 @@ function startTimelineMicroscope(seq){
   state.timeline=[]; state.lastFrame=null;
   state.timelineTimer=setInterval(()=>{
     if(seq!==state.seq){ clearInterval(state.timelineTimer); return; }
-    timelineSample('250ms'); classifyTimeline(); updateDiag();
+    timelineSample('250ms'); classifyTimeline(); 
   }, 250);
 }
 function timelineSummary(){
@@ -950,8 +947,6 @@ function waitingSnapshot(v, ev){
     }catch(e){ log('NUDGE failed '+e.message); }
   }
 }
-
-function updateDiag(){}
 
 function attachVideoDiagnostics(v, seq){
   v.autoplay=false;
@@ -996,7 +991,7 @@ function attachVideoDiagnostics(v, seq){
     if(ev==='error' && v.error) extra=' code='+v.error.code+' '+(v.error.message||'');
     // Video event logs are intentionally suppressed here; keep audio diagnostics visible.
     if(ev==='playing' && !state.firstPlayingAt) state.firstPlayingAt=now;
-    updateDiag();
+    
   }));
   if('requestVideoFrameCallback' in v){
     const cb=(now, meta)=>{
@@ -1317,7 +1312,7 @@ function createPlayer(ch, url, seq, mode){
     log('mpegts.ERROR type='+type+' details='+details+' info='+JSON.stringify(info||{}));
     scheduleSafariMseFallback(ch,url,seq,p,details,type);
     setStatus('播放错误：'+details);
-    updateDiag();
+    
   });
   p.on(mpegts.Events.MEDIA_INFO, info=>{
     if(seq!==state.seq) return;
@@ -1330,7 +1325,7 @@ function createPlayer(ch, url, seq, mode){
     const vc=info&&info.videoCodec?info.videoCodec:'';
     const ac=info&&info.audioCodec?info.audioCodec:'';
     setStatus((mode==='video'?(state.safariFallbackTried?'Safari回退 Video-only · ':'Video-only · '):mode==='muted'?'Muted-AV · ':'A/V · ')+(vc||'')+(ac?' · '+ac:''));
-    updateDiag();
+    
   });
   ['LOADING_COMPLETE','RECOVERED_EARLY_EOF','STATISTICS_INFO'].forEach(name=>{
     const ev=mpegts.Events[name];
@@ -1369,7 +1364,7 @@ function createPlayer(ch, url, seq, mode){
       state.stableTimer=0; state.stableLogged=true;
       log('SAFARI_VIDEO_ONLY_STABLE: continuous playback >=30s');
       setStatus('Safari Video-only · 稳定播放 ≥30s');
-      updateDiag();
+      
     },30000);
   };
   v.addEventListener('playing', startStableMonitor, {once:true});
@@ -1510,7 +1505,7 @@ function stopPlayback(){
   setStatus('已停止并断开');
   log('STOP: player destroyed / stream disconnected');
   state.stopping=false;
-  updateDiag();
+  
 }
 function jumpToLatest(){
   const v=$('video');
