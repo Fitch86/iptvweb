@@ -1248,6 +1248,7 @@ function play(ch){
   state.current=ch; state.active=ch.group; renderGroups();
   stopPlayer();
   const v=$('video');
+  v.controls=!isDesktopChrome();
   installGestureHooks();
   try{ v.pause(); }catch(e){}
   v.autoplay=false; v.removeAttribute('autoplay'); v.removeAttribute('src'); v.load();
@@ -1282,6 +1283,7 @@ function play(ch){
 		startWebAudioMpeg(ch, seq);
         if(state.safariAudioOnly){
           const v=$('video');
+          v.controls=false;
           try{ v.pause(); v.removeAttribute('src'); v.load(); }catch(e){}
           setStatus('Safari 广播音频 · MPEG Audio');
           return;
