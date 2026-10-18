@@ -905,7 +905,13 @@ function attachVideoDiagnostics(v, seq){
       if(meta.height) state.lastVideoHeight=meta.height;
       if(!state.firstFrameAt){
         state.firstFrameAt=performance.now();
+        log('VIDEO first requestVideoFrameCallback mediaTime='+Number(meta.mediaTime).toFixed(3)+' presentedFrames='+Number(meta.presentedFrames||0)+' size='+v.videoWidth+'x'+v.videoHeight);
         scheduleWebAudioAfterVideo(seq);
+      }
+      const frameWall=performance.now();
+      if(state.diagEnabled && (!state.diagLastFrameLog || frameWall-state.diagLastFrameLog>5000)){
+        state.diagLastFrameLog=frameWall;
+        log('VIDEO frame mediaTime='+Number(meta.mediaTime).toFixed(3)+' presentedFrames='+Number(meta.presentedFrames||0)+' size='+v.videoWidth+'x'+v.videoHeight+' readyState='+v.readyState);
       }
       v.requestVideoFrameCallback(cb);
     };
@@ -954,7 +960,7 @@ function makeSafariVideoOnlyLoader(){
       this._buffer=new Uint8Array(0); this._byteStart=0; this._outBytes=0;
       this._patPid=null; this._pmtPid=null; this._videoPid=null; this._videoPids=new Set(); this._pcrPid=null;
       this._sectionBuf=new Map(); this._sectionNeed=new Map(); this._sectionType=new Map();
-      this._started=false; this._closed=false;
+      this._started=false; this._closed=false; this._diagLastStats=0; this._diagInBytes=0; this._diagOutPackets=0; this._diagVideoPackets=new Set();
     }
     open(dataSource, range){
       this._status=1; this._dataSource=dataSource; this._range=range||{};
@@ -980,6 +986,7 @@ function makeSafariVideoOnlyLoader(){
           const q=await reader.read();
           if(q.done) break;
           if(!q.value || !q.value.length) continue;
+          this._diagInBytes+=q.value.byteLength;
           const out=this._filterChunk(q.value);
           if(out.length){
             const ab=out.buffer.slice(out.byteOffset,out.byteOffset+out.byteLength);
@@ -1027,6 +1034,7 @@ function makeSafariVideoOnlyLoader(){
         }
         off=found;
         this._syncLocked=true;
+        log('SAFARI_TS_FILTER: TS sync locked offset='+found+' chunkBytes='+chunk.length);
       }
       while(b.length-off>=188){
         if(b[off]!==0x47 || (b.length-off>=376 && b[off+188]!==0x47)){
@@ -1043,16 +1051,26 @@ function makeSafariVideoOnlyLoader(){
       const out=[];
       for(const pkt of packets){
         const pid=((pkt[1]&0x1f)<<8)|pkt[2];
-        if(pid===0){ this._inspectPAT(pkt); out.push(pkt); continue; }
+        if(pid===0){ const old=this._pmtPid; this._inspectPAT(pkt); if(old!==this._pmtPid) log('SAFARI_TS_FILTER: PAT PMT PID='+this._pmtPid); out.push(pkt); continue; }
         if(this._pmtPid!=null && pid===this._pmtPid){
           const rp=this._rewritePMTPacket(pkt);
           if(rp) out.push(rp);
           continue;
         }
-        if((this._videoPids.size && this._videoPids.has(pid)) || (this._videoPid!=null && pid===this._videoPid)){ out.push(pkt); continue; }
+        if((this._videoPids.size && this._videoPids.has(pid)) || (this._videoPid!=null && pid===this._videoPid)){
+          out.push(pkt); this._diagOutPackets++;
+          if(!this._diagVideoPackets.has(pid)){this._diagVideoPackets.add(pid);log('SAFARI_TS_FILTER: first video packet PID='+pid+' CC='+(pkt[3]&15)+' PUSI='+!!(pkt[1]&0x40));}
+          continue;
+        }
         if(this._pcrPid!=null && pid===this._pcrPid){ out.push(pkt); continue; }
       }
-      const total=out.length*188; const ret=new Uint8Array(total);
+      const total=out.length*188;
+      const now=performance.now();
+      if(state.diagEnabled && now-this._diagLastStats>5000){
+        this._diagLastStats=now;
+        log('SAFARI_TS_FILTER: stats inBytes='+this._diagInBytes+' outBytes='+this._outBytes+' videoPackets='+this._diagOutPackets+' sync='+!!this._syncLocked+' pmtPid='+this._pmtPid+' videoPids='+Array.from(this._videoPids).join(',')+' pcrPid='+this._pcrPid+' bufferedBytes='+this._buffer.length);
+      }
+      const ret=new Uint8Array(total);
       for(let i=0;i<out.length;i++) ret.set(out[i],i*188);
       return ret;
     }
@@ -1105,6 +1123,10 @@ function makeSafariVideoOnlyLoader(){
         const keep=(st===0x01 || st===0x02 || st===0x10 || st===0x1b || st===0x20 || st===0x24 || st===0x42 || st===0xd1 || st===0xd4 || st===0xea || st===0x1f);
         if(keep){ es.push(section.slice(i,i+5+eil)); this._videoPids.add(ep); if(this._videoPid==null) this._videoPid=ep; }
         i+=5+eil;
+      }
+      if(!this._loggedPmt){
+        this._loggedPmt=true;
+        log('SAFARI_TS_FILTER: PMT version='+((section[5]>>1)&0x1f)+' PCR PID='+pcr+' videoStreams='+es.map(e=>'0x'+e[0].toString(16)+':'+(((e[1]&0x1f)<<8)|e[2])).join(','));
       }
       if(this._videoPid==null || !es.length) return pkt;
       const body=section.slice(0,12+pil);
