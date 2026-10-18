@@ -274,7 +274,7 @@ async function detectSafariAudioRoute(ch, seq) {
 
     // 只有明确识别为 MPEG Audio 才走独立解码。
     if (info.pmt_found === true && (streamType === 3 || streamType === 4)) {
-      return { kind: 'mpeg-audio', streamType, info };
+      return { kind: 'mpeg-audio', streamType, hasVideo: info.has_video !== false, info };
     }
 
     // AAC、未知类型、probe 不完整都保留 A/V 音轨。
@@ -399,9 +399,9 @@ async function startWebAudioMpeg(ch, seq){
     state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable'; log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable');  return;
   }
   try{
-    //const Ctx=window.AudioContext||window.webkitAudioContext;
-    //const ctx=new Ctx({latencyHint:'interactive'}); state.webAudioCtx=ctx;
-	let ctx=state.webAudioCtx;
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!Ctx) throw new Error('AudioContext unavailable');
+    let ctx=state.webAudioCtx;
     if (!ctx || ctx.state === 'closed') {
       ctx = new Ctx({latencyHint:'interactive'});
     }
@@ -563,12 +563,13 @@ async function startWebAudioMpeg(ch, seq){
 		state.audioWorkletInFlight++;
 		const chunkId=state.audioChunks;
 		state.webAudioWorkletNode.port.postMessage({type:'pcm',id:chunkId,data:outStereo.buffer,samples:outSamples,rate:ctxRate},[outStereo.buffer]);
+        if(state.safariAudioOnly && !state.audioStarted && state.audioChunks>=8) startAudioWorkletClock(seq);
 	  }else if(state.webAudioBackend==='buffersource'){
 		state.audioScheduleQueue.push({pcm:outStereo,samples:outSamples});
 		state.audioSchedulePendingSamples+=outSamples;
 		state.audioQueuedSeconds=state.audioSchedulePendingSamples/ctxRate;
 		state.audioRingSeconds=state.audioQueuedSeconds;
-		if(!state.audioStarted && state.firstFrameAt && state.audioQueuedSeconds>=0.75) startAudioWorkletClock(seq);
+		if(!state.audioStarted && (state.safariAudioOnly || state.firstFrameAt || state.firstPlayingAt) && state.audioQueuedSeconds>=0.75) startAudioWorkletClock(seq);
 		if(state.audioStarted) scheduleBufferSourceQueue(seq);
 	  }
 	  
@@ -597,7 +598,7 @@ function startAudioWorkletClock(seq){
   if(state.webAudioBackend==='worklet' && !state.webAudioWorkletNode) return;
   if(state.webAudioBackend!=='worklet' && state.webAudioBackend!=='scriptprocessor' && state.webAudioBackend!=='buffersource') return;
   const v=$('video');
-  if(!state.firstFrameAt && !state.firstPlayingAt) return;
+  if(!state.safariAudioOnly && !state.firstFrameAt && !state.firstPlayingAt) return;
   state.audioVideoAnchor=Number(v.currentTime||0);
   const startAt=state.webAudioCtx.currentTime+state.audioStartDelay;
   state.audioStartContextTime=startAt;
@@ -813,10 +814,33 @@ function installGestureHooks(){
   if(state.gestureHooksInstalled) return;
   state.gestureHooksInstalled=true;
   const v=$('video');
-  v.addEventListener('click', ()=>gesturePlay('video-click'), {passive:true});
+  v.addEventListener('click', event=>{ if(event.target===v) toggleVideoPlayback(); }, {passive:true});
   const b=$('recoverBtn');
   if(b) b.onclick=()=>gesturePlay('recovery-button');
 }
+function toggleVideoPlayback(){
+  const v=$('video'), p=state.player;
+  if(!p) return;
+  if(!v.paused && !v.ended){
+    state.userPaused=true;
+    try{ p.pause(); }catch(e){}
+    try{ v.pause(); }catch(e){}
+    if(state.webAudioCtx && state.safariAudioRoute==='mpeg-audio'){
+      try{ const q=state.webAudioCtx.suspend(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
+    }
+    setStatus('已暂停');
+    return;
+  }
+  state.userPaused=false;
+  if(state.webAudioCtx && state.safariAudioRoute==='mpeg-audio'){
+    try{ const q=state.webAudioCtx.resume(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
+  }
+  try{
+    const q=p.play();
+    if(q&&q.catch) q.catch(()=>{ try{ const r=v.play(); if(r&&r.catch) r.catch(()=>{}); }catch(e){} });
+  }catch(e){ try{ const q=v.play(); if(q&&q.catch) q.catch(()=>{}); }catch(_){} }
+}
+
 function gesturePlay(reason){
   const v=$('video'), p=state.player;
   state.userGestureCount++;
@@ -1105,21 +1129,38 @@ function makeSafariVideoOnlyLoader(){
     }
     _filterChunk(chunk){
       this._appendBuffer(chunk);
-      const packets=[]; let off=0;
-      while(this._buffer.length-off>=188){
-        if(this._buffer[off]!==0x47){
-          const n=this._buffer.indexOf(0x47,off+1);
-          if(n<0){ off=this._buffer.length; break; }
-          off=n;
-          if(this._buffer.length-off<188) break;
+      const packets=[];
+      let off=0;
+      const b=this._buffer;
+      // Establish TS packet alignment using repeated 188-byte sync bytes.
+      if(!this._syncLocked){
+        let found=-1;
+        const need=b.length>=188*3 ? 3 : 2;
+        const last=b.length-188*(need-1);
+        for(let i=0;i<last;i++){
+          if(b[i]!==0x47 || b[i+188]!==0x47) continue;
+          if(need===3 && b[i+376]!==0x47) continue;
+          found=i; break;
         }
-        if(this._buffer.length-off<188) break;
-        let ok=true;
-        for(let i=1;i<4;i++){ if(this._buffer[off+i]===undefined){ok=false;break;} }
-        if(!ok) break;
-        packets.push(this._buffer.slice(off,off+188)); off+=188;
+        if(found<0){
+          if(b.length>188*3) this._buffer=b.slice(-188*2);
+          return new Uint8Array(0);
+        }
+        off=found;
+        this._syncLocked=true;
       }
-      this._buffer=this._buffer.slice(off);
+      while(b.length-off>=188){
+        if(b[off]!==0x47 || (b.length-off>=376 && b[off+188]!==0x47)){
+          this._syncLocked=false;
+          break;
+        }
+        const pkt=b.slice(off,off+188);
+        if(((pkt[3]>>4)&3)===0){ this._syncLocked=false; break; }
+        packets.push(pkt);
+        off+=188;
+      }
+      this._buffer=b.slice(off);
+      if(!this._syncLocked && this._buffer.length>188*3) this._buffer=this._buffer.slice(-188*2);
       const out=[];
       for(const pkt of packets){
         const pid=((pkt[1]&0x1f)<<8)|pkt[2];
@@ -1405,6 +1446,7 @@ function resetPlayState(){
 
 function play(ch){
   const seq=++state.seq;
+  state.safariAudioOnly=false;
   state.current=ch; state.active=ch.group; renderGroups();
   stopPlayer();
   const v=$('video');
@@ -1433,12 +1475,19 @@ function play(ch){
 
 	  if (route.kind === 'mpeg-audio') {
 		state.safariAudioRoute = 'mpeg-audio';
-		state.avMode = 'video';
+        state.safariAudioOnly = route.hasVideo === false;
+		state.avMode = state.safariAudioOnly ? 'audio-only' : 'video';
 
 		log('SAFARI route=video-only + MPEG Audio stream_type=' +
 			route.streamType);
 
 		startWebAudioMpeg(ch, seq);
+        if(state.safariAudioOnly){
+          const v=$('video');
+          try{ v.pause(); v.removeAttribute('src'); v.load(); }catch(e){}
+          setStatus('Safari 广播音频 · MPEG Audio');
+          return;
+        }
 		createPlayer(ch, url, seq, 'video');
 	  } else {
 		state.safariAudioRoute = 'av-mse';
