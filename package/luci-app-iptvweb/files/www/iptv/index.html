@@ -116,7 +116,7 @@ const state={
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
   lastVideoCodec:'', lastVideoWidth:0, lastVideoHeight:0,
-  diagTimer:0, audioSyncTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0
+  diagTimer:0, audioSyncTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0,safariAudioRoute: 'unknown'
 };
 
 const $=id=>document.getElementById(id);
@@ -173,6 +173,28 @@ function audioStreamUrl(ch){
   return '';
 }
 
+// 已确认是 AAC、应走原 A/V MSE 的 Safari 频道
+//const SAFARI_AV_MSE_CHANNELS = new Set([
+//  '233.50.202.104:5140' // 浙江卫视4K：AAC-LC
+//]);
+
+//function safariChannelKey(ch) {
+//  try {
+//    const audioUrl = audioStreamUrl(ch);
+//    if (!audioUrl) return '';
+//    const u = new URL(audioUrl, location.href);
+//    const group = u.searchParams.get('group');
+//    const port = u.searchParams.get('port');
+//    return group && port ? `${group}:${port}` : '';
+//  } catch (_) {
+//    return '';
+//  }
+//}
+
+//function safariUsesAvMse(ch) {
+//  return SAFARI_AV_MSE_CHANNELS.has(safariChannelKey(ch));
+//}
+
 function probeIndependentAudio(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const url=audioStreamUrl(ch); if(!url) return;
@@ -195,6 +217,97 @@ function probeIndependentAudio(ch, seq){
       }
     }).catch(e=>log('SAFARI_AUDIO: MPEG header probe error '+e.message));
   }catch(e){ log('SAFARI_AUDIO: MPEG header probe exception '+e.message); }
+}
+
+function prepareSafariAudioContextFromGesture() {
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  if (!Ctx) {
+    log('SAFARI_MP2PCM: AudioContext unavailable');
+    return null;
+  }
+
+  let ctx = state.webAudioCtx;
+  if (!ctx || ctx.state === 'closed') {
+    ctx = new Ctx({latencyHint: 'interactive'});
+    state.webAudioCtx = ctx;
+  }
+
+  state.audioCtxRate = ctx.sampleRate;
+
+  // 必须在频道点击手势中尽早调用 resume()
+  try {
+    const p = ctx.resume();
+    if (p && p.catch) {
+      p.catch(e => log('SAFARI_MP2PCM: prepared context resume failed ' + e.message));
+    }
+  } catch (e) {
+    log('SAFARI_MP2PCM: prepared context resume error ' + e.message);
+  }
+
+  return ctx;
+}
+
+function discardPreparedSafariAudioContext() {
+  const ctx = state.webAudioCtx;
+  state.webAudioCtx = null;
+  state.audioCtxRate = 0;
+
+  if (ctx && ctx.state !== 'closed') {
+    try {
+      const p = ctx.close();
+      if (p && p.catch) p.catch(() => {});
+    } catch (_) {}
+  }
+}
+
+function parsePmtStreamType(value) {
+  if (Number.isInteger(value)) return value;
+
+  if (typeof value === 'string') {
+    const s = value.trim();
+    if (/^0x[0-9a-f]+$/i.test(s)) return parseInt(s, 16);
+    if (/^\d+$/.test(s)) return Number(s);
+  }
+  return null;
+}
+
+async function detectSafariAudioRoute(ch, seq) {
+  const audioUrl = audioStreamUrl(ch);
+  if (!audioUrl) {
+    return { kind: 'av-mse', streamType: null, reason: 'no audio URL' };
+  }
+
+  const source = new URL(audioUrl, location.href);
+  const probe = new URL('/cgi-bin/iptvweb-audio-probe', location.href);
+  probe.search = source.search;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 3000);
+
+  try {
+    const response = await fetch(probe.href, {
+      cache: 'no-store',
+      signal: controller.signal
+    });
+    if (!response.ok) throw new Error('HTTP ' + response.status);
+
+    const info = await response.json();
+    if (seq !== state.seq) return null;
+
+    const streamType = parsePmtStreamType(info.pmt_stream_type);
+
+    // 只有明确识别为 MPEG Audio 才走独立解码。
+    if (info.pmt_found === true && (streamType === 3 || streamType === 4)) {
+      return { kind: 'mpeg-audio', streamType, info };
+    }
+
+    // AAC、未知类型、probe 不完整都保留 A/V 音轨。
+    return { kind: 'av-mse', streamType, info };
+  } catch (e) {
+    return { kind: 'av-mse', streamType: null, reason: e.message };
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 async function waitForWorkletSpace(seq){
@@ -310,8 +423,14 @@ async function startWebAudioMpeg(ch, seq){
     state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable'; log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable'); updateDiag(); return;
   }
   try{
-    const Ctx=window.AudioContext||window.webkitAudioContext;
-    const ctx=new Ctx({latencyHint:'interactive'}); state.webAudioCtx=ctx;
+    //const Ctx=window.AudioContext||window.webkitAudioContext;
+    //const ctx=new Ctx({latencyHint:'interactive'}); state.webAudioCtx=ctx;
+	let ctx=state.webAudioCtx;
+    if (!ctx || ctx.state === 'closed') {
+      ctx = new Ctx({latencyHint:'interactive'});
+    }
+    state.webAudioCtx = ctx;
+	
     state.webAudioState='connecting'; state.audioUrl=url;
     state.audioAbortController=new AbortController();
     state.audioPcmQueue=[]; state.audioQueuedSeconds=0; state.audioNextTime=0;
@@ -1202,6 +1321,11 @@ function safariMseFallbackToVideo(ch, url, seq, failedPlayer){
 }
 
 function scheduleSafariMseFallback(ch, url, seq, failedPlayer, details, type){
+  if (isIOSSafari() && state.safariAudioRoute !== 'mpeg-audio') {
+    log('SAFARI_MSE_FALLBACK: route=' + state.safariAudioRoute +
+        '，保留 A/V，不切换到 video-only');
+    return;
+  }
   if(!isIOSSafari() || state.safariFallbackTried) return;
   if(state.avMode!=='av' || state.player!==failedPlayer) return;
   const text=String(details||type||'');
@@ -1323,6 +1447,7 @@ function createPlayer(ch, url, seq, mode){
 }
 
 function resetPlayState(){
+  state.safariAudioRoute = 'unknown';
   state.playStarted=performance.now();
   state.firstFrameAt=0; state.firstPlayingAt=0; state.last={t:0,wall:0};
   state.waitingStart=0; state.stallStart=0; state.waitingCount=0; state.stallCount=0;
@@ -1355,13 +1480,73 @@ function play(ch){
   resetPlayState();
   $('now').firstChild.textContent=ch.name;
   const url=streamUrl(ch);
-  state.avMode=isIOSSafari() ? 'video' : avMode();
-  log('PLAY '+ch.name);
-  log('URL '+url);
-  log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
+  //state.avMode=isIOSSafari() ? 'video' : avMode();
+  //log('PLAY '+ch.name);
+  //log('URL '+url);
+  //log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
   // Start the WebAudio MPEG Audio PES experiment from the channel-selection gesture.
   // It is independent of the video MSE path and is intentionally best-effort.
-  if(isIOSSafari()) startWebAudioMpeg(ch, seq);
+  //if(isIOSSafari()) startWebAudioMpeg(ch, seq);
+
+  if (isIOSSafari()) {
+    // Safari 上如果要异步等待 probe，AudioContext 最好仍在频道点击手势中
+    // 同步创建/调用 resume；startWebAudioMpeg 应复用这个 context。
+    prepareSafariAudioContextFromGesture();
+
+	detectSafariAudioRoute(ch, seq).then(route => {
+	  if (!route || seq !== state.seq) return;
+
+	  if (route.kind === 'mpeg-audio') {
+		state.safariAudioRoute = 'mpeg-audio';
+		state.avMode = 'video';
+
+		log('SAFARI route=video-only + MPEG Audio stream_type=' +
+			route.streamType);
+
+		startWebAudioMpeg(ch, seq);
+		createPlayer(ch, url, seq, 'video');
+	  } else {
+		state.safariAudioRoute = 'av-mse';
+		state.avMode = 'av';
+
+		log('SAFARI route=A/V MSE stream_type=' +
+			(route.streamType == null ? 'unknown' : route.streamType));
+
+		discardPreparedSafariAudioContext();
+		createPlayer(ch, url, seq, 'av');
+	  }
+	}).catch(e => {
+	  if (seq !== state.seq) return;
+
+	  state.safariAudioRoute = 'unknown';
+	  state.avMode = 'av';
+
+	  log('SAFARI route probe failed; keep A/V: ' + e.message);
+	  discardPreparedSafariAudioContext();
+	  createPlayer(ch, url, seq, 'av');
+	});
+
+    return;
+  }
+
+  // 非 iOS Safari 保持原有逻辑
+  state.avMode = avMode();
+  //createPlayer(ch, url, seq, state.avMode);
+  
+  //const iosSafari = isIOSSafari();
+  //const useAvMse = iosSafari && safariUsesAvMse(ch);
+  //const useMp2Pcm = iosSafari && !useAvMse;
+
+  //state.avMode = iosSafari
+  //  ? (useAvMse ? 'av' : 'video')
+  //  : avMode();
+
+  //log('Safari route=' + (useAvMse ? 'AV-MSE (AAC)' :
+  //  useMp2Pcm ? 'video-only + MP2PCM' : state.avMode));
+
+  // 只有走 MP2PCM 的频道才启动独立 MPEG 音频解码
+  //if (useMp2Pcm) startWebAudioMpeg(ch, seq);  
+
   if(!window.mpegts || !mpegts.isSupported()){
     setStatus('浏览器不支持 MSE MPEG-TS / mpegts.js 未安装');
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);

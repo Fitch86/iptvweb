@@ -33,7 +33,11 @@ if not pipe then
   print('Content-Type: application/json\r\n\r\n{"ok":false,"error":"fetch failed"}')
   os.exit(0)
 end
-local buf=''; local pmt_pid=nil; local audio_pid=nil
+--local buf=''; local pmt_pid=nil; local audio_pid=nil
+local buf=''
+local pmt_pid=nil
+local result=nil
+local total_read=0
 local function u8(s,i) return s:byte(i) end
 -- OpenWrt's /usr/bin/lua may be Lua 5.1; avoid Lua 5.3 bitwise operators.
 local function band(a,b)
@@ -50,28 +54,85 @@ local function pat(payload,pusi)
   if not pusi or #payload<8 then return end
   local ptr=u8(payload,1) or 0; local i=2+ptr
   if i+7>#payload or u8(payload,i)~=0 then return end
+--  local sec=(band(u8(payload,i+1),15)*256)+u8(payload,i+2)
+--  local e=math.min(#payload,i+3+sec-4); i=i+8
+--  while i+3<=e do
+--    local pn=be16(payload,i); local pid=(band(u8(payload,i+2),31)*256)+u8(payload,i+3)
+--    if pn~=0 then pmt_pid=pid; return end
+--    i=i+4
+--  end
   local sec=(band(u8(payload,i+1),15)*256)+u8(payload,i+2)
-  local e=math.min(#payload,i+3+sec-4); i=i+8
-  while i+3<=e do
-    local pn=be16(payload,i); local pid=(band(u8(payload,i+2),31)*256)+u8(payload,i+3)
+  local section_end=i+2+sec
+  if section_end>#payload then return end
+  local entries_end=section_end-4
+  i=i+8
+  while i+3<=entries_end do
+    local pn=be16(payload,i)
+    local pid=band(u8(payload,i+2),31)*256+u8(payload,i+3)
     if pn~=0 then pmt_pid=pid; return end
     i=i+4
   end
 end
+--local function pmt(payload,pusi)
+--  if not pusi or #payload<12 then return end
+--  local ptr=u8(payload,1) or 0; local i=2+ptr
+--  if i+11>#payload or u8(payload,i)~=2 then return end
+--  local sec=(band(u8(payload,i+1),15)*256)+u8(payload,i+2)
+--  local e=math.min(#payload,i+3+sec-4)
+--  local pil=(band(u8(payload,i+10),15)*256)+u8(payload,i+11)
+--  i=i+12+pil
+--  while i+4<=e do
+--    local st=u8(payload,i); local pid=(band(u8(payload,i+1),31)*256)+u8(payload,i+2)
+--    local eil=(band(u8(payload,i+3),15)*256)+u8(payload,i+4)
+--    if i+5+eil>e then break end
+--    if st==3 or st==4 then audio_pid=pid; return end
+--    i=i+5+eil
+--  end
+--end
 local function pmt(payload,pusi)
   if not pusi or #payload<12 then return end
-  local ptr=u8(payload,1) or 0; local i=2+ptr
+  local ptr=u8(payload,1) or 0
+  local i=2+ptr
   if i+11>#payload or u8(payload,i)~=2 then return end
   local sec=(band(u8(payload,i+1),15)*256)+u8(payload,i+2)
-  local e=math.min(#payload,i+3+sec-4)
+  local section_end=i+2+sec
+  if section_end>#payload then return end
+  -- PMT 的最后 4 字节是 CRC；ES entries 在 CRC 之前
+  local entries_end=section_end-4
   local pil=(band(u8(payload,i+10),15)*256)+u8(payload,i+11)
-  i=i+12+pil
-  while i+4<=e do
-    local st=u8(payload,i); local pid=(band(u8(payload,i+1),31)*256)+u8(payload,i+2)
-    local eil=(band(u8(payload,i+3),15)*256)+u8(payload,i+4)
-    if i+5+eil>e then break end
-    if st==3 or st==4 then audio_pid=pid; return end
-    i=i+5+eil
+  local pos=i+12+pil
+  if pos>entries_end+1 then return end
+  local mpeg=nil
+  local aac=nil
+  while pos+4<=entries_end do
+    local st=u8(payload,pos)
+    local pid=(band(u8(payload,pos+1),31)*256)+u8(payload,pos+2)
+    local eil=(band(u8(payload,pos+3),15)*256)+u8(payload,pos+4)
+    if pos+4+eil>entries_end then break end
+    local item={pid=pid,st=st}
+    if st==3 then
+      item.codec='MPEG-1 Audio'
+      mpeg=mpeg or item
+    elseif st==4 then
+      item.codec='MPEG-2 Audio'
+      mpeg=mpeg or item
+    elseif st==15 then
+      item.codec='AAC-ADTS'
+      aac=aac or item
+    elseif st==17 then
+      item.codec='AAC-LATM'
+      aac=aac or item
+    end
+    pos=pos+5+eil
+  end
+  -- 如果 PMT 同时列出 AAC 和 MPEG 音轨，保守选择 A/V MSE，
+  -- 避免 video-only 路径把 AAC 音轨删掉。
+  local selected=aac or mpeg
+  if selected then
+    result={pid=selected.pid,st=selected.st,codec=selected.codec}
+  else
+    -- PMT 已解析，但没有识别出上述音频类型；前端应默认 A/V。
+    result={pid=nil,st=nil,codec='unknown'}
   end
 end
 local function jsonstr(s)
@@ -106,39 +167,93 @@ local function probe(h)
   return {version=version,layer=layer,bitrate_kbps=kbps,sample_rate=sr,channels=channels,channel_mode=chmode,frame_length=frame_len,hex=string.format('%02X %02X %02X %02X',x1,x2,x3,x4)}
 end
 local function esc(v) return jsonstr(v) end
-local result=nil
-while not result do
-  local chunk=pipe:read(65536); if not chunk or #chunk==0 then break end
+--local result=nil
+--while not result do
+--  local chunk=pipe:read(65536); if not chunk or #chunk==0 then break end
+--  buf=buf..chunk
+--  while #buf>=188 and not result do
+--    if u8(buf,1)~=0x47 then
+--      local found=buf:find(string.char(0x47),2,true); if not found then buf=buf:sub(-187); break end; buf=buf:sub(found)
+--      if #buf<188 then break end
+--    end
+--    local pkt=buf:sub(1,188); buf=buf:sub(189)
+--    local pusi=band(u8(pkt,2),0x40)~=0; local pid=(band(u8(pkt,2),31)*256)+u8(pkt,3)
+--    local afc=band(u8(pkt,4),0x30)/16; local pos=5
+--    if afc==2 or afc==3 then pos=6+(u8(pkt,5) or 0) end
+--    if afc~=0 and afc~=2 and pos<=188 then
+--      local payload=pkt:sub(pos)
+--      if pid==0 then pat(payload,pusi)
+--      elseif pmt_pid and pid==pmt_pid then pmt(payload,pusi)
+--      elseif audio_pid and pid==audio_pid and pusi and #payload>=12 then
+--        local hlen=u8(payload,9) or 0; local start=10+hlen
+--        if start<=#payload then
+--          local data=payload:sub(start)
+--          for i=1,math.min(#data-3,4096) do
+--            local q=probe(data:sub(i)); if q then q.pid=audio_pid; q.pmt_stream_type=3; q.offset_in_pes_payload=i-1; result=q; break end
+--          end
+--        end
+--      end
+--    end
+--  end
+--end
+while not result and total_read < 1024*1024 do
+  local chunk=pipe:read(65536)
+  if not chunk or #chunk==0 then break end
+
+  total_read=total_read+#chunk
   buf=buf..chunk
+
   while #buf>=188 and not result do
+    -- MPEG-TS 同步
     if u8(buf,1)~=0x47 then
-      local found=buf:find(string.char(0x47),2,true); if not found then buf=buf:sub(-187); break end; buf=buf:sub(found)
+      local found=buf:find(string.char(0x47),2,true)
+      if not found then
+        buf=buf:sub(-187)
+        break
+      end
+      buf=buf:sub(found)
       if #buf<188 then break end
     end
-    local pkt=buf:sub(1,188); buf=buf:sub(189)
-    local pusi=band(u8(pkt,2),0x40)~=0; local pid=(band(u8(pkt,2),31)*256)+u8(pkt,3)
-    local afc=band(u8(pkt,4),0x30)/16; local pos=5
-    if afc==2 or afc==3 then pos=6+(u8(pkt,5) or 0) end
-    if afc~=0 and afc~=2 and pos<=188 then
+
+    local pkt=buf:sub(1,188)
+    buf=buf:sub(189)
+
+    local pusi=band(u8(pkt,2),0x40)~=0
+    local pid=band(u8(pkt,2),31)*256+u8(pkt,3)
+    local afc=band(u8(pkt,4),0x30)/16
+
+    local pos=5
+    if afc==2 or afc==3 then
+      pos=6+(u8(pkt,5) or 0)
+    end
+
+    -- afc=1：只有 payload；afc=3：adaptation field 后有 payload
+    if (afc==1 or afc==3) and pos<=188 then
       local payload=pkt:sub(pos)
-      if pid==0 then pat(payload,pusi)
-      elseif pmt_pid and pid==pmt_pid then pmt(payload,pusi)
-      elseif audio_pid and pid==audio_pid and pusi and #payload>=12 then
-        local hlen=u8(payload,9) or 0; local start=10+hlen
-        if start<=#payload then
-          local data=payload:sub(start)
-          for i=1,math.min(#data-3,4096) do
-            local q=probe(data:sub(i)); if q then q.pid=audio_pid; q.pmt_stream_type=3; q.offset_in_pes_payload=i-1; result=q; break end
-          end
-        end
+
+      if pid==0 then
+        pat(payload,pusi)
+      elseif pmt_pid and pid==pmt_pid then
+        pmt(payload,pusi)
       end
     end
   end
 end
+--pipe:close()
+--print('Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n')
+--if result then
+--  print(string.format('{"ok":true,"pid":%d,"pmt_stream_type":%d,"version":%s,"layer":%s,"bitrate_kbps":%d,"sample_rate":%d,"channels":%d,"frame_length":%d,"header_hex":%s,"offset_in_pes_payload":%d}', result.pid,result.pmt_stream_type,esc(result.version),esc(result.layer),result.bitrate_kbps,result.sample_rate,result.channels,result.frame_length,esc(result.hex),result.offset_in_pes_payload))
+--else
+--  print('{"ok":false,"error":"MPEG Audio frame header not found"}')
+--end
 pipe:close()
 print('Content-Type: application/json\r\nCache-Control: no-store\r\n\r\n')
 if result then
-  print(string.format('{"ok":true,"pid":%d,"pmt_stream_type":%d,"version":%s,"layer":%s,"bitrate_kbps":%d,"sample_rate":%d,"channels":%d,"frame_length":%d,"header_hex":%s,"offset_in_pes_payload":%d}', result.pid,result.pmt_stream_type,esc(result.version),esc(result.layer),result.bitrate_kbps,result.sample_rate,result.channels,result.frame_length,esc(result.hex),result.offset_in_pes_payload))
+  local pid=result.pid and tostring(result.pid) or 'null'
+  local st=result.st and tostring(result.st) or 'null'
+  print('{"ok":true,"pmt_found":true,"audio_pid":'..pid..
+        ',"pmt_stream_type":'..st..
+        ',"codec":'..jsonstr(result.codec)..'}')
 else
-  print('{"ok":false,"error":"MPEG Audio frame header not found"}')
+  print('{"ok":false,"pmt_found":false,"error":"PAT/PMT not found"}')
 end
