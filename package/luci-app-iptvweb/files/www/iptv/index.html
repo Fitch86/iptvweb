@@ -986,6 +986,1113 @@ function makeSafariVideoOnlyLoader(){
   const Base=mpegts.BaseLoader;
   if(!Base) throw new Error('mpegts.BaseLoader unavailable');
   const K=Base;
+
+  // ===== Open GOP → IDR bitstream rewriter (放在 SafariVideoOnlyLoader class 前面) =====
+
+  class BitReader {
+    constructor(buf) { this.buf = buf; this.bytePos = 0; this.bitPos = 0; }
+	get pos() { return this.bytePos * 8 + this.bitPos; } 
+    readBit() {
+      const byte = this.buf[this.bytePos];
+      const bit = (byte >> (7 - this.bitPos)) & 1;
+      this.bitPos++;
+      if (this.bitPos === 8) { this.bitPos = 0; this.bytePos++; }
+      return bit;
+    }
+    readBits(n) { let v = 0; for (let i = 0; i < n; i++) v = (v * 2) + this.readBit(); return v >>> 0; }
+    readUEG() {
+      let zeros = 0;
+      while (this.readBit() === 0) { zeros++; if (zeros > 32) throw new Error('UEG overflow'); }
+      if (zeros === 0) return 0;
+      return (Math.pow(2, zeros) - 1 + this.readBits(zeros));
+    }
+    //readSEG() { const v = this.readUEG(); return (v % 2 === 0) ? -(v / 2) : (v + 1) / 2; }
+	readSEG() { const v = this.readUEG(); if (v === 0) return 0; return (v % 2 === 0) ? (v / 2) : -(v + 1) / 2; }
+  }
+
+  class BitWriter {
+    constructor() { this.bytes = []; this.cur = 0; this.bitPos = 0; }
+    writeBit(b) {
+      this.cur = (this.cur << 1) | (b & 1);
+      this.bitPos++;
+      if (this.bitPos === 8) { this.bytes.push(this.cur); this.cur = 0; this.bitPos = 0; }
+    }
+    writeBits(v, n) { for (let i = n - 1; i >= 0; i--) this.writeBit((v >>> i) & 1); }
+    writeUEG(codeNum) {
+      const v = codeNum + 1;
+      let nbits = 0, temp = v;
+      while (temp > 1) { temp >>= 1; nbits++; }
+      for (let i = 0; i < nbits; i++) this.writeBit(0);
+      this.writeBits(v, nbits + 1);
+    }
+    copyBitsFrom(reader, n) {
+      let v = 0;
+      for (let i = 0; i < n; i++) { const b = reader.readBit(); this.writeBit(b); v = (v << 1) | b; }
+      return v >>> 0;
+    }
+    copyUEGFrom(reader) {
+      let zeros = 0;
+      while (true) {
+        const b = reader.readBit(); this.writeBit(b);
+        if (b === 1) break;
+        zeros++; if (zeros > 32) throw new Error('UEG overflow');
+      }
+      if (zeros === 0) return 0;
+      return (Math.pow(2, zeros) - 1 + this.copyBitsFrom(reader, zeros));
+    }
+    padToByte() { while (this.bitPos !== 0) this.writeBit(0); }
+    toBytes() { this.padToByte(); return Uint8Array.from(this.bytes); }
+  }
+
+  function removeEmulationPrevention(src) {
+    const out = new Uint8Array(src.length);
+    let w = 0;
+    let zeroCount = 0;
+
+    for (let i = 0; i < src.length; i++) {
+      const b = src[i];
+
+      // 只删除合法的 emulation_prevention_three_byte：
+      // 00 00 03 00/01/02/03
+      if (
+        zeroCount >= 2 &&
+        b === 0x03 &&
+        i + 1 < src.length &&
+        src[i + 1] <= 0x03
+      ) {
+        // 这里不要清零 zeroCount：
+        // RBSP 中前面的 00 00 与下一个字节仍然连续。
+        continue;
+      }
+
+      out[w++] = b;
+
+      if (b === 0x00) {
+        zeroCount++;
+      } else {
+        zeroCount = 0;
+      }
+    }
+
+    return out.slice(0, w);
+  }
+
+  function addEmulationPrevention(src) {
+    // 最坏情况下约每两个 00 插入一个 03。
+    const out = new Uint8Array(
+      src.length + Math.ceil(src.length / 2) + 16
+    );
+
+    let w = 0;
+    let zeroCount = 0;
+
+    for (let i = 0; i < src.length; i++) {
+      const b = src[i];
+
+      if (zeroCount >= 2 && b <= 0x03) {
+        out[w++] = 0x03;
+
+        // 关键：插入 03 后，EBSP 中的连续 00 已被打断。
+        zeroCount = 0;
+      }
+
+      out[w++] = b;
+
+      if (b === 0x00) {
+        zeroCount++;
+      } else {
+        zeroCount = 0;
+      }
+    }
+
+    return out.slice(0, w);
+  }
+
+  function skipScalingList(reader, size) {
+    let lastScale = 8, nextScale = 8;
+    for (let j = 0; j < size; j++) {
+      if (nextScale !== 0) {
+        const deltaScale = reader.readSEG();
+        nextScale = (lastScale + deltaScale + 256) % 256;
+      }
+      lastScale = (nextScale === 0) ? lastScale : nextScale;
+    }
+  }
+
+  const H264_HIGH_PROFILES = [100,110,122,244,44,83,86,118,128,138,139,134,135];
+
+  function parseSPS(spsNalWithHeader) {
+    const rbsp = removeEmulationPrevention(spsNalWithHeader.subarray(1));
+    const r = new BitReader(rbsp);
+    const profileIdc = r.readBits(8);
+    r.readBits(8); r.readBits(8);
+    r.readUEG();
+    let chromaFormatIdc = 1, separateColourPlane = false;
+    if (H264_HIGH_PROFILES.indexOf(profileIdc) !== -1) {
+      chromaFormatIdc = r.readUEG();
+      if (chromaFormatIdc === 3) separateColourPlane = !!r.readBit();
+      r.readUEG(); r.readUEG(); r.readBit();
+      if (r.readBit()) {
+        const count = (chromaFormatIdc !== 3) ? 8 : 12;
+        for (let i = 0; i < count; i++) if (r.readBit()) skipScalingList(r, i < 6 ? 16 : 64);
+      }
+    }
+    const frameNumBits = r.readUEG() + 4;
+    const picOrderCntType = r.readUEG();
+    if (picOrderCntType === 0) {
+      r.readUEG();
+    } else if (picOrderCntType === 1) {
+      r.readBit(); r.readSEG(); r.readSEG();
+      const numRef = r.readUEG();
+      for (let i = 0; i < numRef; i++) r.readSEG();
+    }
+    r.readUEG(); r.readBit(); r.readUEG(); r.readUEG();
+    const frameMbsOnly = !!r.readBit();
+    return { profileIdc, chromaFormatIdc, separateColourPlane, frameNumBits, frameMbsOnly };
+  }
+
+  function isISliceNal(buf, nal) {
+    const type = buf[nal.start] & 0x1f;
+    if (type !== 1 && type !== 5) return false;
+    try {
+      const prefix = removeEmulationPrevention(buf.subarray(nal.start + 1, Math.min(nal.start + 17, nal.end)));
+      const r = new BitReader(prefix);
+      r.readUEG();
+      const sliceType = r.readUEG();
+      return (sliceType % 5) === 2;
+    } catch (e) { return false; }
+  }
+
+  function rewriteSliceToIDR(nal, sps) {
+    if (!nal || nal.length < 2) {
+      throw new Error('invalid slice NAL');
+    }
+
+    /*
+     * scanAnnexBNals() 可能把 Annex-B 的 trailing_zero_8bits
+     * 包含在 nal 的末尾。
+     *
+     * 这些尾部 00 不属于 slice 的核心 EBSP/RBSP，不能参与
+     * remove/addEmulationPrevention，否则大量连续 00 会导致
+     * 插入大量 03，使 NAL 异常膨胀。
+     */
+    let coreEnd = nal.length;
+
+    while (
+      coreEnd > 1 &&
+      nal[coreEnd - 1] === 0x00
+    ) {
+      coreEnd--;
+    }
+
+    const trailingZeroBytes = nal.length - coreEnd;
+
+    if (coreEnd < 2) {
+      throw new Error(
+        'invalid slice NAL core: nalBytes=' + nal.length +
+        ', trailingZeros=' + trailingZeroBytes
+      );
+    }
+
+    /*
+     * 不包含：
+     *   - NAL header（nal[0]）
+     *   - NAL 末尾的 trailing_zero_8bits
+     */
+    const rbsp = removeEmulationPrevention(
+      nal.subarray(1, coreEnd)
+    );
+
+    if (!rbsp.length) {
+      throw new Error('empty slice RBSP');
+    }
+
+    const r = new BitReader(rbsp);
+
+    const firstMb = r.readUEG();
+    const sliceType = r.readUEG();
+    const ppsId = r.readUEG();
+
+    let colourPlaneId = 0;
+
+    if (sps.separateColourPlane) {
+      colourPlaneId = r.readBits(2);
+    }
+
+    // 丢弃原 non-IDR slice 的 frame_num。
+    r.readBits(sps.frameNumBits);
+
+    /*
+     * CCTV3 的 SPS 日志显示 frameMbsOnly=false，
+     * 所以必须先读取并保留 field_pic_flag /
+     * bottom_field_flag，然后才能插入 idr_pic_id。
+     */
+    let fieldPicFlag = 0;
+    let bottomFieldFlag = 0;
+
+    if (!sps.frameMbsOnly) {
+      fieldPicFlag = r.readBit();
+
+      if (fieldPicFlag) {
+        bottomFieldFlag = r.readBit();
+      }
+    }
+
+    const w = new BitWriter();
+
+    w.writeUEG(firstMb);
+    w.writeUEG(sliceType);
+    w.writeUEG(ppsId);
+
+    if (sps.separateColourPlane) {
+      w.writeBits(colourPlaneId, 2);
+    }
+
+    // 合成 IDR 的 frame_num 设置为 0。
+    w.writeBits(0, sps.frameNumBits);
+
+    if (!sps.frameMbsOnly) {
+      w.writeBit(fieldPicFlag);
+
+      if (fieldPicFlag) {
+        w.writeBit(bottomFieldFlag);
+      }
+    }
+
+    /*
+     * IDR slice_header 比 non-IDR 多出 idr_pic_id。
+     * 这里使用 0。
+     */
+    w.writeUEG(0);
+
+    /*
+     * 将剩余的原始 RBSP bit 原样复制。
+     * 注意：这里只复制核心 RBSP，不包含已经剥离的尾部零字节。
+     */
+    const totalBits = rbsp.length * 8;
+
+    while (r.pos < totalBits) {
+      w.writeBit(r.readBit());
+    }
+
+    const newRbsp = addEmulationPrevention(
+      w.toBytes()
+    );
+
+    /*
+     * 输出结构：
+     *
+     *   新 NAL header
+     *   + 新核心 EBSP
+     *   + 原样保留的 trailing_zero_8bits
+     */
+    const out = new Uint8Array(
+      1 + newRbsp.length + trailingZeroBytes
+    );
+
+    let nalRefIdc = nal[0] & 0x60;
+
+    // IDR slice 的 nal_ref_idc 不能为 0。
+    if (nalRefIdc === 0) {
+      nalRefIdc = 0x60;
+    }
+
+    // 保留 forbidden_zero_bit，NAL type 改为 5。
+    out[0] =
+      (nal[0] & 0x80) |
+      nalRefIdc |
+      0x05;
+
+    out.set(newRbsp, 1);
+
+    // 尾部零字节原样接回，不重新进行防竞争处理。
+    if (trailingZeroBytes > 0) {
+      out.set(
+        nal.subarray(coreEnd),
+        1 + newRbsp.length
+      );
+    }
+
+    /*
+     * I→IDR 会因为新增 idr_pic_id、字节对齐和防竞争字节而
+     * 产生少量长度变化，但不应增加几十、几百甚至几千字节。
+     */
+    const delta = out.length - nal.length;
+
+    if (Math.abs(delta) > 64) {
+      throw new Error(
+        'suspicious NAL growth while converting I to IDR: ' +
+        nal.length + 'B→' + out.length + 'B' +
+        ', coreBytes=' + coreEnd +
+        ', trailingZeros=' + trailingZeroBytes +
+        ', frameNumBits=' + sps.frameNumBits
+      );
+    }
+
+    return out;
+  }
+
+  function scanAnnexBNals(buf, from) {
+    const starts = [];
+    let i = from; const n = buf.length;
+    while (i < n - 2) {
+      if (buf[i] === 0 && buf[i+1] === 0 && buf[i+2] === 1) {
+        let scStart = i;
+        if (i > from && buf[i-1] === 0) scStart = i - 1;
+        starts.push({ scStart, dataStart: i + 3 });
+        i += 3;
+      } else i++;
+    }
+    const nals = [];
+    for (let k = 0; k < starts.length; k++) {
+      const cur = starts[k];
+      const nextScStart = (k + 1 < starts.length) ? starts[k+1].scStart : n;
+      nals.push({ scStart: cur.scStart, start: cur.dataStart, end: nextScStart,
+        scBytes: buf.subarray(cur.scStart, cur.dataStart) });
+    }
+    return nals;
+  }
+
+  function parsePesHeader(pes) {
+    if (pes.length < 9) return null;
+    if (!(pes[0] === 0 && pes[1] === 0 && pes[2] === 1)) return null;
+    const pesPacketLength = (pes[4] << 8) | pes[5];
+    const pesHeaderDataLength = pes[8];
+    const esStart = 9 + pesHeaderDataLength;
+    if (esStart > pes.length) return null;
+    return { pesPacketLength, esStart };
+  }
+
+  function extractTSPayload(pkt) {
+    const afc = (pkt[3] >> 4) & 0x3;
+    let offset = 4;
+    if (afc === 2) return null;
+    if (afc === 3) offset = 5 + pkt[4];
+    else if (afc !== 1) return null;
+    if (offset >= 188) return null;
+    return pkt.subarray(offset, 188);
+  }
+
+  function rebuildFirstPacket(originalPkt, newPayload) {
+    const afc0 = (originalPkt[3] >> 4) & 0x3;
+    const payloadOffset = (afc0 === 3) ? (5 + originalPkt[4]) : 4;
+    const capacity = 188 - payloadOffset;
+
+    if (newPayload.length >= capacity) {
+      const out = new Uint8Array(188);
+      out.set(originalPkt.subarray(0, payloadOffset), 0);
+      out.set(newPayload.subarray(0, capacity), payloadOffset);
+      return { packet: out, consumed: capacity };
+    }
+    const out = new Uint8Array(188);
+    out[0] = 0x47; out[1] = originalPkt[1]; out[2] = originalPkt[2];
+    const avail = newPayload.length;
+    if (afc0 === 3) {
+      const origAfLen = originalPkt[4];
+      const shortfall = capacity - avail;
+      const newAfLen = origAfLen + shortfall;
+      out[3] = originalPkt[3];
+      out[4] = newAfLen;
+      out.set(originalPkt.subarray(5, 5 + origAfLen), 5);
+      for (let i = 0; i < shortfall; i++) out[5 + origAfLen + i] = 0xFF;
+      out.set(newPayload, 5 + newAfLen);
+    } else {
+      out[3] = (originalPkt[3] & 0x0f) | 0x30;
+      const afLen = 183 - avail;
+      out[4] = afLen;
+      if (afLen > 0) { out[5] = 0x00; for (let i = 0; i < afLen - 1; i++) out[6 + i] = 0xFF; }
+      out.set(newPayload, 5 + afLen);
+    }
+    return { packet: out, consumed: avail };
+  }
+
+  function buildSubsequentPacket(pid, payload, offset) {
+    const out = new Uint8Array(188);
+    out[0] = 0x47; out[1] = (pid >> 8) & 0x1f; out[2] = pid & 0xff;
+    const remaining = payload.length - offset;
+    if (remaining >= 184) {
+      out[3] = 0x10;
+      out.set(payload.subarray(offset, offset + 184), 4);
+      return { packet: out, consumed: 184 };
+    }
+    const L = 183 - remaining;
+    out[3] = 0x30; out[4] = L;
+    if (L > 0) { out[5] = 0x00; for (let i = 0; i < L - 1; i++) out[6 + i] = 0xFF; }
+    out.set(payload.subarray(offset, offset + remaining), 5 + L);
+    return { packet: out, consumed: remaining };
+  }
+
+  class PesAssembler {
+    constructor() { this.packets = []; this.started = false; }
+    push(pkt, pusi) {
+      let completed = null;
+      if (pusi) {
+        if (this.started && this.packets.length) completed = this._finish();
+        this.started = true;
+        this.packets = [pkt];
+      } else if (this.started) {
+        this.packets.push(pkt);
+      }
+      return completed;
+    }
+    flush() {
+      if (this.started && this.packets.length) {
+        const r = this._finish();
+        this.packets = []; this.started = false;
+        return r;
+      }
+      return null;
+    }
+    _finish() {
+      const pkts = this.packets;
+      const parts = []; let total = 0;
+      for (const p of pkts) {
+        const pl = extractTSPayload(p);
+        if (pl) { parts.push(pl); total += pl.length; }
+      }
+      const pesBytes = new Uint8Array(total);
+      let off = 0;
+      for (const p of parts) { pesBytes.set(p, off); off += p.length; }
+      return { packets: pkts, pesBytes };
+    }
+  }
+
+  function readOpenGopPesPts90k(pesBytes) {
+    if (!pesBytes || pesBytes.length < 14) {
+      return null;
+    }
+
+    if (
+      pesBytes[0] !== 0x00 ||
+      pesBytes[1] !== 0x00 ||
+      pesBytes[2] !== 0x01
+    ) {
+      return null;
+    }
+
+    const ptsDtsFlags = (pesBytes[7] >> 6) & 0x03;
+
+    // 10 = 只有 PTS；11 = PTS + DTS。
+    if (ptsDtsFlags !== 2 && ptsDtsFlags !== 3) {
+      return null;
+    }
+
+    const p0 = pesBytes[9];
+    const p1 = pesBytes[10];
+    const p2 = pesBytes[11];
+    const p3 = pesBytes[12];
+    const p4 = pesBytes[13];
+
+    // 使用乘法而不是 32 位移位，因为 PTS 是 33 位。
+    return (
+      ((p0 >>> 1) & 0x07) * 1073741824 + // 2^30
+      p1 * 4194304 +                     // 2^22
+      ((p2 >>> 1) & 0x7f) * 32768 +      // 2^15
+      p3 * 128 +                         // 2^7
+      ((p4 >>> 1) & 0x7f)
+    );
+  }
+
+  function openGopPtsDelta90k(value, anchor) {
+    const MOD = 8589934592; // 2^33
+    const HALF = 4294967296;
+
+    let delta = value - anchor;
+
+    if (delta > HALF) {
+      delta -= MOD;
+    } else if (delta < -HALF) {
+      delta += MOD;
+    }
+
+    return delta;
+  }
+
+  class OpenGopFixer {
+    constructor(pid, logFn, opts) {
+      this.pid = pid;
+      this.log = logFn || (() => {});
+      this.dryRun = !!(opts && opts.dryRun);
+      this.assembler = new PesAssembler();
+      this.lastSpsParams = null;
+	  this.spsSignature = null;
+      this.outCc = 0;
+      this.ccInited = false;
+      //this.stats = { rewritten: 0, wouldRewrite: 0, passthrough: 0, failed: 0 };
+	  this.stats = { rewritten: 0, wouldRewrite: 0, passthrough: 0, failed: 0, droppedLeading: 0 };
+	  
+      // ★ 新增：只启动一次的状态
+      this.bootstrapped = false;         // 是否已经做过唯一一次 I→IDR 转换
+      this.frameNumOffset = 0;           // 永久生效的 frame_num 常量偏移	  
+	  // 启动用合成 IDR 的 PTS。
+  	  this.bootstrapPts90k = null;
+
+	  // 在启动阶段删除 PTS 早于 bootstrap I 图像的 Open-GOP leading pictures。
+	  this.leadingDropActive = false;
+	  this.leadingDropCount = 0;
+    }
+
+    feed(pkt) {
+      const pusi = !!(pkt[1] & 0x40);
+      const completed = this.assembler.push(pkt, pusi);
+      if (!completed) return [];
+      return this._emit(completed);
+    }
+
+    flush() {
+      const completed = this.assembler.flush();
+      return completed ? this._emit(completed) : [];
+    }
+
+	_emit({ packets, pesBytes }) {
+	  let outPackets = packets;
+
+	  try {
+		const anyTei = packets.some(
+		  p => (p[1] & 0x80) !== 0
+		);
+
+		if (anyTei) {
+		  this.stats.passthrough++;
+		} else if (this._shouldDropLeadingPes(pesBytes)) {
+		  /*
+		   * 整个 leading picture PES 不输出。
+		   *
+		   * 这里必须直接返回 []，不能调用 _restampCc()。
+		   * 因为没有 TS 包实际输出，输出 CC 也不应前进。
+		   * 下一个正常 PES 会继续使用当前 outCc，因此不会制造 CC GAP。
+		   */
+		  this.stats.droppedLeading++;
+		  return [];
+		} else {
+		  const rewritten = this._maybeRewrite(pesBytes);
+
+		  if (!rewritten) {
+			this.stats.passthrough++;
+		  } else if (this.dryRun) {
+			this.stats.wouldRewrite++;
+
+			this.log(
+			  '[DRYRUN] PID=' + this.pid +
+			  ' would rewrite, ' +
+			  pesBytes.length + 'B→' +
+			  rewritten.length + 'B'
+			);
+		  } else {
+			outPackets = this._repacketize(
+			  packets,
+			  rewritten
+			);
+
+			this.stats.rewritten++;
+
+			this.log(
+			  'PID=' + this.pid +
+			  ' rewritten ' +
+			  pesBytes.length + 'B→' +
+			  rewritten.length + 'B, packets ' +
+			  packets.length + '→' +
+			  outPackets.length
+			);
+		  }
+		}
+	  } catch (e) {
+		this.stats.failed++;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' rewrite failed (' +
+		  (e && e.message) +
+		  '), passthrough original'
+		);
+
+		outPackets = packets;
+	  }
+
+	  return this._restampCc(outPackets);
+	}
+
+    _restampCc(packets) {
+      const out = [];
+      for (const p of packets) {
+        const afc = (p[3] >> 4) & 0x3;
+        const q = new Uint8Array(p);
+        if (afc === 1 || afc === 3) {
+          if (!this.ccInited) { this.outCc = p[3] & 0xf; this.ccInited = true; }
+          q[3] = (q[3] & 0xf0) | (this.outCc & 0xf);
+          this.outCc = (this.outCc + 1) & 0xf;
+        }
+        out.push(q);
+      }
+      return out;
+    }
+
+	_shouldDropLeadingPes(pesBytes) {
+	  if (
+		!this.leadingDropActive ||
+		this.bootstrapPts90k == null
+	  ) {
+		return false;
+	  }
+
+	  const pts = readOpenGopPesPts90k(pesBytes);
+
+	  if (pts == null) {
+		return false;
+	  }
+
+	  const delta90k = openGopPtsDelta90k(
+		pts,
+		this.bootstrapPts90k
+	  );
+
+	  const deltaMs = delta90k / 90;
+
+	  /*
+	   * bootstrap 之后按解码顺序到达、但 PTS 早于 bootstrap
+	   * I 图像的帧，就是 Open GOP 的 leading pictures。
+	   *
+	   * 限定在 bootstrap 前一秒内，避免遇到真正的 PTS
+	   * discontinuity 时误删。
+	   */
+	  if (delta90k < 0 && delta90k >= -90000) {
+		this.leadingDropCount++;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' DROP leading picture' +
+		  ' PTS90k=' + pts +
+		  ' bootstrapPTS90k=' + this.bootstrapPts90k +
+		  ' deltaMs=' + deltaMs.toFixed(3) +
+		  ' count=' + this.leadingDropCount
+		);
+
+		return true;
+	  }
+
+	  /*
+	   * 已经超过 bootstrap 一秒，正常 GOP 已经稳定，
+	   * 关闭启动专用的判断，避免永久保留状态。
+	   */
+	  if (delta90k >= 90000) {
+		this.leadingDropActive = false;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' leading-picture drop window closed' +
+		  ' dropped=' + this.leadingDropCount
+		);
+	  } else if (delta90k < -90000) {
+		// 更大的负跳变更可能是真正的时间戳 discontinuity。
+		this.leadingDropActive = false;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' leading-picture drop window cancelled' +
+		  ' because of large negative PTS deltaMs=' +
+		  deltaMs.toFixed(3)
+		);
+	  }
+
+	  return false;
+	}
+	
+    // ★ 核心重写：只在"首次启动"时做一次 I→IDR 转换；之后永远只做 frame_num 平移
+    _maybeRewrite(pesBytes) {
+      const pes = parsePesHeader(pesBytes);
+      if (!pes) return null;
+      const nals = scanAnnexBNals(pesBytes, pes.esStart);
+      if (!nals.length) return null;
+
+      let hasRealIdr = false, spsNal = null;
+      const sliceNals = []; // 所有 NAL type===1（I/P/B slice 都在这里）
+      for (const n of nals) {
+        const type = pesBytes[n.start] & 0x1f;
+        if (type === 5) hasRealIdr = true;
+        else if (type === 7) spsNal = n;
+        else if (type === 1) sliceNals.push(n);
+      }
+
+      if (spsNal) {
+        try {
+          const parsed = parseSPS(pesBytes.subarray(spsNal.start, spsNal.end));
+          const sig = parsed.frameNumBits + ':' + parsed.separateColourPlane + ':' + parsed.frameMbsOnly;
+  		  if (sig !== this.spsSignature) {
+		    this.spsSignature = sig;
+		    this.bootstrapped = false;
+		    this.frameNumOffset = 0;
+
+		    this.bootstrapPts90k = null;
+		    this.leadingDropActive = false;
+		    this.leadingDropCount = 0;
+
+		    this.log(
+			  'PID=' + this.pid +
+			  ' SPS changed, re-arm bootstrap'
+		    );
+		  }
+          this.lastSpsParams = parsed;
+        } catch (e) {
+          this.log('PID=' + this.pid + ' SPS parse failed: ' + e.message);
+        }
+      }
+
+      // 上游如果真的来了一个原生 IDR，说明不再需要我们的 hack，复位状态
+  	  if (hasRealIdr) {
+	    if (!this.bootstrapped) {
+		  this.log('PID=' + this.pid + ' real IDR encountered before any bootstrap, using it as anchor (offset=0)');
+	    } else if (this.frameNumOffset !== 0) {
+		  this.log('PID=' + this.pid + ' real IDR superseded synthetic anchor, resetting offset to 0 (no further fake-IDR will be created)');
+	    }
+	    // 关键修正：无论之前是否做过合成 IDR 转换，一旦遇到真实 IDR，
+	    // 就把它当作新的、干净的锚点，永久标记为“已启动”，
+	    // 绝不允许因为“遇到了真实 IDR”而重新把 bootstrapped 置为 false。
+	    this.bootstrapped = true;
+	    this.frameNumOffset = 0;
+		
+		this.bootstrapPts90k = null;
+		this.leadingDropActive = false;
+		this.leadingDropCount = 0;
+	    return null;
+	  }
+	  
+      if (!sliceNals.length) return null;
+      if (!this.lastSpsParams) return null;
+
+	  if (!this.bootstrapped) {
+	    /*
+	     * 寻找这个 bootstrap PES 中的全部 I slice。
+	     *
+	     * 原逻辑只将第一个 I slice 改成 IDR，其余 I slice 仅修改
+	     * frame_num，可能造成同一幅多 slice 图像中：
+	     *
+	     *   第一个 slice：NAL type 5（IDR）
+	     *   其余 slice：  NAL type 1（non-IDR）
+	     *
+	     * 现在改为将该 bootstrap 图像中的全部 I slice 都转换为 IDR。
+	     */
+	    const bootstrapISlices = [];
+
+	    for (const n of sliceNals) {
+		  if (isISliceNal(pesBytes, n)) {
+		    bootstrapISlices.push(n);
+		  }
+	    }
+
+	    if (!bootstrapISlices.length) {
+		  // 当前 PES 没有 I slice，继续等待可用于启动的图像。
+		  // 此时上游视频 gate 尚未正式输出视频，因此直接返回即可。
+		  return null;
+	    }
+
+	    // 使用第一个 I slice 读取原始 frame_num。
+	    const firstISliceNal = bootstrapISlices[0];
+
+	    // Set 中保存的是 scanAnnexBNals() 返回的同一批 NAL 对象，
+	    // 因此可以直接通过对象身份判断该 NAL 是否属于 bootstrap I slice。
+	    const bootstrapISet = new Set(bootstrapISlices);
+
+	    let originalFn;
+
+	    try {
+		  const tmpRbsp = removeEmulationPrevention(
+		    pesBytes.subarray(
+			  firstISliceNal.start + 1,
+			  firstISliceNal.end
+		    )
+		  );
+
+		  const tr = new BitReader(tmpRbsp);
+
+		  tr.readUEG(); // first_mb_in_slice
+		  tr.readUEG(); // slice_type
+		  tr.readUEG(); // pic_parameter_set_id
+
+		  if (this.lastSpsParams.separateColourPlane) {
+		    tr.readBits(2); // colour_plane_id
+		  }
+
+		  originalFn = tr.readBits(
+		    this.lastSpsParams.frameNumBits
+		  );
+	    } catch (e) {
+		  this.log(
+		    'PID=' + this.pid +
+		    ' bootstrap frame_num parse failed: ' +
+		    (e && e.message)
+		  );
+		  return null;
+	    }
+
+	    const parts = [];
+	    let cursor = pes.esStart;
+
+	    for (const n of nals) {
+  		  // 保留前一个 NAL 结束位置与当前 start code 之间的原始字节。
+		  if (n.scStart > cursor) {
+		    parts.push(
+			  pesBytes.subarray(cursor, n.scStart)
+		    );
+		  }
+
+		  if (bootstrapISet.has(n)) {
+		    /*
+		     * 关键修改：
+		     * bootstrap 图像中的所有 I slice 都调用 rewriteSliceToIDR()，
+		     * 不再只有第一个 I slice 被转换。
+		     */
+		    parts.push(n.scBytes);
+
+		    parts.push(
+			  rewriteSliceToIDR(
+			    pesBytes.subarray(n.start, n.end),
+			    this.lastSpsParams
+			  )
+		    );
+		  } else if (sliceNals.indexOf(n) !== -1) {
+		    /*
+		     * 当前 PES 中不是 bootstrap I slice 的其他 type-1 slice，
+		     * 不改变 NAL 类型，只平移 frame_num。
+		     */
+		    parts.push(n.scBytes);
+
+		    parts.push(
+			  this._adjustFrameNum(
+			    pesBytes,
+			    n,
+			    originalFn
+			  )
+		    );
+		  } else {
+		    // SPS、PPS、SEI、AUD 等非 slice NAL 原样保留。
+		    parts.push(
+			  pesBytes.subarray(n.scStart, n.end)
+		    );
+		  }
+
+		  cursor = n.end;
+	    }
+
+	    if (cursor < pesBytes.length) {
+		  parts.push(pesBytes.subarray(cursor));
+	    }
+
+		this.frameNumOffset = originalFn;
+		this.bootstrapped = true;
+
+		// 记录本次 bootstrap I 图像的 PTS，供后续 leading picture 判断。
+		this.bootstrapPts90k =
+		  readOpenGopPesPts90k(pesBytes);
+
+		this.leadingDropCount = 0;
+		this.leadingDropActive =
+		  this.bootstrapPts90k != null;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' BOOTSTRAP I-picture originalFn=' + originalFn +
+		  ' slices=' + bootstrapISlices.length +
+		  ' bootstrapPTS90k=' +
+		  (
+			this.bootstrapPts90k == null
+			  ? 'none'
+			  : this.bootstrapPts90k
+		  ) +
+		  ' → all I slices converted to IDR;' +
+		  ' permanent frame_num offset armed;' +
+		  ' leading-picture drop=' +
+		  (this.leadingDropActive ? 'armed' : 'unavailable') +
+		  ' (no further fake-IDR will be created)'
+		);
+
+	    return this._finalizePes(
+		  pesBytes,
+		  pes,
+		  parts
+	    );
+	  }
+
+      // ★ 已经启动过：永远只做常量偏移，绝不再造第二个伪 IDR
+      if (this.frameNumOffset === 0) return null;
+
+      const parts = [];
+      let cursor = pes.esStart;
+      for (const n of nals) {
+        if (n.scStart > cursor) parts.push(pesBytes.subarray(cursor, n.scStart));
+        if (sliceNals.indexOf(n) !== -1) {
+          parts.push(n.scBytes);
+          parts.push(this._adjustFrameNum(pesBytes, n, this.frameNumOffset));
+        } else {
+          parts.push(pesBytes.subarray(n.scStart, n.end));
+        }
+        cursor = n.end;
+      }
+      if (cursor < pesBytes.length) parts.push(pesBytes.subarray(cursor));
+
+      return this._finalizePes(pesBytes, pes, parts);
+    }
+
+	_writeBitsAt(buf, bitOffset, bitLength, value) {
+	  for (let i = 0; i < bitLength; i++) {
+		const absoluteBit = bitOffset + i;
+		const byteIndex = absoluteBit >> 3;
+		const bitInByte = 7 - (absoluteBit & 7);
+		const mask = 1 << bitInByte;
+		const bit = (value >>> (bitLength - 1 - i)) & 1;
+
+		if (bit) {
+		  buf[byteIndex] |= mask;
+		} else {
+		  buf[byteIndex] &= (~mask) & 0xff;
+		}
+	  }
+	}
+	
+	_adjustFrameNum(pesBytes, n, offset) {
+	  const originalNal = pesBytes.subarray(n.start, n.end);
+
+	  if (originalNal.length < 2) {
+		throw new Error('slice NAL is too short');
+	  }
+
+	  /*
+	   * scanAnnexBNals() 可能把 Annex-B trailing_zero_8bits
+	   * 包含在 NAL 的末尾。
+	   *
+	   * 这些零不是 RBSP 内容，不能交给 addEmulationPrevention()，
+	   * 否则每两个零附近都会插入 03，导致 NAL 异常膨胀。
+	   */
+	  let coreEnd = originalNal.length;
+
+	  while (
+		coreEnd > 1 &&
+		originalNal[coreEnd - 1] === 0x00
+	  ) {
+		coreEnd--;
+	  }
+
+	  const trailingZeroBytes =
+		originalNal.length - coreEnd;
+
+	  // 这里只处理真正的 NAL 核心部分，不包含尾部补零。
+	  const coreNal = originalNal.subarray(0, coreEnd);
+
+	  const rbsp = removeEmulationPrevention(
+		coreNal.subarray(1)
+	  );
+
+	  const r = new BitReader(rbsp);
+
+	  r.readUEG(); // first_mb_in_slice
+	  r.readUEG(); // slice_type
+	  r.readUEG(); // pic_parameter_set_id
+
+	  if (this.lastSpsParams.separateColourPlane) {
+		r.readBits(2); // colour_plane_id
+	  }
+
+	  const fnBits = this.lastSpsParams.frameNumBits;
+	  const frameNumBitOffset = r.pos;
+
+	  if (
+		frameNumBitOffset < 0 ||
+		frameNumBitOffset + fnBits > rbsp.length * 8
+	  ) {
+		throw new Error(
+		  'frame_num is outside slice RBSP: offset=' +
+		  frameNumBitOffset +
+		  ', bits=' + fnBits +
+		  ', rbspBytes=' + rbsp.length
+		);
+	  }
+
+	  const origFn = r.readBits(fnBits);
+	  const mod = Math.pow(2, fnBits);
+
+	  const newFn =
+		((origFn - offset) % mod + mod) % mod;
+
+	  // 整个 RBSP 原样复制，只覆盖 frame_num 的几个 bit。
+	  const patchedRbsp = new Uint8Array(rbsp);
+
+	  this._writeBitsAt(
+		patchedRbsp,
+		frameNumBitOffset,
+		fnBits,
+		newFn
+	  );
+
+	  const newEbsp =
+		addEmulationPrevention(patchedRbsp);
+
+	  /*
+	   * 输出结构：
+	   *
+	   * NAL header
+	   * + 重新转义后的核心 EBSP
+	   * + 原样保留的 trailing_zero_8bits
+	   */
+	  const out = new Uint8Array(
+		1 + newEbsp.length + trailingZeroBytes
+	  );
+
+	  out[0] = coreNal[0];
+	  out.set(newEbsp, 1);
+
+	  if (trailingZeroBytes > 0) {
+		out.set(
+		  originalNal.subarray(coreEnd),
+		  1 + newEbsp.length
+		);
+	  }
+
+	  const delta =
+		out.length - originalNal.length;
+
+	  if (Math.abs(delta) > 64) {
+		throw new Error(
+		  'suspicious NAL growth after excluding trailing zeros: ' +
+		  originalNal.length + 'B→' + out.length + 'B' +
+		  ', coreBytes=' + coreEnd +
+		  ', trailingZeros=' + trailingZeroBytes +
+		  ', origFn=' + origFn +
+		  ', newFn=' + newFn +
+		  ', fnBits=' + fnBits
+		);
+	  }
+
+	  return out;
+	}
+
+    _finalizePes(pesBytes, pes, parts) {
+      let newEsLen = 0; for (const p of parts) newEsLen += p.length;
+      const newEs = new Uint8Array(newEsLen);
+      let off = 0; for (const p of parts) { newEs.set(p, off); off += p.length; }
+      const newHeader = new Uint8Array(pesBytes.subarray(0, pes.esStart));
+      if (pes.pesPacketLength !== 0) {
+        const newLen = Math.min(0xFFFF, (newHeader.length - 6) + newEs.length);
+        newHeader[4] = (newLen >> 8) & 0xff;
+        newHeader[5] = newLen & 0xff;
+      }
+      const out = new Uint8Array(newHeader.length + newEs.length);
+      out.set(newHeader, 0);
+      out.set(newEs, newHeader.length);
+      return out;
+    }
+
+    _repacketize(originalPackets, newPesBytes) {
+      const { packet: firstPkt, consumed } = rebuildFirstPacket(originalPackets[0], newPesBytes);
+      const out = [firstPkt];
+      let offset = consumed;
+      while (offset < newPesBytes.length) {
+        const { packet, consumed: c } = buildSubsequentPacket(this.pid, newPesBytes, offset);
+        out.push(packet);
+        offset += c;
+      }
+      return out;
+    }
+  }
+  
   class SafariVideoOnlyLoader extends K {
     constructor(seekHandler, config){
       super('SafariVideoOnlyLoader');
@@ -1015,6 +2122,9 @@ function makeSafariVideoOnlyLoader(){
       this._startupFirstPts = null;
       this._startupMinPtsDelta = 0;
       this._startupMaxPtsDelta = 0;	  
+	  this._openGopFixers = new Map();
+	  this.gopFrameNumOffset = null;
+	  this._openGopDryRun = false; 
     }
     open(dataSource, range){
       this._status=1; this._dataSource=dataSource; this._range=range||{};
@@ -1035,21 +2145,6 @@ function makeSafariVideoOnlyLoader(){
         this._status=2;
         if(!r.body) throw new Error('ReadableStream unavailable');
         const reader=r.body.getReader();
-        //let pos=(range&&range.from!=null)?range.from:0;
-        //while(!this._closed){
-        //  const q=await reader.read();
-        //  if(q.done) break;
-        //  if(!q.value || !q.value.length) continue;
-        //  this._diagInBytes+=q.value.byteLength;
-        //  const out=this._filterChunk(q.value);
-        //  if(out.length){
-        //    const ab=out.buffer.slice(out.byteOffset,out.byteOffset+out.byteLength);
-        //    this._outBytes+=out.byteLength;
-        //    if(this.onDataArrival) this.onDataArrival(ab,pos,this._outBytes);
-        //    pos+=out.byteLength;
-        //  }
-        //}
-        //if(this._closed) return;
         let pos = (range && range.from != null) ? range.from : 0;
 
         const emitFiltered = bytes => {
@@ -1154,6 +2249,107 @@ function makeSafariVideoOnlyLoader(){
       if(!this._buffer.length) this._buffer=a.slice();
       else { const x=new Uint8Array(this._buffer.length+a.length); x.set(this._buffer); x.set(a,this._buffer.length); this._buffer=x; }
     }
+	_handleVideoPacket(pkt, pid, out) {
+	  const pusi = (pkt[1] & 0x40) !== 0;
+	  const cc = pkt[3] & 0x0f;
+	  const afc = (pkt[3] >> 4) & 3;
+	  const hasPayload = afc === 1 || afc === 3;
+	  const tei = (pkt[1] & 0x80) !== 0;
+
+	  const rai =
+		(afc === 2 || afc === 3) &&
+		(pkt[4] || 0) >= 1 &&
+		(pkt[5] & 0x40) !== 0;
+
+	  const hasDiscontinuity =
+		(afc === 2 || afc === 3) &&
+		(pkt[4] || 0) >= 1 &&
+		(pkt[5] & 0x80) !== 0;
+
+	  const nalTypes = this._scanH264Nals(pkt, pid);
+	  this._diagLogVideoPts(pkt, pid, cc, pusi);
+
+	  if (nalTypes.indexOf(5) !== -1 && this._diagH264IdrLogCount < 50) {
+		this._diagH264IdrLogCount++;
+		log('SAFARI_H264_IDR: PID=' + pid + ' CC=' + cc + ' PUSI=' + pusi +
+		  ' gate=' + this._videoStartedPids.has(pid));
+	  }
+
+	  if (nalTypes.length && this._diagH264LogCount < 120) {
+		const name = t => ({
+		  1: 'SLICE', 2: 'DPA', 3: 'DPB', 4: 'DPC', 5: 'IDR', 6: 'SEI',
+		  7: 'SPS', 8: 'PPS', 9: 'AUD', 13: 'SPSEXT', 14: 'PREFIX', 19: 'AUX', 20: 'EXT'
+		}[t] || ('NAL' + t));
+
+		log('SAFARI_H264: PID=' + pid + ' CC=' + cc + ' PUSI=' + pusi + ' RAI=' + rai +
+		  ' gate=' + this._videoStartedPids.has(pid) +
+		  ' NAL=' + nalTypes.map(t => name(t) + '(' + t + ')').join(','));
+		this._diagH264LogCount++;
+	  }
+
+	  if (hasPayload) {
+		const lastCC = this._lastVideoCC.get(pid);
+		if (lastCC !== undefined && !hasDiscontinuity && cc !== lastCC &&
+			cc !== ((lastCC + 1) & 0x0f) && this._diagCcGapCount < 20) {
+		  log('SAFARI_TS_FILTER: video CC GAP PID=' + pid +
+			' previous=' + lastCC + ' current=' + cc +
+			' expected=' + ((lastCC + 1) & 0x0f));
+		  this._diagCcGapCount++;
+		}
+		this._lastVideoCC.set(pid, cc);
+	  }
+
+	  if (tei) {
+		this._videoStartedPids.delete(pid);
+		if (this._h264PendingPesByPid) this._h264PendingPesByPid.delete(pid);
+		return;
+	  }
+
+	  if (!this._videoStartedPids.has(pid)) {
+		const isH264 = this._videoStreamTypeByPid.get(pid) === 0x1b;
+		let canOpen = pusi && hasPayload;
+		let reason = 'PUSI';
+
+		if (isH264) {
+		  const hasSps = nalTypes.indexOf(7) !== -1;
+		  const hasPps = nalTypes.indexOf(8) !== -1;
+		  const hasIdr = nalTypes.indexOf(5) !== -1;
+
+		  canOpen = pusi && hasPayload && hasSps && hasPps && (hasIdr || rai);
+		  reason = hasIdr ? 'IDR+SPS/PPS' : 'RAI+SPS/PPS';
+		}
+
+		if (!canOpen) {
+		  this._diagSkippedVideoUntilPusi++;
+		  return;
+		}
+
+		if (isH264 && rai && nalTypes.indexOf(5) === -1 && !this._startupHoldNeeded) {
+		  this._startupHoldNeeded = true;
+		  this._startupHoldPid = pid;
+		  this._startupHoldSince = 0;
+		  this._startupFirstPts = null;
+		  this._startupMinPtsDelta = 0;
+		  this._startupMaxPtsDelta = 0;
+
+		  log('SAFARI_TS_FILTER: no-IDR startup hold armed PID=' + pid + ' targetSpanMs=2500');
+		}
+
+		this._videoStartedPids.add(pid);
+		log('SAFARI_TS_FILTER: video PES gate opened PID=' + pid +
+		  ' CC=' + cc + ' PUSI=' + pusi + ' RAI=' + rai +
+		  ' reason=' + reason + ' skipped=' + this._diagSkippedVideoUntilPusi);
+	  }
+
+	  out.push(pkt);
+	  this._diagOutPackets++;
+
+	  if (!this._diagVideoPackets.has(pid)) {
+		this._diagVideoPackets.add(pid);
+		log('SAFARI_TS_FILTER: first forwarded video packet PID=' + pid +
+		  ' CC=' + cc + ' PUSI=' + pusi + ' RAI=' + rai);
+	  }
+	}	
     _filterChunk(chunk){
       this._appendBuffer(chunk);
       const packets=[];
@@ -1198,194 +2394,24 @@ function makeSafariVideoOnlyLoader(){
           if(rp) out.push(rp);
           continue;
         }
-        //if((this._videoPids.size && this._videoPids.has(pid)) || (this._videoPid!=null && pid===this._videoPid)){
-        //  out.push(pkt); this._diagOutPackets++;
-        //  if(!this._diagVideoPackets.has(pid)){this._diagVideoPackets.add(pid);log('SAFARI_TS_FILTER: first video packet PID='+pid+' CC='+(pkt[3]&15)+' PUSI='+!!(pkt[1]&0x40));}
-        //  continue;
-        //}
-		const isVideoPid =
-		  (this._videoPids.size && this._videoPids.has(pid)) ||
-		  (this._videoPid != null && pid === this._videoPid);
-
+		const isVideoPid = (this._videoPids.size && this._videoPids.has(pid)) || (this._videoPid != null && pid === this._videoPid);
 		if (isVideoPid) {
-		  // 一次性采集，不要重复 const。
-		  const pusi = (pkt[1] & 0x40) !== 0;
-		  const cc = pkt[3] & 0x0f;
-		  const afc = (pkt[3] >> 4) & 3;
-		  const hasPayload = afc === 1 || afc === 3;
-		  const tei = (pkt[1] & 0x80) !== 0;
-
-		  // adaptation_field 中的 random_access_indicator，仅用于诊断。
-		  const rai =
-			(afc === 2 || afc === 3) &&
-			(pkt[4] || 0) >= 1 &&
-			(pkt[5] & 0x40) !== 0;
-
-		  // adaptation_field 中的 discontinuity_indicator。
-		  const hasDiscontinuity =
-			(afc === 2 || afc === 3) &&
-			(pkt[4] || 0) >= 1 &&
-			(pkt[5] & 0x80) !== 0;
-
-		  // 诊断：扫描当前 TS 包里的 H.264 NAL 类型。
-		  const nalTypes = this._scanH264Nals(pkt, pid);
-		  this._diagLogVideoPts(pkt, pid, cc, pusi);
-		  if (
-		    nalTypes.indexOf(5) !== -1 &&
-		    this._diagH264IdrLogCount < 50
-		  ) {
-		    this._diagH264IdrLogCount++;
-		    log(
-			  'SAFARI_H264_IDR: PID=' + pid +
-			  ' CC=' + cc +
-			  ' PUSI=' + pusi +
-			  ' gate=' + this._videoStartedPids.has(pid)
-		    );
-		  }		  
-		  //if (nalTypes.length && this._diagH264LogCount < 80) {
-			//const name = t => ({
-			//  1: 'SLICE',
-			//  5: 'IDR',
-			//  6: 'SEI',
-			//  7: 'SPS',
-			//  8: 'PPS',
-			//  9: 'AUD'
-			//}[t] || ('NAL' + t));
-
-			//log(
-			//  'SAFARI_H264: PID=' + pid +
-			//  ' CC=' + cc +
-			//  ' PUSI=' + pusi +
-			//  ' RAI=' + rai +
-			//  ' gate=' + this._videoStartedPids.has(pid) +
-			//  ' NAL=' + nalTypes.map(name).join(',')
-			//);
-			//this._diagH264LogCount++;
-		  //}
-	  	  if (nalTypes.length && this._diagH264LogCount < 120) {
-		    const name = t => ({
-			  1: 'SLICE',
-			  2: 'DPA',
-			  3: 'DPB',
-			  4: 'DPC',
-			  5: 'IDR',
-			  6: 'SEI',
-			  7: 'SPS',
-			  8: 'PPS',
-			  9: 'AUD',
-			  13: 'SPSEXT',
-			  14: 'PREFIX',
-			  19: 'AUX',
-			  20: 'EXT'
-		    }[t] || ('NAL' + t));
-
-		    log(
-			  'SAFARI_H264: PID=' + pid +
-			  ' CC=' + cc +
-			  ' PUSI=' + pusi +
-			  ' RAI=' + rai +
-			  ' gate=' + this._videoStartedPids.has(pid) +
-			  ' NAL=' + nalTypes.map(t => name(t) + '(' + t + ')').join(',')
-		    );
-		    this._diagH264LogCount++;
-		  }
-		  // 诊断：视频 PID 的连续计数器 (CC) 跳变。
-		  if (hasPayload) {
-			const lastCC = this._lastVideoCC.get(pid);
-			if (
-			  lastCC !== undefined &&
-			  !hasDiscontinuity &&
-			  cc !== lastCC &&
-			  cc !== ((lastCC + 1) & 0x0f) &&
-			  this._diagCcGapCount < 20
-			) {
-			  log(
-				'SAFARI_TS_FILTER: video CC GAP PID=' + pid +
-				' previous=' + lastCC +
-				' current=' + cc +
-				' expected=' + ((lastCC + 1) & 0x0f)
-			  );
-			  this._diagCcGapCount++;
-			}
-			this._lastVideoCC.set(pid, cc);
+		  let fixer = this._openGopFixers.get(pid);
+		  if (!fixer) {
+  		    fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), { dryRun: this._openGopDryRun });
+			this._openGopFixers.set(pid, fixer);
 		  }
 
-		  if (tei) {
-		    this._videoStartedPids.delete(pid);
-		    if (this._h264PendingPesByPid) {
-			  this._h264PendingPesByPid.delete(pid);
-		    }
-		    continue;
+		  let fixedPkts;
+		  try {
+		    fixedPkts = fixer.feed(pkt);
+		  } catch (e) {
+		    log('SAFARI_OPENGOP: feed() threw PID=' + pid + ' err=' + (e && e.message));
+			fixedPkts = [pkt];
 		  }
 
-		  if (!this._videoStartedPids.has(pid)) {
-		    const isH264 = this._videoStreamTypeByPid.get(pid) === 0x1b;
-		    let canOpen = pusi && hasPayload;
-		    let reason = 'PUSI';
-
-		    if (isH264) {
-			  const hasSps = nalTypes.indexOf(7) !== -1;
-			  const hasPps = nalTypes.indexOf(8) !== -1;
-			  const hasIdr = nalTypes.indexOf(5) !== -1;
-
-			  // 恢复上一轮较宽松的条件：H.264 在 PES 起点有 SPS/PPS，
-			  // 并且有 IDR 或 RAI 时放行；RAI 不单独作为条件。
-			  canOpen =
-			    pusi &&
-			    hasPayload &&
-			    hasSps &&
-			    hasPps &&
-			    (hasIdr || rai);
-
-			  reason = hasIdr ? 'IDR+SPS/PPS' : 'RAI+SPS/PPS';
-		    }
-
-		    if (!canOpen) {
-			  this._diagSkippedVideoUntilPusi++;
-			  continue;
-		    }
-            // 仅对启动时 RAI+SPS/PPS、但没有 IDR 的 H.264 流启用启动暂存。
-            // 不使用频道名单；如果 CCTV1 的起始 PES 有 IDR，就不会启用。
-            if (
-              isH264 &&
-              rai &&
-              nalTypes.indexOf(5) === -1 &&
-              !this._startupHoldNeeded
-            ) {
-              this._startupHoldNeeded = true;
-              this._startupHoldPid = pid;
-              this._startupHoldSince = 0;
-              this._startupFirstPts = null;
-              this._startupMinPtsDelta = 0;
-              this._startupMaxPtsDelta = 0;
-
-              log(
-                'SAFARI_TS_FILTER: no-IDR startup hold armed PID=' + pid +
-                ' targetSpanMs=2500'
-              );
-            }
-		    this._videoStartedPids.add(pid);
-		    log(
-			  'SAFARI_TS_FILTER: video PES gate opened PID=' + pid +
-			  ' CC=' + cc +
-			  ' PUSI=' + pusi +
-			  ' RAI=' + rai +
-			  ' reason=' + reason +
-			  ' skipped=' + this._diagSkippedVideoUntilPusi
-		    );
-		  }		  
-		
-		  out.push(pkt);
-		  this._diagOutPackets++;
-
-		  if (!this._diagVideoPackets.has(pid)) {
-			this._diagVideoPackets.add(pid);
-			log(
-			  'SAFARI_TS_FILTER: first forwarded video packet PID=' + pid +
-			  ' CC=' + cc +
-			  ' PUSI=' + pusi +
-			  ' RAI=' + rai
-			);
+		  for (const fp of fixedPkts) {
+		    this._handleVideoPacket(fp, pid, out);
 		  }
 		  continue;
 		}
@@ -1396,6 +2422,13 @@ function makeSafariVideoOnlyLoader(){
       if(state.diagEnabled && now-this._diagLastStats>5000){
         this._diagLastStats=now;
         log('SAFARI_TS_FILTER: stats inBytes='+this._diagInBytes+' outBytes='+this._outBytes+' videoPackets='+this._diagOutPackets+' sync='+!!this._syncLocked+' pmtPid='+this._pmtPid+' videoPids='+Array.from(this._videoPids).join(',')+' pcrPid='+this._pcrPid+' bufferedBytes='+this._buffer.length);
+		for (const [fpid, fx] of this._openGopFixers) {
+		  log('SAFARI_OPENGOP: stats PID=' + fpid +
+			  ' rewritten=' + fx.stats.rewritten +
+			  ' wouldRewrite=' + fx.stats.wouldRewrite +
+			  ' passthrough=' + fx.stats.passthrough +
+ 	          ' failed=' + fx.stats.failed);
+		}		
       }
       const ret=new Uint8Array(total);
       for(let i=0;i<out.length;i++) ret.set(out[i],i*188);
