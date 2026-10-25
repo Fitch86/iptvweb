@@ -83,7 +83,7 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='RC1.5';
+const REV='RC1.8';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -98,7 +98,8 @@ const state={
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
   lastVideoCodec:'', lastVideoWidth:0, lastVideoHeight:0,
-  diagTimer:0, audioSyncTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0,safariAudioRoute: 'unknown'
+  diagTimer:0, audioSyncTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0,safariAudioRoute: 'unknown',
+  cancelOpenGopConceal: null
 };
 
 const $=id=>document.getElementById(id);
@@ -982,7 +983,7 @@ function isIOSSafari(){
 // We keep PAT/PMT/PCR/video packets, rewrite PMT to remove audio ES entries,
 // and drop all other elementary-stream packets. This is intentionally a
 // browser-side custom loader experiment; the normal A/V path is untouched.
-function makeSafariVideoOnlyLoader(){
+function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
   const Base=mpegts.BaseLoader;
   if(!Base) throw new Error('mpegts.BaseLoader unavailable');
   const K=Base;
@@ -1524,6 +1525,7 @@ function makeSafariVideoOnlyLoader(){
       // ★ 新增：只启动一次的状态
       this.bootstrapped = false;         // 是否已经做过唯一一次 I→IDR 转换
       this.frameNumOffset = 0;           // 永久生效的 frame_num 常量偏移	  
+	  this.onBootstrap = (opts && opts.onBootstrap) || null;   // 新增
 	  // 启动用合成 IDR 的 PTS。
   	  this.bootstrapPts90k = null;
 
@@ -1879,6 +1881,10 @@ function makeSafariVideoOnlyLoader(){
 
 		this.frameNumOffset = originalFn;
 		this.bootstrapped = true;
+		
+		if (this.onBootstrap) {                 // 新增：通知外层"这个频道确实需要遮罩"
+          try { this.onBootstrap(originalFn); } catch (e) {}
+        }
 
 		// 记录本次 bootstrap I 图像的 PTS，供后续 leading picture 判断。
 		this.bootstrapPts90k =
@@ -2125,6 +2131,7 @@ function makeSafariVideoOnlyLoader(){
 	  this._openGopFixers = new Map();
 	  this.gopFrameNumOffset = null;
 	  this._openGopDryRun = false; 
+	  this._onOpenGopBootstrap = (config && config.onOpenGopBootstrap) || null;  // 新增
     }
     open(dataSource, range){
       this._status=1; this._dataSource=dataSource; this._range=range||{};
@@ -2398,7 +2405,15 @@ function makeSafariVideoOnlyLoader(){
 		if (isVideoPid) {
 		  let fixer = this._openGopFixers.get(pid);
 		  if (!fixer) {
-  		    fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), { dryRun: this._openGopDryRun });
+  		    //fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), { dryRun: this._openGopDryRun });
+			fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), {
+							dryRun: this._openGopDryRun,
+							onBootstrap: (originalFn) => {          // ← 新增
+								if (onOpenGopBootstrap) {              // 闭包直接拿到 makeSafariVideoOnlyLoader 的参数
+									try { onOpenGopBootstrap(pid, originalFn); } catch (e) {}
+								}
+							}
+			});
 			this._openGopFixers.set(pid, fixer);
 		  }
 
@@ -2788,7 +2803,8 @@ function scheduleSafariMseFallback(ch, url, seq, failedPlayer, details, type){
   state.safariFallbackTimer=setTimeout(()=>safariMseFallbackToVideo(ch,url,seq,failedPlayer),600);
 }
 
-function createPlayer(ch, url, seq, mode){
+function createPlayer(ch, url, seq, mode, extraOpts){
+  extraOpts = extraOpts || {};
   if(seq!==state.seq) return;
   const v=$('video');
   const iosSafari=isIOSSafari();
@@ -2803,10 +2819,13 @@ function createPlayer(ch, url, seq, mode){
   }
   const config=playerConfig();
   if(mode==='video' && iosSafari){
-    try{ config.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
-      if(mode==='video') log('SAFARI_AUDIO: video MSE path is audio-free; WebAudio MPEG Audio PES experiment is independent'); }
+	try{
+      config.customLoader = makeSafariVideoOnlyLoader(extraOpts.onOpenGopBootstrap || null);
+      log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
+      log('SAFARI_AUDIO: video MSE path is audio-free; WebAudio MPEG Audio PES experiment is independent');
+    }
     catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
-  }
+  } 
   log('CONFIG '+JSON.stringify(config));
   log('MediaDataSource '+JSON.stringify(ds));
   if(iosSafari) log('iOS Safari path: ManagedMediaSource + isLive=true');
@@ -2853,19 +2872,6 @@ function createPlayer(ch, url, seq, mode){
   });
   p.attachMediaElement(v);
   p.load();
-//  const start=()=>{
-//    if(seq!==state.seq || state.playIssuedAt) return;
-//    state.startTimer=0;
-//    state.playIssuedAt=performance.now();
-//    log('EXPLICIT play() readyState='+v.readyState+' bufferAhead='+bufferAhead(v).toFixed(3)+' (no buffer gate)');
-//    try{
-//      const q=p.play();
-//      if(q&&q.then) q.then(()=>log('player.play resolved')).catch(e=>log('player.play rejected '+e.name+': '+e.message));
-//    }catch(e){ log('player.play threw '+e.name+': '+e.message); }
-//  };
-//  if(v.readyState>=1) start();
-//  else v.addEventListener('loadedmetadata', start, {once:true});
-//}
   const start=()=>{
     if(seq!==state.seq || state.playIssuedAt) return;
     state.startTimer=0;
@@ -2898,12 +2904,6 @@ function createPlayer(ch, url, seq, mode){
         if(q&&q.then) q.then(()=>log('player.play resolved')).catch(e=>log('player.play rejected '+e.name+': '+e.message));
       }catch(e){ log('player.play threw '+e.name+': '+e.message); }
     };
-    //const check=()=>{
-    //  if(seq!==state.seq){ cleanup(); return; }
-    //  const ahead=bufferAhead(v);
-    //  if(ahead>=MIN_AHEAD){ fire('buffer>='+MIN_AHEAD+'s('+ahead.toFixed(3)+')'); return; }
-    //  if(performance.now()-t0>MAX_WAIT_MS){ fire('timeout(ahead='+ahead.toFixed(3)+')'); return; }
-    //};
 	let lastGateDiag = performance.now();
 
 	const rangesText = () => {
@@ -2998,6 +2998,13 @@ function play(ch){
   state.safariAudioOnly=false;
   state.current=ch; state.active=ch.group; renderGroups();
   stopPlayer();
+
+  // 新频道开始前，先把上一个频道可能残留的遮罩/定时器清掉
+  if (state.cancelOpenGopConceal) {
+    try { state.cancelOpenGopConceal(); } catch(e){}
+    state.cancelOpenGopConceal = null;
+  }
+
   const v=$('video');
   v.controls=true;
   installGestureHooks();
@@ -3008,81 +3015,67 @@ function play(ch){
   $('now').firstChild.textContent=ch.name;
   const url=streamUrl(ch);
   log('PLAY name='+ch.name+' url='+url+' seq='+seq+' ua='+navigator.userAgent);
-  //state.avMode=isIOSSafari() ? 'video' : avMode();
-  //log('PLAY '+ch.name);
-  //log('URL '+url);
-  //log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
-  // Start the WebAudio MPEG Audio PES experiment from the channel-selection gesture.
-  // It is independent of the video MSE path and is intentionally best-effort.
-  //if(isIOSSafari()) startWebAudioMpeg(ch, seq);
 
   if (isIOSSafari()) {
-    // Safari 上如果要异步等待 probe，AudioContext 最好仍在频道点击手势中
-    // 同步创建/调用 resume；startWebAudioMpeg 应复用这个 context。
     prepareSafariAudioContextFromGesture();
 
-	detectSafariAudioRoute(ch, seq).then(route => {
-	  if (!route || seq !== state.seq) return;
+    detectSafariAudioRoute(ch, seq).then(route => {
+      if (!route || seq !== state.seq) return;
 
-	  if (route.kind === 'mpeg-audio') {
-		state.safariAudioRoute = 'mpeg-audio';
+      if (route.kind === 'mpeg-audio') {
+        state.safariAudioRoute = 'mpeg-audio';
         state.safariAudioOnly = route.hasVideo === false;
-		state.avMode = state.safariAudioOnly ? 'audio-only' : 'video';
+        state.avMode = state.safariAudioOnly ? 'audio-only' : 'video';
 
-		log('SAFARI route=video-only + MPEG Audio stream_type=' +
-			route.streamType);
+        log('SAFARI route=video-only + MPEG Audio stream_type=' + route.streamType);
 
-		startWebAudioMpeg(ch, seq);
-        if(state.safariAudioOnly){
-          const v=$('video');
-          v.controls=false;
-          try{ v.pause(); v.removeAttribute('src'); v.load(); }catch(e){}
+        startWebAudioMpeg(ch, seq);
+        if (state.safariAudioOnly) {
+          const v2=$('video');
+          v2.controls=false;
+          try{ v2.pause(); v2.removeAttribute('src'); v2.load(); }catch(e){}
           setStatus('Safari 广播音频 · MPEG Audio');
           return;
         }
-		createPlayer(ch, url, seq, 'video');
-	  } else {
-		state.safariAudioRoute = 'av-mse';
-		state.avMode = 'av';
 
-		log('SAFARI route=A/V MSE stream_type=' +
-			(route.streamType == null ? 'unknown' : route.streamType));
-
-		discardPreparedSafariAudioContext();
-		createPlayer(ch, url, seq, 'av');
-	  }
-	}).catch(e => {
-	  if (seq !== state.seq) return;
-
-	  state.safariAudioRoute = 'unknown';
-	  state.avMode = 'av';
-
-	  log('SAFARI route probe failed; keep A/V: ' + e.message);
-	  discardPreparedSafariAudioContext();
-	  createPlayer(ch, url, seq, 'av');
-	});
+        // 关键改动：不再无条件 arm，而是把回调传进去，
+        // 只有 OpenGopFixer 真正做了 bootstrap 才会触发遮罩
+        createPlayer(ch, url, seq, 'video', {
+          onOpenGopBootstrap: function (pid) {
+            if (seq !== state.seq) return;      // 频道已切换，忽略过期回调
+            log('OpenGOP bootstrap detected on PID=' + pid + ', arming recovery mask');
+            if (state.cancelOpenGopConceal) {
+              state.cancelOpenGopConceal();
+              state.cancelOpenGopConceal = null;
+            }
+            state.cancelOpenGopConceal = armOpenGopStartupConceal(
+              $('video'),
+              function (msg) { diagnosticLog('[' + ch.name + ']' + ' ' + msg); },
+              1600
+            );
+          }
+        });
+      } else {
+        state.safariAudioRoute = 'av-mse';
+        state.avMode = 'av';
+        log('SAFARI route=A/V MSE stream_type=' + (route.streamType == null ? 'unknown' : route.streamType));
+        discardPreparedSafariAudioContext();
+        createPlayer(ch, url, seq, 'av');
+      }
+    }).catch(e => {
+      if (seq !== state.seq) return;
+      state.safariAudioRoute = 'unknown';
+      state.avMode = 'av';
+      log('SAFARI route probe failed; keep A/V: ' + e.message);
+      discardPreparedSafariAudioContext();
+      createPlayer(ch, url, seq, 'av');
+    });
 
     return;
   }
 
   // 非 iOS Safari 保持原有逻辑
   state.avMode = avMode();
-  //createPlayer(ch, url, seq, state.avMode);
-  
-  //const iosSafari = isIOSSafari();
-  //const useAvMse = iosSafari && safariUsesAvMse(ch);
-  //const useMp2Pcm = iosSafari && !useAvMse;
-
-  //state.avMode = iosSafari
-  //  ? (useAvMse ? 'av' : 'video')
-  //  : avMode();
-
-  //log('Safari route=' + (useAvMse ? 'AV-MSE (AAC)' :
-  //  useMp2Pcm ? 'video-only + MP2PCM' : state.avMode));
-
-  // 只有走 MP2PCM 的频道才启动独立 MPEG 音频解码
-  //if (useMp2Pcm) startWebAudioMpeg(ch, seq);  
-
   if(!window.mpegts || !mpegts.isSupported()){
     setStatus('浏览器不支持 MSE MPEG-TS / mpegts.js 未安装');
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);
@@ -3095,6 +3088,15 @@ function stopPlayback(){
   state.stopping=true;
   stopWebAudio(); state.userPaused=false;
   log('STOP: 用户请求停止并断开流');
+
+  if (state.cancelOpenGopConceal) {
+    try { state.cancelOpenGopConceal(); }
+    catch (e) { log('STOP cancelOpenGopConceal error ' + e.message); }
+    state.cancelOpenGopConceal = null;
+  }
+  // 防御性兜底：万一 cancel 函数本身没把遮罩隐藏干净，这里强制隐藏一次
+  try { hideRecoveryMask(); } catch (e) {}
+
   stopDiagTimers();
   const p=state.player, v=$('video');
   try{ v.pause(); }catch(e){}
@@ -3106,7 +3108,209 @@ function stopPlayback(){
   setStatus('已停止并断开');
   log('STOP: player destroyed / stream disconnected');
   state.stopping=false;
-  
+}
+
+function armOpenGopStartupConceal(video, logFn, concealMs) {
+  if (!video) {
+    return function () {};
+  }
+
+  const log = logFn || function () {};
+  const targetMs =
+    Number.isFinite(concealMs) ? concealMs : 1600;
+
+  const host = video.parentElement;
+
+  const oldOpacity = video.style.opacity;
+  const oldTransition = video.style.transition;
+  const oldHostBackground =
+    host ? host.style.backgroundColor : '';
+
+  let firstMediaTime = null;
+  let callbackId = null;
+  let hardTimer = null;
+  let fadeTimer = null;
+  let timeUpdateHandler = null;
+  let finished = false;
+
+  if (host) {
+    host.style.backgroundColor = '#000';
+  }
+
+  /*
+   * 不能用 display:none 或 visibility:hidden。
+   * Safari 可能停止或降低视频解码频率。
+   * opacity:0 仍然允许正常解码和 requestVideoFrameCallback。
+   */
+  video.style.transition = 'none';
+  video.style.opacity = '0';
+
+  function restoreStyles() {
+    video.style.transition = oldTransition;
+    video.style.opacity = oldOpacity;
+
+    if (host) {
+      host.style.backgroundColor = oldHostBackground;
+    }
+  }
+
+  function reveal(reason, mediaTime) {
+    if (finished) return;
+    finished = true;
+
+    if (
+      callbackId != null &&
+      typeof video.cancelVideoFrameCallback === 'function'
+    ) {
+      try {
+        video.cancelVideoFrameCallback(callbackId);
+      } catch (_) {
+        // 忽略
+      }
+    }
+
+    callbackId = null;
+
+    if (timeUpdateHandler) {
+      video.removeEventListener(
+        'timeupdate',
+        timeUpdateHandler
+      );
+      timeUpdateHandler = null;
+    }
+
+    if (hardTimer != null) {
+      clearTimeout(hardTimer);
+      hardTimer = null;
+    }
+
+    video.style.transition = 'opacity 120ms linear';
+    video.style.opacity = '1';
+
+    log(
+      'OPEN_GOP_CONCEAL: reveal reason=' + reason +
+      ' mediaTime=' +
+      (
+        Number.isFinite(mediaTime)
+          ? mediaTime.toFixed(3)
+          : 'n/a'
+      ) +
+      ' targetMs=' + targetMs
+    );
+
+    fadeTimer = setTimeout(function () {
+      fadeTimer = null;
+      restoreStyles();
+    }, 160);
+  }
+
+  function onVideoFrame(now, metadata) {
+    if (finished) return;
+
+    const mediaTime =
+      metadata && Number.isFinite(metadata.mediaTime)
+        ? metadata.mediaTime
+        : video.currentTime;
+
+    if (firstMediaTime == null) {
+      firstMediaTime = mediaTime;
+
+      log(
+        'OPEN_GOP_CONCEAL: first hidden frame mediaTime=' +
+        mediaTime.toFixed(3) +
+        ' concealMs=' + targetMs
+      );
+    }
+
+    const decodedSpanMs =
+      (mediaTime - firstMediaTime) * 1000;
+
+    if (decodedSpanMs >= targetMs) {
+      reveal('decoded-media-span', mediaTime);
+      return;
+    }
+
+    callbackId =
+      video.requestVideoFrameCallback(onVideoFrame);
+  }
+
+  if (
+    typeof video.requestVideoFrameCallback === 'function'
+  ) {
+    callbackId =
+      video.requestVideoFrameCallback(onVideoFrame);
+  } else {
+    /*
+     * 旧 Safari 的后备路径。
+     */
+    timeUpdateHandler = function () {
+      if (finished) return;
+
+      const mediaTime = video.currentTime;
+
+      if (firstMediaTime == null) {
+        firstMediaTime = mediaTime;
+      }
+
+      if (
+        (mediaTime - firstMediaTime) * 1000 >= targetMs
+      ) {
+        reveal('timeupdate-span', mediaTime);
+      }
+    };
+
+    video.addEventListener(
+      'timeupdate',
+      timeUpdateHandler
+    );
+  }
+
+  /*
+   * 防止解码器异常时视频永久不可见。
+   * 正常情况下会先由 decoded-media-span 揭开。
+   */
+  hardTimer = setTimeout(function () {
+    reveal('safety-timeout', video.currentTime);
+  }, 8000);
+
+  /*
+   * 在 STOP 或切换频道时调用这个返回函数。
+   */
+  return function cancelOpenGopStartupConceal() {
+    if (
+      callbackId != null &&
+      typeof video.cancelVideoFrameCallback === 'function'
+    ) {
+      try {
+        video.cancelVideoFrameCallback(callbackId);
+      } catch (_) {
+        // 忽略
+      }
+    }
+
+    callbackId = null;
+
+    if (timeUpdateHandler) {
+      video.removeEventListener(
+        'timeupdate',
+        timeUpdateHandler
+      );
+      timeUpdateHandler = null;
+    }
+
+    if (hardTimer != null) {
+      clearTimeout(hardTimer);
+      hardTimer = null;
+    }
+
+    if (fadeTimer != null) {
+      clearTimeout(fadeTimer);
+      fadeTimer = null;
+    }
+
+    finished = true;
+    restoreStyles();
+  };
 }
 function jumpToLatest(){
   const v=$('video');
