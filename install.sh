@@ -43,7 +43,7 @@ cp -f "$FILES/www/luci-static/resources/iptvweb/mpg123-decoder.min.js" /www/luci
 cp -f "$FILES/www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js" /www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js
 
 # Keep a working local mpegts.js across reinstalls. Only replace with the
-# stub if no real copy exists yet; install then tries to download 1.8.0.
+# stub if no real copy exists yet; install then tries to download 1.8.2.
 if [ ! -s /www/luci-static/resources/iptvweb/mpegts.min.js ] || \
    [ "$(wc -c < /www/luci-static/resources/iptvweb/mpegts.min.js)" -lt 100000 ]; then
   cp -f "$FILES/www/luci-static/resources/iptvweb/mpegts.min.js" /www/luci-static/resources/iptvweb/mpegts.min.js
@@ -117,10 +117,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rc1.5."
+echo "Installed 0.2.2-rc2.0."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "RC1.5: restores Chrome native controls, improves Safari video PID filtering, and validates udpxy host:port."
-echo "      Chrome video-surface clicks now cancel the browser's competing native default action; compact diagnostics are opt-in and off by default; experiment controls and TS capture entry points remain removed; mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
+echo "RC2.0: preserves the Safari-compatible playback path from rc1-fix1, removes production diagnostic controls, and unifies version identifiers."
+echo "      Production player UI has no diagnostic/log controls; mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
