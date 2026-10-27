@@ -3,12 +3,11 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV RC1.4</title>
+<title>OpenWrt IPTV RC2.0</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
 header{min-height:50px;padding:6px 14px;background:#181818;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid #292929}
-#diagPanel{display:none;position:fixed;z-index:20;right:8px;bottom:8px;width:min(720px,calc(100vw - 16px));max-height:42vh;background:#101010;border:1px solid #555;border-radius:8px;padding:8px;box-shadow:0 4px 24px #000b}#diagPanel.open{display:flex;flex-direction:column;gap:6px}#diagPanel textarea{width:100%;height:30vh;min-height:120px;resize:vertical;background:#080808;color:#ddd;border:1px solid #444;font:11px/1.35 ui-monospace,monospace}#diagPanel .diagbar{display:flex;flex-wrap:wrap;gap:6px}#diagPanel .diagbar button{padding:5px 8px}
 header h1{font-size:16px;margin:0}
 .small{color:#999;font-size:12px}
 button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px;cursor:pointer}
@@ -38,18 +37,13 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">RC1.5 · 点击控制修正与精简诊断</span></h1>
+  <h1>OpenWrt IPTV <span class="small">RC2.0</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
   <button id="stopBtn" class="danger">⏹ 停止并断开</button>
-  <button id="diagToggle" type="button">诊断日志：关</button>
   <span id="status" class="small"></span>
 </header>
-<section id="diagPanel" aria-label="诊断日志">
-  <div class="diagbar"><strong style="margin-right:auto">精简诊断日志（默认关闭）</strong><button id="diagCopy" type="button">复制日志</button><button id="diagClear" type="button">清空</button><button id="diagHide" type="button">关闭</button></div>
-  <textarea id="diagOutput" readonly spellcheck="false" aria-label="诊断日志内容" placeholder="开启诊断日志后，重新选择有问题的频道以收集日志。"></textarea>
-</section>
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
   <main>
@@ -68,24 +62,9 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
 <script src="/luci-static/resources/iptvweb/mpg123-decoder.min.js" charset="UTF-8"></script>
 <script>
-window.addEventListener('error', function(e){
-  try{
-    var el=document.getElementById('status');
-    if(el) el.textContent='JS错误: '+(e.message||e);
-    var logEl=document.getElementById('log');
-    if(logEl) logEl.textContent += '\n[JS error] '+(e.message||e)+' @'+(e.filename||'')+':'+(e.lineno||'');
-  }catch(_){}
-});
-window.addEventListener('unhandledrejection', function(e){
-  try{
-    var el=document.getElementById('status');
-    if(el) el.textContent='Promise错误: '+(e.reason && e.reason.message ? e.reason.message : e.reason);
-  }catch(_){}
-});
-
-const REV='RC1.8';
+const REV='RC2.0';
 const state={
-  items:[], groups:[], active:'', current:null, player:null, seq:0, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
+  items:[], groups:[], active:'', current:null, player:null, seq:0, diagEnabled:false, diagConsoleHooked:false, lastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
@@ -710,43 +689,8 @@ function renderGroups(){
 }
 
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
-function renderDiag(){
-  const out=$('diagOutput'); if(!out) return;
-  out.value=state.log.join('\n'); out.scrollTop=out.scrollHeight;
-}
-function log(msg){
-  if(!state.diagEnabled) return;
-  const ch=state.current&&state.current.name?' ['+state.current.name+']':'';
-  state.log.push('+'+rel()+'s'+ch+' '+String(msg));
-  if(state.log.length>800) state.log.splice(0,state.log.length-800);
-  renderDiag();
-}
-function videoSnapshot(reason){
-  const v=$('video'); let ranges=[];
-  try{for(let i=0;i<v.buffered.length;i++) ranges.push([+v.buffered.start(i).toFixed(3),+v.buffered.end(i).toFixed(3)]);}catch(_){}
-  log('VIDEO '+reason+' '+JSON.stringify({paused:v.paused,ended:v.ended,readyState:v.readyState,networkState:v.networkState,currentTime:+(v.currentTime||0).toFixed(3),duration:Number.isFinite(v.duration)?+v.duration.toFixed(3):String(v.duration),videoWidth:v.videoWidth,videoHeight:v.videoHeight,buffered:ranges,error:v.error?{code:v.error.code,message:v.error.message}:null,player:!!state.player,route:state.safariAudioRoute,avMode:state.avMode}));
-}
-function installDiagConsoleHook(){
-  if(state.diagConsoleHooked) return; state.diagConsoleHooked=true;
-  ['log','info','warn','error'].forEach(method=>{
-    const original=console[method]; if(typeof original!=='function') return;
-    console[method]=function(...args){
-      original.apply(console,args); if(!state.diagEnabled) return;
-      const line=args.map(x=>typeof x==='string'?x:(()=>{try{return JSON.stringify(x)}catch(_){return String(x)}})()).join(' ');
-      if(/mpegts|TSDemuxer|MSEController|MP4Remuxer|TransmuxingController|MediaSource|SourceBuffer/i.test(line)) log('CONSOLE.'+method+' '+line);
-    };
-  });
-}
-function setDiagEnabled(on){
-  state.diagEnabled=!!on; $('diagPanel').classList.toggle('open',state.diagEnabled);
-  $('diagToggle').textContent='诊断日志：'+(state.diagEnabled?'开':'关');
-  if(state.diagEnabled){
-    state.log=[]; installDiagConsoleHook();
-    log('DIAG START '+new Date().toISOString()+' ua='+navigator.userAgent);
-    log('CAPS '+JSON.stringify({MediaSource:!!window.MediaSource,ManagedMediaSource:!!window.ManagedMediaSource,requestVideoFrameCallback:'requestVideoFrameCallback' in $('video'),mpegts:!!window.mpegts,mpegtsSupported:!!(window.mpegts&&mpegts.isSupported&&mpegts.isSupported())}));
-    videoSnapshot('diagnostic enabled');
-  }
-}
+function log(_msg){}
+function videoSnapshot(_reason){}
 function setStatus(t){ $('status').textContent=t||''; }
 function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
 //function bufferAhead(v){
@@ -862,8 +806,8 @@ function installGestureHooks(){
     event.stopPropagation();
     if(typeof event.stopImmediatePropagation==='function') event.stopImmediatePropagation();
     const now=performance.now();
-    if(now-state.diagLastSurfaceToggleAt<350) return;
-    state.diagLastSurfaceToggleAt=now;
+    if(now-state.lastSurfaceToggleAt<350) return;
+    state.lastSurfaceToggleAt=now;
     log('VIDEO surface click-captured offset='+event.offsetX+','+event.offsetY+' defaultPrevented='+event.defaultPrevented);
     toggleVideoPlayback();
   },{capture:true});
@@ -3367,10 +3311,6 @@ $('reinit').onclick=reinit;
 $('stopBtn').onclick=stopPlayback;
 $('stopBtn2').onclick=stopPlayback;
 $('recoverBtn').onclick=toggleVideoPlayback;
-$('diagToggle').onclick=()=>setDiagEnabled(!state.diagEnabled);
-$('diagHide').onclick=()=>setDiagEnabled(false);
-$('diagClear').onclick=()=>{state.log=[];renderDiag();};
-$('diagCopy').onclick=async()=>{const text=state.log.join('\n');try{await navigator.clipboard.writeText(text);$('diagCopy').textContent='已复制';setTimeout(()=>$('diagCopy').textContent='复制日志',1200);}catch(e){const out=$('diagOutput');out.focus();out.select();let ok=false;try{ok=document.execCommand('copy');}catch(_){}$('diagCopy').textContent=ok?'已复制，请检查':'已选中日志';setTimeout(()=>$('diagCopy').textContent='复制日志',1500);}};
 
 
 
