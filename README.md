@@ -1,72 +1,97 @@
-# IPTV Web for OpenWrt — RC1.5
+# IPTV Web for OpenWrt — RC2.0
 
-轻量级 OpenWrt LuCI IPTV 网页播放器。通过 M3U 读取频道列表，并使用路由器上的 udpxy HTTP 转发组播 MPEG-TS；浏览器端使用 mpegts.js / Media Source Extensions 播放视频。
+轻量级 OpenWrt LuCI IPTV 网页播放器。通过 M3U 频道列表和路由器上的 udpxy 接收组播 MPEG-TS，并在浏览器中播放。
 
-> **RC1.5 是测试候选版，不代表所有设备、浏览器和频道组合均已验证。** 当前基线来自仓库 `main` 的 rev4.25。此分支主要清理诊断界面和实验入口，并保留当前 Safari 音轨分流及播放实现。
+> **版本：RC2.0（包版本 `0.2.2-rc2.0`）**  
+> RC2.0 基于 `rc1-fix1` 分支整理发布，保留该分支已经调整的 iOS/iPadOS Safari 播放路径和桌面浏览器交互修复。正式界面不显示诊断日志面板、日志复制/清空按钮或实验入口。
 
 ## 功能
 
-- 在 LuCI 中配置 M3U 播放列表地址。
-- 按频道分组显示列表，支持刷新、重新初始化、跳到直播最新帧和停止断流。
-- 通过本机 CGI 将 `/udp/组播地址:端口` 转为浏览器可读取的 HTTP MPEG-TS 流。
-- 普通桌面浏览器使用原有 mpegts.js A/V 播放路径。
-- iOS/iPadOS Safari 根据 PMT 中的音轨类型选择播放路径：
-  - MPEG-1/2 Audio（stream_type `0x03/0x04`）：视频使用无音轨 MSE 路径，音频由本地 mpg123-decoder 解码为 PCM，再由 Web Audio 连续播放。
-  - AAC（常见 stream_type `0x0F/0x11`）或探测结果未知：保留原生 A/V MSE 路径，不强制切换为 Video-only。
-- MP2PCM 会把解码采样率转换到 AudioContext 的输出采样率，避免采样率不一致时出现音频变慢、音调偏低的问题。
-- 播放器资源安装到路由器本地；正常播放不依赖浏览器运行时访问 CDN。
-- 安装时保留现有 `/etc/config/iptvweb`，避免覆盖用户已配置的 M3U 地址。
+- 通过 LuCI 配置 M3U 播放列表 URL、udpxy 地址、缓存文件和缓存有效期。
+- 自动读取并解析 M3U，按频道分组展示频道名称和台标。
+- 支持刷新频道列表、重新初始化当前频道、跳到当前缓冲区的最新位置，以及停止并断开当前流。
+- 通过本机 CGI 将 udpxy 的组播 HTTP 流转发给浏览器。
+- 桌面浏览器保留 mpegts.js 的常规音视频播放路径。
+- iOS/iPadOS Safari 根据探测到的音轨类型选择兼容路径：
+  - MPEG-1/2 Audio（PMT stream type `0x03/0x04`）：视频走无音轨 MSE 路径；音频由本地 `mpg123-decoder` 解码为 PCM，再通过 Web Audio 播放。
+  - AAC（常见 stream type `0x0F/0x11`）或无法确定音轨类型时，保留常规 A/V MSE 路径，不强制切换到 video-only。
+- MP2PCM 根据 AudioContext 的输出采样率进行采样率转换，避免输入与输出采样率不一致时出现音频速度或音调异常。
+- 播放器运行时使用路由器本地的 JavaScript 资源，不需要浏览器播放时访问 CDN。
+- 安装脚本保留已有的 `/etc/config/iptvweb`，升级时不会覆盖已保存的 M3U 和 udpxy 配置。
 
-## 当前 Safari 路径说明
+## 版本与文件
 
-Safari 路径的关键点不是对所有频道一律禁用 MSE 音轨，而是先判断音轨类型。AAC/未知音轨继续使用原生 A/V；只有确认 MPEG Audio 后，才启用独立 MP2PCM。这样可以保留 HEVC + AAC 4K 频道的原生音视频链路，同时为普通 MPEG Audio 频道提供独立音频解码。
+版本标识统一为：
 
-音轨探测接口 `/cgi-bin/iptvweb-audio-probe` 是运行时分流所需的功能组件，**不是可删除的调试探针**。RC1.5 在 RC1.2 的基础上恢复桌面 Chrome 原生视频工具条，Safari 视频过滤器保留所有已识别的视频 PID，并增加 AVS3 stream_type 识别；LuCI 的 udpxy address 字段改为校验完整 host:port，修复 `192.168.1.1:4022` 被 `host` 类型校验拒绝的问题。Safari 普通频道偶发有声无画面仍需在目标设备复测，不能视为已完全解决。RC1.5 重新加入默认关闭的精简诊断面板，可手动开启并复制日志；日志包含 Safari 视频状态、首帧、mpegts.js 关键控制台消息和 TS 过滤统计。诊断关闭时不收集这些日志。能力探测按钮、TS 抓包入口及实验开关仍已移除，但保留正常播放所需的音轨识别和音频解码组件。
-
-## 历史脉络
-
-| 版本阶段 | 主要变化 |
+| 位置 | 版本标识 |
 | --- | --- |
-| rev4.2–rev4.6 | 修复频道列表脚本运行时异常、播放时未定义函数调用和配置覆盖问题；避免播放期间额外抓取同一条组播流。 |
-| rev4.7 | 已知可正常播放浙江卫视 4K 的 A/V 基线：HEVC Main10 3840×2160@50，AAC-LC 48 kHz 双声道；播放参数使用 `isLive=false`、384 KiB stash，默认关闭 `fixAudioTimestampGap`。 |
-| rev4.8–rev4.14 | 探索 iOS Safari ManagedMediaSource、实时流参数及 A/V 失败后的兼容路径。不同版本的实验结果不应混为同一个基线。 |
-| rev4.16.3–rev4.21 | 以 Safari Video-only 视频路径为基础，逐步验证 MPEG Audio PES 提取和独立音频解码；修复 OpenWrt Lua 5.1 兼容性及连续音频问题。 |
-| rev4.23.1 | 将独立 PCM 播放改为 AudioWorklet / ScriptProcessor 环形缓冲方案，改善连续播放与队列控制。 |
-| rev4.25 | 修复 MP2PCM 输入采样率与 AudioContext 采样率不一致导致的变慢、变调问题；当前代码进一步按 PMT 音轨类型分流，AAC/未知音轨保留 A/V MSE。 |
-| RC1 | 保留当前播放实现，清理诊断界面和手动实验入口。 |
-| RC1.1 | 修复无视频的 MPEG Audio 广播频道音频启动；视频 TS 同步改为多包校验；视频画面点击可暂停/继续。4K 和各类广播音频仍需设备复测。 |
+| 页面标题与播放器页头 | `RC2.0` |
+| 页面内部版本常量 | `RC2.0` |
+| OpenWrt 包版本 | `0.2.2-rc2.0` |
+| 安装脚本输出 | `0.2.2-rc2.0` |
 
-## 安装
+主要目录：
 
-推荐在 OpenWrt 路由器上以 root 执行仓库中的安装脚本：
+- `package/luci-app-iptvweb/Makefile`：OpenWrt 软件包定义。
+- `package/luci-app-iptvweb/files/www/iptv/index.html`：网页播放器。
+- `package/luci-app-iptvweb/files/www/cgi-bin/`：M3U、MPEG-TS 转发和 Safari 音轨探测/音频处理 CGI。
+- `package/luci-app-iptvweb/files/www/luci-static/resources/iptvweb/`：播放器依赖的本地 JavaScript 资源及 Web Audio worklet。
+- `package/luci-app-iptvweb/files/etc/uci-defaults/99-iptvweb`：首次启动时补齐本地播放资源。
+- `install.sh`：在已运行的 OpenWrt 系统上安装或升级文件。
+
+## 环境要求
+
+- OpenWrt / LuCI。
+- `uhttpd`、`luci-base` 和 Lua 运行时。
+- 已配置并可访问的 udpxy 服务，用于把组播 MPEG-TS 转成 HTTP 流。
+- 路由器能在安装或首次启动时获取播放器依赖；如果设备无法访问 CDN，应确保对应的完整依赖文件已放在本地资源目录中。
+
+安装脚本使用 mpegts.js 1.8.2 和 mpg123-decoder 1.0.3。它会优先尝试从 jsDelivr 下载，失败时再尝试 unpkg；若下载失败且路由器上已有有效版本，则保留现有文件。
+
+## 安装或升级
+
+在仓库根目录执行：
 
 ```sh
 sh install.sh
 ```
 
-脚本会安装播放器、CGI 和本地音频组件，并尝试下载 mpegts.js 1.8.2 与 mpg123-decoder 1.0.3。首次安装时路由器需要能够访问 jsDelivr 或 unpkg；若下载失败，请在路由器恢复网络访问后重新运行安装脚本。
+脚本需要以 root 身份运行。它会检查 Lua 运行时、安装网页播放器与 CGI、准备本地依赖，并重启 rpcd/uhttpd。已有的 `/etc/config/iptvweb` 会被保留。
 
-安装后打开：
+安装完成后访问：
 
-```
+```text
 http://192.168.1.1/iptv/
 ```
 
-在 LuCI 的 **Services → IPTV Web** 中配置 M3U 地址。升级后若页面仍显示旧版，请在浏览器中强制刷新（桌面浏览器可使用 Ctrl+F5）。
+在 LuCI 中进入 **Services → IPTV Web**，设置：
 
-## RC1.5 测试建议
+- **M3U playlist URL**：频道列表地址。
+- **udpxy address**：udpxy 的 `主机或 IP:端口`，例如 `192.168.1.1:4022`。
+- **M3U cache TTL / cache file**：频道列表缓存设置。
 
-1. **iOS/iPadOS Safari：浙江卫视 4K** — 检查画面、AAC 声音和连续播放是否正常。
-2. **iOS/iPadOS Safari：CCTV1 等 MPEG Audio 普通频道** — 检查是否有声、音调和语速是否正常，以及长时间播放是否中断。
-3. **桌面 Chrome/Edge、Firefox** — 检查普通频道和 4K 频道的基本播放。
-4. 切换频道、停止播放、刷新页面，确认流连接会正确关闭且频道列表仍可用。
-5. 检查升级安装是否保留原有 M3U 配置。
+如果升级后仍看到旧页面，请在浏览器中强制刷新页面，或关闭旧页面后重新打开。
 
-RC1.5 页面默认关闭诊断日志。视频画面点击改为捕获阶段处理并取消浏览器默认动作，避免 Chrome 原生视频点击动作在自定义暂停/播放后再次反向切换。排查 Safari 无画面时，先点页面顶部“诊断日志：关”开启，再重新选择故障频道，等待约 10–20 秒后点“复制日志”，将日志发回。日志包含 UA、MSE/解码器关键消息、视频事件/尺寸/缓冲区、TS 同步和 PID 过滤统计；不会抓取或保存原始视频流。
+## 播放器操作
 
-## 项目结构
+- **刷新**：重新读取 M3U 频道列表。
+- **跳到最新帧**：跳到当前已缓冲区间的末尾附近，适用于直播缓冲落后时。
+- **重新初始化**：重新创建当前频道的播放器与流连接。
+- **停止并断开**：停止播放并关闭当前流。
+- **播放 / 恢复**：在视频区域下方使用该按钮恢复或暂停播放；支持浏览器原生视频控件的设备仍可使用原生控件。
 
-- `package/luci-app-iptvweb/`：LuCI/OpenWrt 包定义和运行文件。
-- `package/luci-app-iptvweb/files/www/iptv/index.html`：网页播放器。
-- `package/luci-app-iptvweb/files/www/cgi-bin/`：M3U、MPEG-TS 转发与音频相关 CGI。
-- `install.sh`：面向现有 OpenWrt 系统的安装脚本。
+## 测试建议
+
+发布后建议至少检查以下场景：
+
+1. iPhone/iPad Safari：播放 MPEG Audio 普通频道，检查视频、声音、音调和长时间播放。
+2. iPhone/iPad Safari：播放 AAC 音轨频道（包括高分辨率频道，如有），确认仍使用正常 A/V 路径。
+3. 桌面 Chrome/Edge、Firefox：验证普通频道播放和视频区域点击暂停/恢复。
+4. 切换频道、刷新列表、重新初始化和停止播放，确认旧流会关闭且新频道能正常启动。
+5. 在升级前后确认原有 LuCI 配置未被覆盖。
+
+不同直播源的编码、随机访问点、时间戳和浏览器硬件解码能力存在差异；RC2.0 保留当前分流与兼容处理，不承诺每个频道在所有设备上均可播放。
+
+## 许可
+
+本项目使用 MIT License。详情请参阅仓库中的 `LICENSE` 文件。
