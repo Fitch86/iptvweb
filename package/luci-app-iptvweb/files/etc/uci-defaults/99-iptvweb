@@ -29,7 +29,7 @@ if [ "$fetch_ok" = 1 ] && [ -s "$TMP" ] && [ "$(wc -c < "$TMP")" -gt 100000 ] &&
     chmod 0644 "$TARGET"
 else
     rm -f "$TMP"
-    echo "iptvweb: WARNING: could not fetch mpegts.js 1.8.0; run install.sh again when the router has Internet access." >&2
+    echo "iptvweb: WARNING: could not fetch mpegts.js 1.8.2; run install.sh again when the router has Internet access." >&2
 fi
 mkdir -p /tmp
 # rev4.19: Fetch the local mpg123-decoder WASM bundle. Runtime playback is
