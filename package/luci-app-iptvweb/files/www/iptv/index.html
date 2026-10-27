@@ -3,11 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV RC1</title>
+<title>OpenWrt IPTV RC1.4</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
 header{min-height:50px;padding:6px 14px;background:#181818;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid #292929}
+#diagPanel{display:none;position:fixed;z-index:20;right:8px;bottom:8px;width:min(720px,calc(100vw - 16px));max-height:42vh;background:#101010;border:1px solid #555;border-radius:8px;padding:8px;box-shadow:0 4px 24px #000b}#diagPanel.open{display:flex;flex-direction:column;gap:6px}#diagPanel textarea{width:100%;height:30vh;min-height:120px;resize:vertical;background:#080808;color:#ddd;border:1px solid #444;font:11px/1.35 ui-monospace,monospace}#diagPanel .diagbar{display:flex;flex-wrap:wrap;gap:6px}#diagPanel .diagbar button{padding:5px 8px}
 header h1{font-size:16px;margin:0}
 .small{color:#999;font-size:12px}
 button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px;cursor:pointer}
@@ -37,18 +38,23 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">RC1 · Safari 自适应音轨播放</span></h1>
+  <h1>OpenWrt IPTV <span class="small">RC1.5 · 点击控制修正与精简诊断</span></h1>
   <button id="refresh">刷新</button>
   <button id="jumpLive">跳到最新帧</button>
   <button id="reinit">重新初始化</button>
   <button id="stopBtn" class="danger">⏹ 停止并断开</button>
+  <button id="diagToggle" type="button">诊断日志：关</button>
   <span id="status" class="small"></span>
 </header>
+<section id="diagPanel" aria-label="诊断日志">
+  <div class="diagbar"><strong style="margin-right:auto">精简诊断日志（默认关闭）</strong><button id="diagCopy" type="button">复制日志</button><button id="diagClear" type="button">清空</button><button id="diagHide" type="button">关闭</button></div>
+  <textarea id="diagOutput" readonly spellcheck="false" aria-label="诊断日志内容" placeholder="开启诊断日志后，重新选择有问题的频道以收集日志。"></textarea>
+</section>
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
   <main>
     <div class="player">
-      <video id="video" controls playsinline></video>
+      <video id="video" controls playsinline preload="none" webkit-playsinline></video>
           <div style="display:flex;gap:7px;margin:7px 0 0">
         <button id="recoverBtn" type="button" style="flex:1">▶ 播放 / 恢复</button>
         <button id="stopBtn2" type="button" style="flex:1" class="danger">⏹ 停止并断开</button>
@@ -77,9 +83,9 @@ window.addEventListener('unhandledrejection', function(e){
   }catch(_){}
 });
 
-const REV='RC1';
+const REV='RC1.8';
 const state={
-  items:[], groups:[], active:'', current:null, player:null, seq:0,
+  items:[], groups:[], active:'', current:null, player:null, seq:0, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
@@ -92,7 +98,8 @@ const state={
   classificationReason:'', classificationAt:0, userPaused:false, stopping:false,
   stableTimer:0, stableSince:0, stableLogged:false,
   lastVideoCodec:'', lastVideoWidth:0, lastVideoHeight:0,
-  diagTimer:0, audioSyncTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0,safariAudioRoute: 'unknown'
+  diagTimer:0, audioSyncTimer:0, avMode:'av', caps:null, nudgedThisPlay:false, analyzeCtl:null, safariFallbackTried:false, safariFallbackTimer:0,safariAudioRoute: 'unknown',
+  cancelOpenGopConceal: null
 };
 
 const $=id=>document.getElementById(id);
@@ -274,7 +281,7 @@ async function detectSafariAudioRoute(ch, seq) {
 
     // 只有明确识别为 MPEG Audio 才走独立解码。
     if (info.pmt_found === true && (streamType === 3 || streamType === 4)) {
-      return { kind: 'mpeg-audio', streamType, info };
+      return { kind: 'mpeg-audio', streamType, hasVideo: info.has_video !== false, info };
     }
 
     // AAC、未知类型、probe 不完整都保留 A/V 音轨。
@@ -399,9 +406,9 @@ async function startWebAudioMpeg(ch, seq){
     state.webAudioState='unsupported'; state.webAudioError='local mpg123-decoder unavailable'; log('SAFARI_MP2PCM: local mpg123-decoder.min.js unavailable');  return;
   }
   try{
-    //const Ctx=window.AudioContext||window.webkitAudioContext;
-    //const ctx=new Ctx({latencyHint:'interactive'}); state.webAudioCtx=ctx;
-	let ctx=state.webAudioCtx;
+    const Ctx=window.AudioContext||window.webkitAudioContext;
+    if(!Ctx) throw new Error('AudioContext unavailable');
+    let ctx=state.webAudioCtx;
     if (!ctx || ctx.state === 'closed') {
       ctx = new Ctx({latencyHint:'interactive'});
     }
@@ -563,12 +570,13 @@ async function startWebAudioMpeg(ch, seq){
 		state.audioWorkletInFlight++;
 		const chunkId=state.audioChunks;
 		state.webAudioWorkletNode.port.postMessage({type:'pcm',id:chunkId,data:outStereo.buffer,samples:outSamples,rate:ctxRate},[outStereo.buffer]);
+        if(state.safariAudioOnly && !state.audioStarted && state.audioChunks>=8) startAudioWorkletClock(seq);
 	  }else if(state.webAudioBackend==='buffersource'){
 		state.audioScheduleQueue.push({pcm:outStereo,samples:outSamples});
 		state.audioSchedulePendingSamples+=outSamples;
 		state.audioQueuedSeconds=state.audioSchedulePendingSamples/ctxRate;
 		state.audioRingSeconds=state.audioQueuedSeconds;
-		if(!state.audioStarted && state.firstFrameAt && state.audioQueuedSeconds>=0.75) startAudioWorkletClock(seq);
+		if(!state.audioStarted && (state.safariAudioOnly || state.firstFrameAt || state.firstPlayingAt) && state.audioQueuedSeconds>=0.75) startAudioWorkletClock(seq);
 		if(state.audioStarted) scheduleBufferSourceQueue(seq);
 	  }
 	  
@@ -597,7 +605,7 @@ function startAudioWorkletClock(seq){
   if(state.webAudioBackend==='worklet' && !state.webAudioWorkletNode) return;
   if(state.webAudioBackend!=='worklet' && state.webAudioBackend!=='scriptprocessor' && state.webAudioBackend!=='buffersource') return;
   const v=$('video');
-  if(!state.firstFrameAt && !state.firstPlayingAt) return;
+  if(!state.safariAudioOnly && !state.firstFrameAt && !state.firstPlayingAt) return;
   state.audioVideoAnchor=Number(v.currentTime||0);
   const startAt=state.webAudioCtx.currentTime+state.audioStartDelay;
   state.audioStartContextTime=startAt;
@@ -702,65 +710,88 @@ function renderGroups(){
 }
 
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
-function log(msg){}
+function renderDiag(){
+  const out=$('diagOutput'); if(!out) return;
+  out.value=state.log.join('\n'); out.scrollTop=out.scrollHeight;
+}
+function log(msg){
+  if(!state.diagEnabled) return;
+  const ch=state.current&&state.current.name?' ['+state.current.name+']':'';
+  state.log.push('+'+rel()+'s'+ch+' '+String(msg));
+  if(state.log.length>800) state.log.splice(0,state.log.length-800);
+  renderDiag();
+}
+function videoSnapshot(reason){
+  const v=$('video'); let ranges=[];
+  try{for(let i=0;i<v.buffered.length;i++) ranges.push([+v.buffered.start(i).toFixed(3),+v.buffered.end(i).toFixed(3)]);}catch(_){}
+  log('VIDEO '+reason+' '+JSON.stringify({paused:v.paused,ended:v.ended,readyState:v.readyState,networkState:v.networkState,currentTime:+(v.currentTime||0).toFixed(3),duration:Number.isFinite(v.duration)?+v.duration.toFixed(3):String(v.duration),videoWidth:v.videoWidth,videoHeight:v.videoHeight,buffered:ranges,error:v.error?{code:v.error.code,message:v.error.message}:null,player:!!state.player,route:state.safariAudioRoute,avMode:state.avMode}));
+}
+function installDiagConsoleHook(){
+  if(state.diagConsoleHooked) return; state.diagConsoleHooked=true;
+  ['log','info','warn','error'].forEach(method=>{
+    const original=console[method]; if(typeof original!=='function') return;
+    console[method]=function(...args){
+      original.apply(console,args); if(!state.diagEnabled) return;
+      const line=args.map(x=>typeof x==='string'?x:(()=>{try{return JSON.stringify(x)}catch(_){return String(x)}})()).join(' ');
+      if(/mpegts|TSDemuxer|MSEController|MP4Remuxer|TransmuxingController|MediaSource|SourceBuffer/i.test(line)) log('CONSOLE.'+method+' '+line);
+    };
+  });
+}
+function setDiagEnabled(on){
+  state.diagEnabled=!!on; $('diagPanel').classList.toggle('open',state.diagEnabled);
+  $('diagToggle').textContent='诊断日志：'+(state.diagEnabled?'开':'关');
+  if(state.diagEnabled){
+    state.log=[]; installDiagConsoleHook();
+    log('DIAG START '+new Date().toISOString()+' ua='+navigator.userAgent);
+    log('CAPS '+JSON.stringify({MediaSource:!!window.MediaSource,ManagedMediaSource:!!window.ManagedMediaSource,requestVideoFrameCallback:'requestVideoFrameCallback' in $('video'),mpegts:!!window.mpegts,mpegtsSupported:!!(window.mpegts&&mpegts.isSupported&&mpegts.isSupported())}));
+    videoSnapshot('diagnostic enabled');
+  }
+}
 function setStatus(t){ $('status').textContent=t||''; }
 function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
-function rangeText(r){
-  try{
-    if(!r||!r.length) return '-';
-    const a=[];
-    for(let i=0;i<r.length;i++) a.push(r.start(i).toFixed(3)+'-'+r.end(i).toFixed(3));
-    return a.join(' | ');
-  }catch(e){ return 'ERR:'+e.message; }
-}
+//function bufferAhead(v){
+//  try{
+//    if(!v.buffered.length) return 0;
+//    const t=v.currentTime;
+//    for(let i=0;i<v.buffered.length;i++){
+//      if(t>=v.buffered.start(i)-0.05 && t<=v.buffered.end(i)+0.05) return Math.max(0, v.buffered.end(i)-t);
+//    }
+//    return 0;
+//  }catch(e){ return 0; }
+//}
 function bufferAhead(v){
   try{
-    if(!v.buffered.length) return 0;
-    const t=v.currentTime;
-    for(let i=0;i<v.buffered.length;i++){
-      if(t>=v.buffered.start(i)-0.05 && t<=v.buffered.end(i)+0.05) return Math.max(0, v.buffered.end(i)-t);
-    }
-    return 0;
-  }catch(e){ return 0; }
-}
-function chromeCounters(v){
-  const g=k=> (k in v) ? v[k] : '-';
-  return 'decV='+g('webkitVideoDecodedByteCount')+' decA='+g('webkitAudioDecodedByteCount')+' frames='+g('webkitDecodedFrameCount')+' drop='+g('webkitDroppedFrameCount');
-}
-function mseDump(){
-  try{
-    const p=state.player; if(!p) return '-';
-    const ctl=p._msectl || p._mseController || null;
-    if(!ctl) return 'no _msectl';
-    const sbs=ctl._sourceBuffers || ctl.sourceBuffers;
-    if(!sbs) return 'no sourceBuffers';
-    const parts=[];
-    const keys=(!Array.isArray(sbs) && typeof sbs==='object') ? Object.keys(sbs) : null;
-    if(keys){
-      for(const k of keys){
-        const sb=sbs[k];
-        if(!sb){ parts.push(k+':null'); continue; }
-        parts.push(k+' type='+(sb.type||'?')+' buffered='+rangeText(sb.buffered)+' updating='+!!sb.updating+' tsOffset='+Number(sb.timestampOffset||0).toFixed(4));
-      }
-      return parts.join(' || ') || 'empty';
-    }
-    return String(sbs);
-  }catch(e){ return 'ERR:'+e.message; }
-}
+    if(!v.buffered || !v.buffered.length) return 0;
 
+    const t = v.currentTime;
+    for(let i = 0; i < v.buffered.length; i++){
+      const s = v.buffered.start(i);
+      const e = v.buffered.end(i);
+      if(t >= s - 0.05 && t <= e + 0.05){
+        return Math.max(0, e - t);
+      }
+    }
+
+    // 启动时 currentTime=0，但首个缓冲区间从一个小的正时间开始。
+    // 这是启动缓冲长度的估算，不表示 currentTime 到缓冲区之间连续可播。
+    if(t <= 0.05){
+      const s = v.buffered.start(0);
+      const e = v.buffered.end(0);
+      if(s >= 0 && s <= 0.5 && e >= s){
+        return Math.max(0, e - s);
+      }
+    }
+
+    return 0;
+  }catch(e){
+    return 0;
+  }
+}
 function stopDiagTimers(){
   if(state.stuckTimer){ clearInterval(state.stuckTimer); state.stuckTimer=0; }
   if(state.timelineTimer){ clearInterval(state.timelineTimer); state.timelineTimer=0; }
   if(state.diagTimer){ clearInterval(state.diagTimer); state.diagTimer=0; }
-  if(state.audioSyncTimer){ clearInterval(state.audioSyncTimer); state.audioSyncTimer=0; }
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
-}
-function startDiagTimer(seq){
-  if(state.diagTimer) clearInterval(state.diagTimer);
-  state.diagTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.diagTimer); state.diagTimer=0; return; }
-    
-  }, 500);
 }
 function stopWebAudio(){
   if(state.audioStartTimer){ clearTimeout(state.audioStartTimer); state.audioStartTimer=0; }
@@ -796,7 +827,6 @@ function stopWebAudio(){
 
 function stopPlayer(){
   stopWebAudio();
-  if(state.analyzeCtl){ try{ state.analyzeCtl.abort(); }catch(e){} state.analyzeCtl=null; }
   if(state.startTimer){ clearTimeout(state.startTimer); state.startTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
   stopDiagTimers();
@@ -809,200 +839,114 @@ function stopPlayer(){
   }
 }
 
+function isDesktopChrome(){
+  const ua=navigator.userAgent||'';
+  return /Chrome\//.test(ua) && !/Edg\//.test(ua) && !/Android|Mobile|CrOS/i.test(ua);
+}
 function installGestureHooks(){
   if(state.gestureHooksInstalled) return;
   state.gestureHooksInstalled=true;
   const v=$('video');
-  v.addEventListener('click', ()=>gesturePlay('video-click'), {passive:true});
-  const b=$('recoverBtn');
-  if(b) b.onclick=()=>gesturePlay('recovery-button');
+  // Desktop Chrome's native video click action can race a custom toggle.
+  // Use the page's click handler there; retain native controls on other browsers.
+  // Keep native controls available on desktop Chrome (fullscreen/volume/seek).
+  v.controls=true;
+  // Let native controls work, but take ownership of clicks on the video surface.
+  // Chrome's built-in video click action can run after pointerup and undo our toggle
+  // (observed pause -> play about 300 ms later). Handle only click in capture phase
+  // and cancel the browser default for the picture area.
+  v.addEventListener('click',event=>{
+    if(event.target!==v) return;
+    if(v.controls && Number.isFinite(event.offsetY) && event.offsetY > v.clientHeight-44) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if(typeof event.stopImmediatePropagation==='function') event.stopImmediatePropagation();
+    const now=performance.now();
+    if(now-state.diagLastSurfaceToggleAt<350) return;
+    state.diagLastSurfaceToggleAt=now;
+    log('VIDEO surface click-captured offset='+event.offsetX+','+event.offsetY+' defaultPrevented='+event.defaultPrevented);
+    toggleVideoPlayback();
+  },{capture:true});
 }
-function gesturePlay(reason){
+function toggleVideoPlayback(){
   const v=$('video'), p=state.player;
-  state.userGestureCount++;
-  state.userPaused=false;
-  log('USER_GESTURE '+reason+' paused='+v.paused+' current='+v.currentTime.toFixed(3)+' readyState='+v.readyState+' bufferAhead='+bufferAhead(v).toFixed(3));
-  if(p){
-    startTimelineMicroscope(state.seq);
-    startStuckMonitor(state.seq);
-    startDiagTimer(state.seq);
-  }
-  if(!p) return;
-  try{
-    const q=p.play();
-    if(q&&q.then) q.then(()=>log('GESTURE player.play resolved')).catch(e=>log('GESTURE player.play rejected '+e.name+': '+e.message));
-  }catch(e){ log('GESTURE player.play threw '+e.name+': '+e.message); }
-}
-function recoverPlayback(reason){
-  const v=$('video'), p=state.player, now=performance.now();
-  if(!p) return;
-  if(state.recoveries>=2){ log('RECOVERY skipped limit=2 reason='+reason); return; }
-  if(now-state.lastRecoveryAt<3000){ log('RECOVERY skipped cooldown reason='+reason); return; }
-  state.lastRecoveryAt=now; state.recoveries++;
-  log('RECOVERY #'+state.recoveries+' reason='+reason+' paused='+v.paused+' current='+v.currentTime.toFixed(3)+' readyState='+v.readyState+' bufferAhead='+bufferAhead(v).toFixed(3));
-  try{
-    const q=p.play();
-    if(q&&q.then) q.then(()=>log('RECOVERY player.play resolved')).catch(e=>log('RECOVERY player.play rejected '+e.name+': '+e.message));
-  }catch(e){ log('RECOVERY player.play threw '+e.name+': '+e.message); }
-}
-function startStuckMonitor(seq){
-  if(state.stuckTimer) clearInterval(state.stuckTimer);
-  state.lastProgressWall=performance.now();
-  state.lastProgressTime=$('video').currentTime||0;
-  state.playingSince=0;
-  state.stuckTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.stuckTimer); return; }
-    const v=$('video'), now=performance.now();
-    if(v.paused||v.ended){ state.lastProgressWall=now; state.lastProgressTime=v.currentTime||0; return; }
-    const t=v.currentTime||0;
-    if(t>state.lastProgressTime+0.05){ state.lastProgressTime=t; state.lastProgressWall=now; return; }
-    if(state.playingSince && now-state.playingSince>=2500 && now-state.lastProgressWall>=2000){
-      recoverPlayback('time-not-advancing');
-      state.playingSince=now;
+  const audioOnly=state.safariAudioOnly && state.safariAudioRoute==='mpeg-audio';
+  if(audioOnly){
+    const ctx=state.webAudioCtx;
+    if(!ctx || ctx.state==='closed') return;
+    if(ctx.state==='running'){
+      state.userPaused=true;
+      try{ const q=ctx.suspend(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
+      setStatus('广播已暂停');
+    }else{
+      state.userPaused=false;
+      try{ const q=ctx.resume(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
+      setStatus('广播播放中');
     }
-  }, 500);
-}
-
-function classifyTimeline(){
-  const v=$('video'), now=performance.now(), tl=state.timeline;
-  let reason='', c='STARTING';
-  const recent=tl.filter(x=>now-x.wall<4000);
-  const decoded=state.stats && Number(state.stats.decodedFrames||0);
-  const buffered=bufferAhead(v);
-  const playing=!!state.firstPlayingAt && !v.paused && !v.ended;
-  if(state.userPaused && v.paused){ c='USER PAUSED'; reason='用户主动暂停'; state.classification=c; state.classificationReason=reason; return c; }
-  if(v.error||state.lastErrorText){ c='MEDIA ERROR'; reason=state.lastErrorText||('video.error code='+v.error.code); }
-  else if(state.audioDecodeError){ c='AUDIO DECODE ERROR'; reason='mpegts audio decode failure'; }
-  else if(playing && recent.length>=2){
-    const a=recent[0], b=recent[recent.length-1];
-    const dt=(b.wall-a.wall)/1000, ct=b.currentTime-a.currentTime, pf=b.presentedFrames-a.presentedFrames;
-    if(dt>=1.5 && ct<0.08){
-      if(pf<=0 && decoded>10){ c='DECODER/TIMELINE STUCK'; reason='currentTime 与 presentedFrames 均不推进'; }
-      else { c='TIMELINE STUCK'; reason='有 buffer，但 currentTime 不推进'; }
-    } else if(ct>0.08 || pf>0){ c='PLAYBACK OK'; reason='时间线持续推进'; }
+    return;
   }
-  if(c==='STARTING' && recent.length>=2){
-    const a=recent[0], b=recent[recent.length-1], dt=(b.wall-a.wall)/1000, ct=b.currentTime-a.currentTime;
-    if(dt>=1.5 && ct<0.08 && buffered>1){ c='BUFFER GROWING NO PLAY'; reason='bufferAhead 在增长，但播放时间线未推进'; }
+  if(!p){
+    // Fallback for a browser-native media element if the player object is not ready.
+    if(v.paused || v.ended){ try{ const q=v.play(); if(q&&q.catch) q.catch(()=>{}); }catch(e){} }
+    else { try{ v.pause(); }catch(e){} }
+    return;
   }
-  if(c==='STARTING' && state.firstPlayingAt){ c='PLAY STARTED'; reason='已触发 playing'; }
-  if(c==='STARTING' && state.mediaInfo){ c='MEDIA DETECTED'; reason='已识别编码'; }
-  state.classification=c; state.classificationReason=reason; state.classificationAt=now;
-  return c;
-}
-function timelineSample(source){
-  const v=$('video'), now=performance.now(), st=state.stats||{};
-  let presented=0, mediaTime=null;
-  if(state.lastFrame){ presented=Number(state.lastFrame.presentedFrames||0); mediaTime=Number(state.lastFrame.mediaTime); }
-  const item={
-    wall:now, rel:state.playStarted?(now-state.playStarted)/1000:0,
-    currentTime:Number(v.currentTime||0), mediaTime:isFinite(mediaTime)?mediaTime:null,
-    presentedFrames:presented, decodedFrames:Number(st.decodedFrames||0),
-    droppedFrames:Number(st.droppedFrames||0), buffered:rangeText(v.buffered),
-    ahead:bufferAhead(v), readyState:v.readyState, paused:v.paused, source:source||'timer'
-  };
-  state.timeline.push(item); if(state.timeline.length>240) state.timeline.shift();
-  return item;
-}
-function startTimelineMicroscope(seq){
-  if(state.timelineTimer) clearInterval(state.timelineTimer);
-  state.timeline=[]; state.lastFrame=null;
-  state.timelineTimer=setInterval(()=>{
-    if(seq!==state.seq){ clearInterval(state.timelineTimer); return; }
-    timelineSample('250ms'); classifyTimeline(); 
-  }, 250);
-}
-function timelineSummary(){
-  const a=state.timeline; if(a.length<2) return '样本不足';
-  const first=a[0], last=a[a.length-1];
-  const dt=(last.wall-first.wall)/1000;
-  return 'Δwall='+dt.toFixed(2)+'s Δcurrent='+(last.currentTime-first.currentTime).toFixed(3)+'s Δpresented='+(last.presentedFrames-first.presentedFrames)+' Δdecoded='+((last.decodedFrames-first.decodedFrames)||0);
-}
-
-function waitingSnapshot(v, ev){
-  const ahead=bufferAhead(v);
-  const line=[
-    'WAITING_SNAPSHOT ev='+ev,
-    'current='+v.currentTime.toFixed(3),
-    'ahead='+ahead.toFixed(3)+'s',
-    'readyState='+v.readyState,
-    'networkState='+v.networkState,
-    'paused='+v.paused,
-    'buffered='+rangeText(v.buffered),
-    'seekable='+rangeText(v.seekable),
-    'duration='+(isFinite(v.duration)?v.duration.toFixed(3):String(v.duration)),
-    chromeCounters(v),
-    'mse='+mseDump()
-  ].join(' ');
-  log(line);
-  if(ahead>=1 && v.readyState>=3){
-    log('WAITING_WITH_BUFFER 不是缺数据。ahead='+ahead.toFixed(3)+'s readyState='+v.readyState+' → 更像 MSE/A-V sync/decoder，而不是 HTTP/udpxy');
+  const shouldPause=!v.paused && !v.ended;
+  if(shouldPause){
+    state.userPaused=true;
+    try{ p.pause(); }catch(e){}
+    try{ v.pause(); }catch(e){}
+    if(state.webAudioCtx && state.safariAudioRoute==='mpeg-audio'){
+      try{ const q=state.webAudioCtx.suspend(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
+    }
+    setStatus('已暂停');
+    return;
   }
-  if(false && $('nudgeWaiting').checked && ahead>=1 && !state.nudgedThisPlay){
-    state.nudgedThisPlay=true;
-    const t=v.currentTime;
-    try{
-      v.currentTime=t;
-      log('NUDGE applied currentTime='+t.toFixed(3)+' (same value; Chrome MSE unblock experiment)');
-    }catch(e){ log('NUDGE failed '+e.message); }
+  state.userPaused=false;
+  if(state.webAudioCtx && state.safariAudioRoute==='mpeg-audio'){
+    try{ const q=state.webAudioCtx.resume(); if(q&&q.catch) q.catch(()=>{}); }catch(e){}
   }
+  try{
+    const q=p.play();
+    if(q&&q.catch) q.catch(()=>{ try{ const r=v.play(); if(r&&r.catch) r.catch(()=>{}); }catch(e){} });
+  }catch(e){ try{ const q=v.play(); if(q&&q.catch) q.catch(()=>{}); }catch(_){} }
 }
 
 function attachVideoDiagnostics(v, seq){
-  v.autoplay=false;
-  v.removeAttribute('autoplay');
-  const events=['loadstart','durationchange','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','suspend','progress','seeking','seeked','timeupdate','ratechange','volumechange','ended','emptied','error'];
-  events.forEach(ev=>v.addEventListener(ev, ()=>{
+  v.autoplay=false; v.removeAttribute('autoplay');
+  if(state.diagEnabled) videoSnapshot('attachVideoDiagnostics');
+  ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','seeking','seeked','ended','emptied','abort','durationchange','resize','error'].forEach(name=>{
+    v.addEventListener(name,()=>{if(seq===state.seq && state.diagEnabled) videoSnapshot('event='+name);});
+  });
+  v.addEventListener('pause', ()=>{
+    if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
+    state.userPaused=true;
+  });
+  v.addEventListener('play', ()=>{
     if(seq!==state.seq) return;
-    const now=performance.now();
-    let extra='';
-    if(ev==='play' && !state.playIssuedAt) extra=' SOURCE=unexpected-autoplay';
-    if(ev==='pause' && state.playIssuedAt && !state.stopping){
-      state.userPaused=true; stopDiagTimers();
-      log('USER_PAUSED: 停止诊断采样');
-    }
-    if(ev==='play' && state.userPaused){
-      state.userPaused=false;
-      startTimelineMicroscope(seq); startStuckMonitor(seq); startDiagTimer(seq);
-      log('USER_RESUMED');
-    }
-    if(ev==='waiting'){
-      state.waitingCount++;
-      if(!state.waitingStart) state.waitingStart=now;
-      extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s readyState='+v.readyState;
-      waitingSnapshot(v, 'waiting');
-    }
-    if(ev==='playing'){
-      state.playingSince=now; state.lastProgressWall=now; state.lastProgressTime=v.currentTime||0;
-      scheduleWebAudioAfterVideo(seq);
-      if(!state.audioSyncTimer) state.audioSyncTimer=setInterval(()=>audioSyncTick(seq),500);
-      if(state.waitingStart){
-        extra=' waitingRecovered='+((now-state.waitingStart)/1000).toFixed(3)+'s current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-        state.waitingStart=0;
-      }
-      extra += ' mse='+mseDump();
-    }
-    if(ev==='stalled'){
-      state.stallCount++;
-      extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-      waitingSnapshot(v, 'stalled');
-    }
-    if(ev==='progress') extra=' current='+v.currentTime.toFixed(3)+' bufferAhead='+bufferAhead(v).toFixed(3)+'s';
-    if(ev==='error' && v.error) extra=' code='+v.error.code+' '+(v.error.message||'');
-    // Video event logs are intentionally suppressed here; keep audio diagnostics visible.
-    if(ev==='playing' && !state.firstPlayingAt) state.firstPlayingAt=now;
-    
-  }));
+    state.userPaused=false;
+  });
+  v.addEventListener('playing', ()=>{
+    if(seq!==state.seq) return;
+    if(!state.firstPlayingAt) state.firstPlayingAt=performance.now();
+    scheduleWebAudioAfterVideo(seq);
+    if(!state.audioSyncTimer) state.audioSyncTimer=setInterval(()=>audioSyncTick(seq),500);
+  });
   if('requestVideoFrameCallback' in v){
     const cb=(now, meta)=>{
       if(seq!==state.seq) return;
-      state.lastFrame={wall:performance.now(), mediaTime:Number(meta.mediaTime), presentedFrames:Number(meta.presentedFrames||0)};
+      state.lastFrame={wall:performance.now(),mediaTime:Number(meta.mediaTime),presentedFrames:Number(meta.presentedFrames||0)};
       if(meta.width) state.lastVideoWidth=meta.width;
       if(meta.height) state.lastVideoHeight=meta.height;
       if(!state.firstFrameAt){
         state.firstFrameAt=performance.now();
-        log('video.firstFrame rVFC mediaTime='+(meta.mediaTime??'?')+' presentedFrames='+(meta.presentedFrames??'?'));
+        log('VIDEO first requestVideoFrameCallback mediaTime='+Number(meta.mediaTime).toFixed(3)+' presentedFrames='+Number(meta.presentedFrames||0)+' size='+v.videoWidth+'x'+v.videoHeight);
         scheduleWebAudioAfterVideo(seq);
+      }
+      const frameWall=performance.now();
+      if(state.diagEnabled && (!state.diagLastFrameLog || frameWall-state.diagLastFrameLog>5000)){
+        state.diagLastFrameLog=frameWall;
+        log('VIDEO frame mediaTime='+Number(meta.mediaTime).toFixed(3)+' presentedFrames='+Number(meta.presentedFrames||0)+' size='+v.videoWidth+'x'+v.videoHeight+' readyState='+v.readyState);
       }
       v.requestVideoFrameCallback(cb);
     };
@@ -1039,19 +983,1155 @@ function isIOSSafari(){
 // We keep PAT/PMT/PCR/video packets, rewrite PMT to remove audio ES entries,
 // and drop all other elementary-stream packets. This is intentionally a
 // browser-side custom loader experiment; the normal A/V path is untouched.
-function makeSafariVideoOnlyLoader(){
+function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
   const Base=mpegts.BaseLoader;
   if(!Base) throw new Error('mpegts.BaseLoader unavailable');
   const K=Base;
+
+  // ===== Open GOP → IDR bitstream rewriter (放在 SafariVideoOnlyLoader class 前面) =====
+
+  class BitReader {
+    constructor(buf) { this.buf = buf; this.bytePos = 0; this.bitPos = 0; }
+	get pos() { return this.bytePos * 8 + this.bitPos; } 
+    readBit() {
+      const byte = this.buf[this.bytePos];
+      const bit = (byte >> (7 - this.bitPos)) & 1;
+      this.bitPos++;
+      if (this.bitPos === 8) { this.bitPos = 0; this.bytePos++; }
+      return bit;
+    }
+    readBits(n) { let v = 0; for (let i = 0; i < n; i++) v = (v * 2) + this.readBit(); return v >>> 0; }
+    readUEG() {
+      let zeros = 0;
+      while (this.readBit() === 0) { zeros++; if (zeros > 32) throw new Error('UEG overflow'); }
+      if (zeros === 0) return 0;
+      return (Math.pow(2, zeros) - 1 + this.readBits(zeros));
+    }
+    //readSEG() { const v = this.readUEG(); return (v % 2 === 0) ? -(v / 2) : (v + 1) / 2; }
+	readSEG() { const v = this.readUEG(); if (v === 0) return 0; return (v % 2 === 0) ? (v / 2) : -(v + 1) / 2; }
+  }
+
+  class BitWriter {
+    constructor() { this.bytes = []; this.cur = 0; this.bitPos = 0; }
+    writeBit(b) {
+      this.cur = (this.cur << 1) | (b & 1);
+      this.bitPos++;
+      if (this.bitPos === 8) { this.bytes.push(this.cur); this.cur = 0; this.bitPos = 0; }
+    }
+    writeBits(v, n) { for (let i = n - 1; i >= 0; i--) this.writeBit((v >>> i) & 1); }
+    writeUEG(codeNum) {
+      const v = codeNum + 1;
+      let nbits = 0, temp = v;
+      while (temp > 1) { temp >>= 1; nbits++; }
+      for (let i = 0; i < nbits; i++) this.writeBit(0);
+      this.writeBits(v, nbits + 1);
+    }
+    copyBitsFrom(reader, n) {
+      let v = 0;
+      for (let i = 0; i < n; i++) { const b = reader.readBit(); this.writeBit(b); v = (v << 1) | b; }
+      return v >>> 0;
+    }
+    copyUEGFrom(reader) {
+      let zeros = 0;
+      while (true) {
+        const b = reader.readBit(); this.writeBit(b);
+        if (b === 1) break;
+        zeros++; if (zeros > 32) throw new Error('UEG overflow');
+      }
+      if (zeros === 0) return 0;
+      return (Math.pow(2, zeros) - 1 + this.copyBitsFrom(reader, zeros));
+    }
+    padToByte() { while (this.bitPos !== 0) this.writeBit(0); }
+    toBytes() { this.padToByte(); return Uint8Array.from(this.bytes); }
+  }
+
+  function removeEmulationPrevention(src) {
+    const out = new Uint8Array(src.length);
+    let w = 0;
+    let zeroCount = 0;
+
+    for (let i = 0; i < src.length; i++) {
+      const b = src[i];
+
+      // 只删除合法的 emulation_prevention_three_byte：
+      // 00 00 03 00/01/02/03
+      if (
+        zeroCount >= 2 &&
+        b === 0x03 &&
+        i + 1 < src.length &&
+        src[i + 1] <= 0x03
+      ) {
+        // 这里不要清零 zeroCount：
+        // RBSP 中前面的 00 00 与下一个字节仍然连续。
+        continue;
+      }
+
+      out[w++] = b;
+
+      if (b === 0x00) {
+        zeroCount++;
+      } else {
+        zeroCount = 0;
+      }
+    }
+
+    return out.slice(0, w);
+  }
+
+  function addEmulationPrevention(src) {
+    // 最坏情况下约每两个 00 插入一个 03。
+    const out = new Uint8Array(
+      src.length + Math.ceil(src.length / 2) + 16
+    );
+
+    let w = 0;
+    let zeroCount = 0;
+
+    for (let i = 0; i < src.length; i++) {
+      const b = src[i];
+
+      if (zeroCount >= 2 && b <= 0x03) {
+        out[w++] = 0x03;
+
+        // 关键：插入 03 后，EBSP 中的连续 00 已被打断。
+        zeroCount = 0;
+      }
+
+      out[w++] = b;
+
+      if (b === 0x00) {
+        zeroCount++;
+      } else {
+        zeroCount = 0;
+      }
+    }
+
+    return out.slice(0, w);
+  }
+
+  function skipScalingList(reader, size) {
+    let lastScale = 8, nextScale = 8;
+    for (let j = 0; j < size; j++) {
+      if (nextScale !== 0) {
+        const deltaScale = reader.readSEG();
+        nextScale = (lastScale + deltaScale + 256) % 256;
+      }
+      lastScale = (nextScale === 0) ? lastScale : nextScale;
+    }
+  }
+
+  const H264_HIGH_PROFILES = [100,110,122,244,44,83,86,118,128,138,139,134,135];
+
+  function parseSPS(spsNalWithHeader) {
+    const rbsp = removeEmulationPrevention(spsNalWithHeader.subarray(1));
+    const r = new BitReader(rbsp);
+    const profileIdc = r.readBits(8);
+    r.readBits(8); r.readBits(8);
+    r.readUEG();
+    let chromaFormatIdc = 1, separateColourPlane = false;
+    if (H264_HIGH_PROFILES.indexOf(profileIdc) !== -1) {
+      chromaFormatIdc = r.readUEG();
+      if (chromaFormatIdc === 3) separateColourPlane = !!r.readBit();
+      r.readUEG(); r.readUEG(); r.readBit();
+      if (r.readBit()) {
+        const count = (chromaFormatIdc !== 3) ? 8 : 12;
+        for (let i = 0; i < count; i++) if (r.readBit()) skipScalingList(r, i < 6 ? 16 : 64);
+      }
+    }
+    const frameNumBits = r.readUEG() + 4;
+    const picOrderCntType = r.readUEG();
+    if (picOrderCntType === 0) {
+      r.readUEG();
+    } else if (picOrderCntType === 1) {
+      r.readBit(); r.readSEG(); r.readSEG();
+      const numRef = r.readUEG();
+      for (let i = 0; i < numRef; i++) r.readSEG();
+    }
+    r.readUEG(); r.readBit(); r.readUEG(); r.readUEG();
+    const frameMbsOnly = !!r.readBit();
+    return { profileIdc, chromaFormatIdc, separateColourPlane, frameNumBits, frameMbsOnly };
+  }
+
+  function isISliceNal(buf, nal) {
+    const type = buf[nal.start] & 0x1f;
+    if (type !== 1 && type !== 5) return false;
+    try {
+      const prefix = removeEmulationPrevention(buf.subarray(nal.start + 1, Math.min(nal.start + 17, nal.end)));
+      const r = new BitReader(prefix);
+      r.readUEG();
+      const sliceType = r.readUEG();
+      return (sliceType % 5) === 2;
+    } catch (e) { return false; }
+  }
+
+  function rewriteSliceToIDR(nal, sps) {
+    if (!nal || nal.length < 2) {
+      throw new Error('invalid slice NAL');
+    }
+
+    /*
+     * scanAnnexBNals() 可能把 Annex-B 的 trailing_zero_8bits
+     * 包含在 nal 的末尾。
+     *
+     * 这些尾部 00 不属于 slice 的核心 EBSP/RBSP，不能参与
+     * remove/addEmulationPrevention，否则大量连续 00 会导致
+     * 插入大量 03，使 NAL 异常膨胀。
+     */
+    let coreEnd = nal.length;
+
+    while (
+      coreEnd > 1 &&
+      nal[coreEnd - 1] === 0x00
+    ) {
+      coreEnd--;
+    }
+
+    const trailingZeroBytes = nal.length - coreEnd;
+
+    if (coreEnd < 2) {
+      throw new Error(
+        'invalid slice NAL core: nalBytes=' + nal.length +
+        ', trailingZeros=' + trailingZeroBytes
+      );
+    }
+
+    /*
+     * 不包含：
+     *   - NAL header（nal[0]）
+     *   - NAL 末尾的 trailing_zero_8bits
+     */
+    const rbsp = removeEmulationPrevention(
+      nal.subarray(1, coreEnd)
+    );
+
+    if (!rbsp.length) {
+      throw new Error('empty slice RBSP');
+    }
+
+    const r = new BitReader(rbsp);
+
+    const firstMb = r.readUEG();
+    const sliceType = r.readUEG();
+    const ppsId = r.readUEG();
+
+    let colourPlaneId = 0;
+
+    if (sps.separateColourPlane) {
+      colourPlaneId = r.readBits(2);
+    }
+
+    // 丢弃原 non-IDR slice 的 frame_num。
+    r.readBits(sps.frameNumBits);
+
+    /*
+     * CCTV3 的 SPS 日志显示 frameMbsOnly=false，
+     * 所以必须先读取并保留 field_pic_flag /
+     * bottom_field_flag，然后才能插入 idr_pic_id。
+     */
+    let fieldPicFlag = 0;
+    let bottomFieldFlag = 0;
+
+    if (!sps.frameMbsOnly) {
+      fieldPicFlag = r.readBit();
+
+      if (fieldPicFlag) {
+        bottomFieldFlag = r.readBit();
+      }
+    }
+
+    const w = new BitWriter();
+
+    w.writeUEG(firstMb);
+    w.writeUEG(sliceType);
+    w.writeUEG(ppsId);
+
+    if (sps.separateColourPlane) {
+      w.writeBits(colourPlaneId, 2);
+    }
+
+    // 合成 IDR 的 frame_num 设置为 0。
+    w.writeBits(0, sps.frameNumBits);
+
+    if (!sps.frameMbsOnly) {
+      w.writeBit(fieldPicFlag);
+
+      if (fieldPicFlag) {
+        w.writeBit(bottomFieldFlag);
+      }
+    }
+
+    /*
+     * IDR slice_header 比 non-IDR 多出 idr_pic_id。
+     * 这里使用 0。
+     */
+    w.writeUEG(0);
+
+    /*
+     * 将剩余的原始 RBSP bit 原样复制。
+     * 注意：这里只复制核心 RBSP，不包含已经剥离的尾部零字节。
+     */
+    const totalBits = rbsp.length * 8;
+
+    while (r.pos < totalBits) {
+      w.writeBit(r.readBit());
+    }
+
+    const newRbsp = addEmulationPrevention(
+      w.toBytes()
+    );
+
+    /*
+     * 输出结构：
+     *
+     *   新 NAL header
+     *   + 新核心 EBSP
+     *   + 原样保留的 trailing_zero_8bits
+     */
+    const out = new Uint8Array(
+      1 + newRbsp.length + trailingZeroBytes
+    );
+
+    let nalRefIdc = nal[0] & 0x60;
+
+    // IDR slice 的 nal_ref_idc 不能为 0。
+    if (nalRefIdc === 0) {
+      nalRefIdc = 0x60;
+    }
+
+    // 保留 forbidden_zero_bit，NAL type 改为 5。
+    out[0] =
+      (nal[0] & 0x80) |
+      nalRefIdc |
+      0x05;
+
+    out.set(newRbsp, 1);
+
+    // 尾部零字节原样接回，不重新进行防竞争处理。
+    if (trailingZeroBytes > 0) {
+      out.set(
+        nal.subarray(coreEnd),
+        1 + newRbsp.length
+      );
+    }
+
+    /*
+     * I→IDR 会因为新增 idr_pic_id、字节对齐和防竞争字节而
+     * 产生少量长度变化，但不应增加几十、几百甚至几千字节。
+     */
+    const delta = out.length - nal.length;
+
+    if (Math.abs(delta) > 64) {
+      throw new Error(
+        'suspicious NAL growth while converting I to IDR: ' +
+        nal.length + 'B→' + out.length + 'B' +
+        ', coreBytes=' + coreEnd +
+        ', trailingZeros=' + trailingZeroBytes +
+        ', frameNumBits=' + sps.frameNumBits
+      );
+    }
+
+    return out;
+  }
+
+  function scanAnnexBNals(buf, from) {
+    const starts = [];
+    let i = from; const n = buf.length;
+    while (i < n - 2) {
+      if (buf[i] === 0 && buf[i+1] === 0 && buf[i+2] === 1) {
+        let scStart = i;
+        if (i > from && buf[i-1] === 0) scStart = i - 1;
+        starts.push({ scStart, dataStart: i + 3 });
+        i += 3;
+      } else i++;
+    }
+    const nals = [];
+    for (let k = 0; k < starts.length; k++) {
+      const cur = starts[k];
+      const nextScStart = (k + 1 < starts.length) ? starts[k+1].scStart : n;
+      nals.push({ scStart: cur.scStart, start: cur.dataStart, end: nextScStart,
+        scBytes: buf.subarray(cur.scStart, cur.dataStart) });
+    }
+    return nals;
+  }
+
+  function parsePesHeader(pes) {
+    if (pes.length < 9) return null;
+    if (!(pes[0] === 0 && pes[1] === 0 && pes[2] === 1)) return null;
+    const pesPacketLength = (pes[4] << 8) | pes[5];
+    const pesHeaderDataLength = pes[8];
+    const esStart = 9 + pesHeaderDataLength;
+    if (esStart > pes.length) return null;
+    return { pesPacketLength, esStart };
+  }
+
+  function extractTSPayload(pkt) {
+    const afc = (pkt[3] >> 4) & 0x3;
+    let offset = 4;
+    if (afc === 2) return null;
+    if (afc === 3) offset = 5 + pkt[4];
+    else if (afc !== 1) return null;
+    if (offset >= 188) return null;
+    return pkt.subarray(offset, 188);
+  }
+
+  function rebuildFirstPacket(originalPkt, newPayload) {
+    const afc0 = (originalPkt[3] >> 4) & 0x3;
+    const payloadOffset = (afc0 === 3) ? (5 + originalPkt[4]) : 4;
+    const capacity = 188 - payloadOffset;
+
+    if (newPayload.length >= capacity) {
+      const out = new Uint8Array(188);
+      out.set(originalPkt.subarray(0, payloadOffset), 0);
+      out.set(newPayload.subarray(0, capacity), payloadOffset);
+      return { packet: out, consumed: capacity };
+    }
+    const out = new Uint8Array(188);
+    out[0] = 0x47; out[1] = originalPkt[1]; out[2] = originalPkt[2];
+    const avail = newPayload.length;
+    if (afc0 === 3) {
+      const origAfLen = originalPkt[4];
+      const shortfall = capacity - avail;
+      const newAfLen = origAfLen + shortfall;
+      out[3] = originalPkt[3];
+      out[4] = newAfLen;
+      out.set(originalPkt.subarray(5, 5 + origAfLen), 5);
+      for (let i = 0; i < shortfall; i++) out[5 + origAfLen + i] = 0xFF;
+      out.set(newPayload, 5 + newAfLen);
+    } else {
+      out[3] = (originalPkt[3] & 0x0f) | 0x30;
+      const afLen = 183 - avail;
+      out[4] = afLen;
+      if (afLen > 0) { out[5] = 0x00; for (let i = 0; i < afLen - 1; i++) out[6 + i] = 0xFF; }
+      out.set(newPayload, 5 + afLen);
+    }
+    return { packet: out, consumed: avail };
+  }
+
+  function buildSubsequentPacket(pid, payload, offset) {
+    const out = new Uint8Array(188);
+    out[0] = 0x47; out[1] = (pid >> 8) & 0x1f; out[2] = pid & 0xff;
+    const remaining = payload.length - offset;
+    if (remaining >= 184) {
+      out[3] = 0x10;
+      out.set(payload.subarray(offset, offset + 184), 4);
+      return { packet: out, consumed: 184 };
+    }
+    const L = 183 - remaining;
+    out[3] = 0x30; out[4] = L;
+    if (L > 0) { out[5] = 0x00; for (let i = 0; i < L - 1; i++) out[6 + i] = 0xFF; }
+    out.set(payload.subarray(offset, offset + remaining), 5 + L);
+    return { packet: out, consumed: remaining };
+  }
+
+  class PesAssembler {
+    constructor() { this.packets = []; this.started = false; }
+    push(pkt, pusi) {
+      let completed = null;
+      if (pusi) {
+        if (this.started && this.packets.length) completed = this._finish();
+        this.started = true;
+        this.packets = [pkt];
+      } else if (this.started) {
+        this.packets.push(pkt);
+      }
+      return completed;
+    }
+    flush() {
+      if (this.started && this.packets.length) {
+        const r = this._finish();
+        this.packets = []; this.started = false;
+        return r;
+      }
+      return null;
+    }
+    _finish() {
+      const pkts = this.packets;
+      const parts = []; let total = 0;
+      for (const p of pkts) {
+        const pl = extractTSPayload(p);
+        if (pl) { parts.push(pl); total += pl.length; }
+      }
+      const pesBytes = new Uint8Array(total);
+      let off = 0;
+      for (const p of parts) { pesBytes.set(p, off); off += p.length; }
+      return { packets: pkts, pesBytes };
+    }
+  }
+
+  function readOpenGopPesPts90k(pesBytes) {
+    if (!pesBytes || pesBytes.length < 14) {
+      return null;
+    }
+
+    if (
+      pesBytes[0] !== 0x00 ||
+      pesBytes[1] !== 0x00 ||
+      pesBytes[2] !== 0x01
+    ) {
+      return null;
+    }
+
+    const ptsDtsFlags = (pesBytes[7] >> 6) & 0x03;
+
+    // 10 = 只有 PTS；11 = PTS + DTS。
+    if (ptsDtsFlags !== 2 && ptsDtsFlags !== 3) {
+      return null;
+    }
+
+    const p0 = pesBytes[9];
+    const p1 = pesBytes[10];
+    const p2 = pesBytes[11];
+    const p3 = pesBytes[12];
+    const p4 = pesBytes[13];
+
+    // 使用乘法而不是 32 位移位，因为 PTS 是 33 位。
+    return (
+      ((p0 >>> 1) & 0x07) * 1073741824 + // 2^30
+      p1 * 4194304 +                     // 2^22
+      ((p2 >>> 1) & 0x7f) * 32768 +      // 2^15
+      p3 * 128 +                         // 2^7
+      ((p4 >>> 1) & 0x7f)
+    );
+  }
+
+  function openGopPtsDelta90k(value, anchor) {
+    const MOD = 8589934592; // 2^33
+    const HALF = 4294967296;
+
+    let delta = value - anchor;
+
+    if (delta > HALF) {
+      delta -= MOD;
+    } else if (delta < -HALF) {
+      delta += MOD;
+    }
+
+    return delta;
+  }
+
+  class OpenGopFixer {
+    constructor(pid, logFn, opts) {
+      this.pid = pid;
+      this.log = logFn || (() => {});
+      this.dryRun = !!(opts && opts.dryRun);
+      this.assembler = new PesAssembler();
+      this.lastSpsParams = null;
+	  this.spsSignature = null;
+      this.outCc = 0;
+      this.ccInited = false;
+      //this.stats = { rewritten: 0, wouldRewrite: 0, passthrough: 0, failed: 0 };
+	  this.stats = { rewritten: 0, wouldRewrite: 0, passthrough: 0, failed: 0, droppedLeading: 0 };
+	  
+      // ★ 新增：只启动一次的状态
+      this.bootstrapped = false;         // 是否已经做过唯一一次 I→IDR 转换
+      this.frameNumOffset = 0;           // 永久生效的 frame_num 常量偏移	  
+	  this.onBootstrap = (opts && opts.onBootstrap) || null;   // 新增
+	  // 启动用合成 IDR 的 PTS。
+  	  this.bootstrapPts90k = null;
+
+	  // 在启动阶段删除 PTS 早于 bootstrap I 图像的 Open-GOP leading pictures。
+	  this.leadingDropActive = false;
+	  this.leadingDropCount = 0;
+    }
+
+    feed(pkt) {
+      const pusi = !!(pkt[1] & 0x40);
+      const completed = this.assembler.push(pkt, pusi);
+      if (!completed) return [];
+      return this._emit(completed);
+    }
+
+    flush() {
+      const completed = this.assembler.flush();
+      return completed ? this._emit(completed) : [];
+    }
+
+	_emit({ packets, pesBytes }) {
+	  let outPackets = packets;
+
+	  try {
+		const anyTei = packets.some(
+		  p => (p[1] & 0x80) !== 0
+		);
+
+		if (anyTei) {
+		  this.stats.passthrough++;
+		} else if (this._shouldDropLeadingPes(pesBytes)) {
+		  /*
+		   * 整个 leading picture PES 不输出。
+		   *
+		   * 这里必须直接返回 []，不能调用 _restampCc()。
+		   * 因为没有 TS 包实际输出，输出 CC 也不应前进。
+		   * 下一个正常 PES 会继续使用当前 outCc，因此不会制造 CC GAP。
+		   */
+		  this.stats.droppedLeading++;
+		  return [];
+		} else {
+		  const rewritten = this._maybeRewrite(pesBytes);
+
+		  if (!rewritten) {
+			this.stats.passthrough++;
+		  } else if (this.dryRun) {
+			this.stats.wouldRewrite++;
+
+			this.log(
+			  '[DRYRUN] PID=' + this.pid +
+			  ' would rewrite, ' +
+			  pesBytes.length + 'B→' +
+			  rewritten.length + 'B'
+			);
+		  } else {
+			outPackets = this._repacketize(
+			  packets,
+			  rewritten
+			);
+
+			this.stats.rewritten++;
+
+			this.log(
+			  'PID=' + this.pid +
+			  ' rewritten ' +
+			  pesBytes.length + 'B→' +
+			  rewritten.length + 'B, packets ' +
+			  packets.length + '→' +
+			  outPackets.length
+			);
+		  }
+		}
+	  } catch (e) {
+		this.stats.failed++;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' rewrite failed (' +
+		  (e && e.message) +
+		  '), passthrough original'
+		);
+
+		outPackets = packets;
+	  }
+
+	  return this._restampCc(outPackets);
+	}
+
+    _restampCc(packets) {
+      const out = [];
+      for (const p of packets) {
+        const afc = (p[3] >> 4) & 0x3;
+        const q = new Uint8Array(p);
+        if (afc === 1 || afc === 3) {
+          if (!this.ccInited) { this.outCc = p[3] & 0xf; this.ccInited = true; }
+          q[3] = (q[3] & 0xf0) | (this.outCc & 0xf);
+          this.outCc = (this.outCc + 1) & 0xf;
+        }
+        out.push(q);
+      }
+      return out;
+    }
+
+	_shouldDropLeadingPes(pesBytes) {
+	  if (
+		!this.leadingDropActive ||
+		this.bootstrapPts90k == null
+	  ) {
+		return false;
+	  }
+
+	  const pts = readOpenGopPesPts90k(pesBytes);
+
+	  if (pts == null) {
+		return false;
+	  }
+
+	  const delta90k = openGopPtsDelta90k(
+		pts,
+		this.bootstrapPts90k
+	  );
+
+	  const deltaMs = delta90k / 90;
+
+	  /*
+	   * bootstrap 之后按解码顺序到达、但 PTS 早于 bootstrap
+	   * I 图像的帧，就是 Open GOP 的 leading pictures。
+	   *
+	   * 限定在 bootstrap 前一秒内，避免遇到真正的 PTS
+	   * discontinuity 时误删。
+	   */
+	  if (delta90k < 0 && delta90k >= -90000) {
+		this.leadingDropCount++;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' DROP leading picture' +
+		  ' PTS90k=' + pts +
+		  ' bootstrapPTS90k=' + this.bootstrapPts90k +
+		  ' deltaMs=' + deltaMs.toFixed(3) +
+		  ' count=' + this.leadingDropCount
+		);
+
+		return true;
+	  }
+
+	  /*
+	   * 已经超过 bootstrap 一秒，正常 GOP 已经稳定，
+	   * 关闭启动专用的判断，避免永久保留状态。
+	   */
+	  if (delta90k >= 90000) {
+		this.leadingDropActive = false;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' leading-picture drop window closed' +
+		  ' dropped=' + this.leadingDropCount
+		);
+	  } else if (delta90k < -90000) {
+		// 更大的负跳变更可能是真正的时间戳 discontinuity。
+		this.leadingDropActive = false;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' leading-picture drop window cancelled' +
+		  ' because of large negative PTS deltaMs=' +
+		  deltaMs.toFixed(3)
+		);
+	  }
+
+	  return false;
+	}
+	
+    // ★ 核心重写：只在"首次启动"时做一次 I→IDR 转换；之后永远只做 frame_num 平移
+    _maybeRewrite(pesBytes) {
+      const pes = parsePesHeader(pesBytes);
+      if (!pes) return null;
+      const nals = scanAnnexBNals(pesBytes, pes.esStart);
+      if (!nals.length) return null;
+
+      let hasRealIdr = false, spsNal = null;
+      const sliceNals = []; // 所有 NAL type===1（I/P/B slice 都在这里）
+      for (const n of nals) {
+        const type = pesBytes[n.start] & 0x1f;
+        if (type === 5) hasRealIdr = true;
+        else if (type === 7) spsNal = n;
+        else if (type === 1) sliceNals.push(n);
+      }
+
+      if (spsNal) {
+        try {
+          const parsed = parseSPS(pesBytes.subarray(spsNal.start, spsNal.end));
+          const sig = parsed.frameNumBits + ':' + parsed.separateColourPlane + ':' + parsed.frameMbsOnly;
+  		  if (sig !== this.spsSignature) {
+		    this.spsSignature = sig;
+		    this.bootstrapped = false;
+		    this.frameNumOffset = 0;
+
+		    this.bootstrapPts90k = null;
+		    this.leadingDropActive = false;
+		    this.leadingDropCount = 0;
+
+		    this.log(
+			  'PID=' + this.pid +
+			  ' SPS changed, re-arm bootstrap'
+		    );
+		  }
+          this.lastSpsParams = parsed;
+        } catch (e) {
+          this.log('PID=' + this.pid + ' SPS parse failed: ' + e.message);
+        }
+      }
+
+      // 上游如果真的来了一个原生 IDR，说明不再需要我们的 hack，复位状态
+  	  if (hasRealIdr) {
+	    if (!this.bootstrapped) {
+		  this.log('PID=' + this.pid + ' real IDR encountered before any bootstrap, using it as anchor (offset=0)');
+	    } else if (this.frameNumOffset !== 0) {
+		  this.log('PID=' + this.pid + ' real IDR superseded synthetic anchor, resetting offset to 0 (no further fake-IDR will be created)');
+	    }
+	    // 关键修正：无论之前是否做过合成 IDR 转换，一旦遇到真实 IDR，
+	    // 就把它当作新的、干净的锚点，永久标记为“已启动”，
+	    // 绝不允许因为“遇到了真实 IDR”而重新把 bootstrapped 置为 false。
+	    this.bootstrapped = true;
+	    this.frameNumOffset = 0;
+		
+		this.bootstrapPts90k = null;
+		this.leadingDropActive = false;
+		this.leadingDropCount = 0;
+	    return null;
+	  }
+	  
+      if (!sliceNals.length) return null;
+      if (!this.lastSpsParams) return null;
+
+	  if (!this.bootstrapped) {
+	    /*
+	     * 寻找这个 bootstrap PES 中的全部 I slice。
+	     *
+	     * 原逻辑只将第一个 I slice 改成 IDR，其余 I slice 仅修改
+	     * frame_num，可能造成同一幅多 slice 图像中：
+	     *
+	     *   第一个 slice：NAL type 5（IDR）
+	     *   其余 slice：  NAL type 1（non-IDR）
+	     *
+	     * 现在改为将该 bootstrap 图像中的全部 I slice 都转换为 IDR。
+	     */
+	    const bootstrapISlices = [];
+
+	    for (const n of sliceNals) {
+		  if (isISliceNal(pesBytes, n)) {
+		    bootstrapISlices.push(n);
+		  }
+	    }
+
+	    if (!bootstrapISlices.length) {
+		  // 当前 PES 没有 I slice，继续等待可用于启动的图像。
+		  // 此时上游视频 gate 尚未正式输出视频，因此直接返回即可。
+		  return null;
+	    }
+
+	    // 使用第一个 I slice 读取原始 frame_num。
+	    const firstISliceNal = bootstrapISlices[0];
+
+	    // Set 中保存的是 scanAnnexBNals() 返回的同一批 NAL 对象，
+	    // 因此可以直接通过对象身份判断该 NAL 是否属于 bootstrap I slice。
+	    const bootstrapISet = new Set(bootstrapISlices);
+
+	    let originalFn;
+
+	    try {
+		  const tmpRbsp = removeEmulationPrevention(
+		    pesBytes.subarray(
+			  firstISliceNal.start + 1,
+			  firstISliceNal.end
+		    )
+		  );
+
+		  const tr = new BitReader(tmpRbsp);
+
+		  tr.readUEG(); // first_mb_in_slice
+		  tr.readUEG(); // slice_type
+		  tr.readUEG(); // pic_parameter_set_id
+
+		  if (this.lastSpsParams.separateColourPlane) {
+		    tr.readBits(2); // colour_plane_id
+		  }
+
+		  originalFn = tr.readBits(
+		    this.lastSpsParams.frameNumBits
+		  );
+	    } catch (e) {
+		  this.log(
+		    'PID=' + this.pid +
+		    ' bootstrap frame_num parse failed: ' +
+		    (e && e.message)
+		  );
+		  return null;
+	    }
+
+	    const parts = [];
+	    let cursor = pes.esStart;
+
+	    for (const n of nals) {
+  		  // 保留前一个 NAL 结束位置与当前 start code 之间的原始字节。
+		  if (n.scStart > cursor) {
+		    parts.push(
+			  pesBytes.subarray(cursor, n.scStart)
+		    );
+		  }
+
+		  if (bootstrapISet.has(n)) {
+		    /*
+		     * 关键修改：
+		     * bootstrap 图像中的所有 I slice 都调用 rewriteSliceToIDR()，
+		     * 不再只有第一个 I slice 被转换。
+		     */
+		    parts.push(n.scBytes);
+
+		    parts.push(
+			  rewriteSliceToIDR(
+			    pesBytes.subarray(n.start, n.end),
+			    this.lastSpsParams
+			  )
+		    );
+		  } else if (sliceNals.indexOf(n) !== -1) {
+		    /*
+		     * 当前 PES 中不是 bootstrap I slice 的其他 type-1 slice，
+		     * 不改变 NAL 类型，只平移 frame_num。
+		     */
+		    parts.push(n.scBytes);
+
+		    parts.push(
+			  this._adjustFrameNum(
+			    pesBytes,
+			    n,
+			    originalFn
+			  )
+		    );
+		  } else {
+		    // SPS、PPS、SEI、AUD 等非 slice NAL 原样保留。
+		    parts.push(
+			  pesBytes.subarray(n.scStart, n.end)
+		    );
+		  }
+
+		  cursor = n.end;
+	    }
+
+	    if (cursor < pesBytes.length) {
+		  parts.push(pesBytes.subarray(cursor));
+	    }
+
+		this.frameNumOffset = originalFn;
+		this.bootstrapped = true;
+		
+		if (this.onBootstrap) {                 // 新增：通知外层"这个频道确实需要遮罩"
+          try { this.onBootstrap(originalFn); } catch (e) {}
+        }
+
+		// 记录本次 bootstrap I 图像的 PTS，供后续 leading picture 判断。
+		this.bootstrapPts90k =
+		  readOpenGopPesPts90k(pesBytes);
+
+		this.leadingDropCount = 0;
+		this.leadingDropActive =
+		  this.bootstrapPts90k != null;
+
+		this.log(
+		  'PID=' + this.pid +
+		  ' BOOTSTRAP I-picture originalFn=' + originalFn +
+		  ' slices=' + bootstrapISlices.length +
+		  ' bootstrapPTS90k=' +
+		  (
+			this.bootstrapPts90k == null
+			  ? 'none'
+			  : this.bootstrapPts90k
+		  ) +
+		  ' → all I slices converted to IDR;' +
+		  ' permanent frame_num offset armed;' +
+		  ' leading-picture drop=' +
+		  (this.leadingDropActive ? 'armed' : 'unavailable') +
+		  ' (no further fake-IDR will be created)'
+		);
+
+	    return this._finalizePes(
+		  pesBytes,
+		  pes,
+		  parts
+	    );
+	  }
+
+      // ★ 已经启动过：永远只做常量偏移，绝不再造第二个伪 IDR
+      if (this.frameNumOffset === 0) return null;
+
+      const parts = [];
+      let cursor = pes.esStart;
+      for (const n of nals) {
+        if (n.scStart > cursor) parts.push(pesBytes.subarray(cursor, n.scStart));
+        if (sliceNals.indexOf(n) !== -1) {
+          parts.push(n.scBytes);
+          parts.push(this._adjustFrameNum(pesBytes, n, this.frameNumOffset));
+        } else {
+          parts.push(pesBytes.subarray(n.scStart, n.end));
+        }
+        cursor = n.end;
+      }
+      if (cursor < pesBytes.length) parts.push(pesBytes.subarray(cursor));
+
+      return this._finalizePes(pesBytes, pes, parts);
+    }
+
+	_writeBitsAt(buf, bitOffset, bitLength, value) {
+	  for (let i = 0; i < bitLength; i++) {
+		const absoluteBit = bitOffset + i;
+		const byteIndex = absoluteBit >> 3;
+		const bitInByte = 7 - (absoluteBit & 7);
+		const mask = 1 << bitInByte;
+		const bit = (value >>> (bitLength - 1 - i)) & 1;
+
+		if (bit) {
+		  buf[byteIndex] |= mask;
+		} else {
+		  buf[byteIndex] &= (~mask) & 0xff;
+		}
+	  }
+	}
+	
+	_adjustFrameNum(pesBytes, n, offset) {
+	  const originalNal = pesBytes.subarray(n.start, n.end);
+
+	  if (originalNal.length < 2) {
+		throw new Error('slice NAL is too short');
+	  }
+
+	  /*
+	   * scanAnnexBNals() 可能把 Annex-B trailing_zero_8bits
+	   * 包含在 NAL 的末尾。
+	   *
+	   * 这些零不是 RBSP 内容，不能交给 addEmulationPrevention()，
+	   * 否则每两个零附近都会插入 03，导致 NAL 异常膨胀。
+	   */
+	  let coreEnd = originalNal.length;
+
+	  while (
+		coreEnd > 1 &&
+		originalNal[coreEnd - 1] === 0x00
+	  ) {
+		coreEnd--;
+	  }
+
+	  const trailingZeroBytes =
+		originalNal.length - coreEnd;
+
+	  // 这里只处理真正的 NAL 核心部分，不包含尾部补零。
+	  const coreNal = originalNal.subarray(0, coreEnd);
+
+	  const rbsp = removeEmulationPrevention(
+		coreNal.subarray(1)
+	  );
+
+	  const r = new BitReader(rbsp);
+
+	  r.readUEG(); // first_mb_in_slice
+	  r.readUEG(); // slice_type
+	  r.readUEG(); // pic_parameter_set_id
+
+	  if (this.lastSpsParams.separateColourPlane) {
+		r.readBits(2); // colour_plane_id
+	  }
+
+	  const fnBits = this.lastSpsParams.frameNumBits;
+	  const frameNumBitOffset = r.pos;
+
+	  if (
+		frameNumBitOffset < 0 ||
+		frameNumBitOffset + fnBits > rbsp.length * 8
+	  ) {
+		throw new Error(
+		  'frame_num is outside slice RBSP: offset=' +
+		  frameNumBitOffset +
+		  ', bits=' + fnBits +
+		  ', rbspBytes=' + rbsp.length
+		);
+	  }
+
+	  const origFn = r.readBits(fnBits);
+	  const mod = Math.pow(2, fnBits);
+
+	  const newFn =
+		((origFn - offset) % mod + mod) % mod;
+
+	  // 整个 RBSP 原样复制，只覆盖 frame_num 的几个 bit。
+	  const patchedRbsp = new Uint8Array(rbsp);
+
+	  this._writeBitsAt(
+		patchedRbsp,
+		frameNumBitOffset,
+		fnBits,
+		newFn
+	  );
+
+	  const newEbsp =
+		addEmulationPrevention(patchedRbsp);
+
+	  /*
+	   * 输出结构：
+	   *
+	   * NAL header
+	   * + 重新转义后的核心 EBSP
+	   * + 原样保留的 trailing_zero_8bits
+	   */
+	  const out = new Uint8Array(
+		1 + newEbsp.length + trailingZeroBytes
+	  );
+
+	  out[0] = coreNal[0];
+	  out.set(newEbsp, 1);
+
+	  if (trailingZeroBytes > 0) {
+		out.set(
+		  originalNal.subarray(coreEnd),
+		  1 + newEbsp.length
+		);
+	  }
+
+	  const delta =
+		out.length - originalNal.length;
+
+	  if (Math.abs(delta) > 64) {
+		throw new Error(
+		  'suspicious NAL growth after excluding trailing zeros: ' +
+		  originalNal.length + 'B→' + out.length + 'B' +
+		  ', coreBytes=' + coreEnd +
+		  ', trailingZeros=' + trailingZeroBytes +
+		  ', origFn=' + origFn +
+		  ', newFn=' + newFn +
+		  ', fnBits=' + fnBits
+		);
+	  }
+
+	  return out;
+	}
+
+    _finalizePes(pesBytes, pes, parts) {
+      let newEsLen = 0; for (const p of parts) newEsLen += p.length;
+      const newEs = new Uint8Array(newEsLen);
+      let off = 0; for (const p of parts) { newEs.set(p, off); off += p.length; }
+      const newHeader = new Uint8Array(pesBytes.subarray(0, pes.esStart));
+      if (pes.pesPacketLength !== 0) {
+        const newLen = Math.min(0xFFFF, (newHeader.length - 6) + newEs.length);
+        newHeader[4] = (newLen >> 8) & 0xff;
+        newHeader[5] = newLen & 0xff;
+      }
+      const out = new Uint8Array(newHeader.length + newEs.length);
+      out.set(newHeader, 0);
+      out.set(newEs, newHeader.length);
+      return out;
+    }
+
+    _repacketize(originalPackets, newPesBytes) {
+      const { packet: firstPkt, consumed } = rebuildFirstPacket(originalPackets[0], newPesBytes);
+      const out = [firstPkt];
+      let offset = consumed;
+      while (offset < newPesBytes.length) {
+        const { packet, consumed: c } = buildSubsequentPacket(this.pid, newPesBytes, offset);
+        out.push(packet);
+        offset += c;
+      }
+      return out;
+    }
+  }
+  
   class SafariVideoOnlyLoader extends K {
     constructor(seekHandler, config){
       super('SafariVideoOnlyLoader');
       this._seekHandler=seekHandler; this._config=config||{};
       this._status=0; this._needStash=false; this._aborter=null;
       this._buffer=new Uint8Array(0); this._byteStart=0; this._outBytes=0;
-      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._pcrPid=null;
+      this._patPid=null; this._pmtPid=null; this._videoPid=null; this._videoPids=new Set(); this._pcrPid=null;
       this._sectionBuf=new Map(); this._sectionNeed=new Map(); this._sectionType=new Map();
-      this._started=false; this._closed=false;
+      this._started=false; this._closed=false; this._diagLastStats=0; this._diagInBytes=0; this._diagOutPackets=0; this._diagVideoPackets=new Set();
+	  this._videoStartedPids = new Set();
+	  this._diagSkippedVideoUntilPusi = 0;
+	  this._h264TailByPid = new Map();
+	  this._diagH264LogCount = 0;
+	  this._lastVideoCC = new Map();
+	  this._diagCcGapCount = 0;
+	  this._videoStreamTypeByPid = new Map();
+	  this._h264PendingPesByPid = new Map();
+	  this._diagH264IdrLogCount = 0;
+	  this._diagVideoPtsCount = 0;
+	  this._diagVideoPtsLast = new Map();
+      this._startupHoldNeeded = false;
+      this._startupReleased = false;
+      this._startupHoldPid = null;
+      this._startupHoldParts = [];
+      this._startupHoldBytes = 0;
+      this._startupHoldSince = 0;
+      this._startupFirstPts = null;
+      this._startupMinPtsDelta = 0;
+      this._startupMaxPtsDelta = 0;	  
+	  this._openGopFixers = new Map();
+	  this.gopFrameNumOffset = null;
+	  this._openGopDryRun = false; 
+	  this._onOpenGopBootstrap = (config && config.onOpenGopBootstrap) || null;  // 新增
     }
     open(dataSource, range){
       this._status=1; this._dataSource=dataSource; this._range=range||{};
@@ -1072,20 +2152,93 @@ function makeSafariVideoOnlyLoader(){
         this._status=2;
         if(!r.body) throw new Error('ReadableStream unavailable');
         const reader=r.body.getReader();
-        let pos=(range&&range.from!=null)?range.from:0;
-        while(!this._closed){
-          const q=await reader.read();
-          if(q.done) break;
-          if(!q.value || !q.value.length) continue;
-          const out=this._filterChunk(q.value);
-          if(out.length){
-            const ab=out.buffer.slice(out.byteOffset,out.byteOffset+out.byteLength);
-            this._outBytes+=out.byteLength;
-            if(this.onDataArrival) this.onDataArrival(ab,pos,this._outBytes);
-            pos+=out.byteLength;
+        let pos = (range && range.from != null) ? range.from : 0;
+
+        const emitFiltered = bytes => {
+          if (!bytes || !bytes.length) return;
+
+          const ab = bytes.buffer.slice(
+            bytes.byteOffset,
+            bytes.byteOffset + bytes.byteLength
+          );
+
+          this._outBytes += bytes.byteLength;
+          if (this.onDataArrival) {
+            this.onDataArrival(ab, pos, this._outBytes);
+          }
+          pos += bytes.byteLength;
+        };
+
+        while (!this._closed) {
+          const q = await reader.read();
+          if (q.done) break;
+          if (!q.value || !q.value.length) continue;
+
+          this._diagInBytes += q.value.byteLength;
+          const out = this._filterChunk(q.value);
+
+          if (!out.length) continue;
+
+          if (this._startupHoldNeeded && !this._startupReleased) {
+            if (!this._startupHoldSince) {
+              this._startupHoldSince = performance.now();
+            }
+
+            this._startupHoldParts.push(out);
+            this._startupHoldBytes += out.byteLength;
+
+            const span = this._trackStartupPts(out);
+            const hitByteCap = this._startupHoldBytes >= 8 * 1024 * 1024;
+            const timedOut =
+              performance.now() - this._startupHoldSince >= 3000;
+
+            if (span < 225000 && !hitByteCap && !timedOut) {
+              continue;
+            }
+
+            const staged = this._takeStartupHold();
+            this._startupReleased = true;
+
+            const reason =
+              span >= 108000
+                ? 'pts-span'
+                : (hitByteCap ? 'byte-cap' : 'timeout');
+
+            log(
+              'SAFARI_TS_FILTER: startup hold released PID=' +
+              this._startupHoldPid +
+              ' spanMs=' + (span / 90).toFixed(0) +
+              ' bytes=' + staged.length +
+              ' reason=' + reason
+            );
+
+            emitFiltered(staged);
+          } else {
+            emitFiltered(out);
           }
         }
-        if(this._closed) return;
+
+        if (this._closed) return;
+
+        // 文件流或连接正常结束时，避免剩余暂存数据一直不送出。
+        if (
+          this._startupHoldNeeded &&
+          !this._startupReleased &&
+          this._startupHoldBytes
+        ) {
+          const staged = this._takeStartupHold();
+          this._startupReleased = true;
+
+          log(
+            'SAFARI_TS_FILTER: startup hold released PID=' +
+            this._startupHoldPid +
+            ' bytes=' + staged.length +
+            ' reason=stream-end'
+          );
+
+          emitFiltered(staged);
+        }
+		
         this._status=4;
         if(this.onComplete) this.onComplete((range&&range.from!=null)?range.from:0,pos-1);
       }).catch(e=>{
@@ -1095,7 +2248,7 @@ function makeSafariVideoOnlyLoader(){
       });
     }
     abort(){ try{ if(this._aborter) this._aborter.abort(); }catch(e){} this._status=0; }
-    destroy(){ this._closed=true; this.abort(); this._buffer=new Uint8Array(0); }
+    destroy(){ this._closed=true; this.abort(); this._buffer=new Uint8Array(0); this._startupHoldParts.length = 0; this._startupHoldBytes = 0;}
     isWorking(){ return this._status===1 || this._status===2; }
     get status(){ return this._status; }
     get needStashBuffer(){ return this._needStash; }
@@ -1103,36 +2256,196 @@ function makeSafariVideoOnlyLoader(){
       if(!this._buffer.length) this._buffer=a.slice();
       else { const x=new Uint8Array(this._buffer.length+a.length); x.set(this._buffer); x.set(a,this._buffer.length); this._buffer=x; }
     }
+	_handleVideoPacket(pkt, pid, out) {
+	  const pusi = (pkt[1] & 0x40) !== 0;
+	  const cc = pkt[3] & 0x0f;
+	  const afc = (pkt[3] >> 4) & 3;
+	  const hasPayload = afc === 1 || afc === 3;
+	  const tei = (pkt[1] & 0x80) !== 0;
+
+	  const rai =
+		(afc === 2 || afc === 3) &&
+		(pkt[4] || 0) >= 1 &&
+		(pkt[5] & 0x40) !== 0;
+
+	  const hasDiscontinuity =
+		(afc === 2 || afc === 3) &&
+		(pkt[4] || 0) >= 1 &&
+		(pkt[5] & 0x80) !== 0;
+
+	  const nalTypes = this._scanH264Nals(pkt, pid);
+	  this._diagLogVideoPts(pkt, pid, cc, pusi);
+
+	  if (nalTypes.indexOf(5) !== -1 && this._diagH264IdrLogCount < 50) {
+		this._diagH264IdrLogCount++;
+		log('SAFARI_H264_IDR: PID=' + pid + ' CC=' + cc + ' PUSI=' + pusi +
+		  ' gate=' + this._videoStartedPids.has(pid));
+	  }
+
+	  if (nalTypes.length && this._diagH264LogCount < 120) {
+		const name = t => ({
+		  1: 'SLICE', 2: 'DPA', 3: 'DPB', 4: 'DPC', 5: 'IDR', 6: 'SEI',
+		  7: 'SPS', 8: 'PPS', 9: 'AUD', 13: 'SPSEXT', 14: 'PREFIX', 19: 'AUX', 20: 'EXT'
+		}[t] || ('NAL' + t));
+
+		log('SAFARI_H264: PID=' + pid + ' CC=' + cc + ' PUSI=' + pusi + ' RAI=' + rai +
+		  ' gate=' + this._videoStartedPids.has(pid) +
+		  ' NAL=' + nalTypes.map(t => name(t) + '(' + t + ')').join(','));
+		this._diagH264LogCount++;
+	  }
+
+	  if (hasPayload) {
+		const lastCC = this._lastVideoCC.get(pid);
+		if (lastCC !== undefined && !hasDiscontinuity && cc !== lastCC &&
+			cc !== ((lastCC + 1) & 0x0f) && this._diagCcGapCount < 20) {
+		  log('SAFARI_TS_FILTER: video CC GAP PID=' + pid +
+			' previous=' + lastCC + ' current=' + cc +
+			' expected=' + ((lastCC + 1) & 0x0f));
+		  this._diagCcGapCount++;
+		}
+		this._lastVideoCC.set(pid, cc);
+	  }
+
+	  if (tei) {
+		this._videoStartedPids.delete(pid);
+		if (this._h264PendingPesByPid) this._h264PendingPesByPid.delete(pid);
+		return;
+	  }
+
+	  if (!this._videoStartedPids.has(pid)) {
+		const isH264 = this._videoStreamTypeByPid.get(pid) === 0x1b;
+		let canOpen = pusi && hasPayload;
+		let reason = 'PUSI';
+
+		if (isH264) {
+		  const hasSps = nalTypes.indexOf(7) !== -1;
+		  const hasPps = nalTypes.indexOf(8) !== -1;
+		  const hasIdr = nalTypes.indexOf(5) !== -1;
+
+		  canOpen = pusi && hasPayload && hasSps && hasPps && (hasIdr || rai);
+		  reason = hasIdr ? 'IDR+SPS/PPS' : 'RAI+SPS/PPS';
+		}
+
+		if (!canOpen) {
+		  this._diagSkippedVideoUntilPusi++;
+		  return;
+		}
+
+		if (isH264 && rai && nalTypes.indexOf(5) === -1 && !this._startupHoldNeeded) {
+		  this._startupHoldNeeded = true;
+		  this._startupHoldPid = pid;
+		  this._startupHoldSince = 0;
+		  this._startupFirstPts = null;
+		  this._startupMinPtsDelta = 0;
+		  this._startupMaxPtsDelta = 0;
+
+		  log('SAFARI_TS_FILTER: no-IDR startup hold armed PID=' + pid + ' targetSpanMs=2500');
+		}
+
+		this._videoStartedPids.add(pid);
+		log('SAFARI_TS_FILTER: video PES gate opened PID=' + pid +
+		  ' CC=' + cc + ' PUSI=' + pusi + ' RAI=' + rai +
+		  ' reason=' + reason + ' skipped=' + this._diagSkippedVideoUntilPusi);
+	  }
+
+	  out.push(pkt);
+	  this._diagOutPackets++;
+
+	  if (!this._diagVideoPackets.has(pid)) {
+		this._diagVideoPackets.add(pid);
+		log('SAFARI_TS_FILTER: first forwarded video packet PID=' + pid +
+		  ' CC=' + cc + ' PUSI=' + pusi + ' RAI=' + rai);
+	  }
+	}	
     _filterChunk(chunk){
       this._appendBuffer(chunk);
-      const packets=[]; let off=0;
-      while(this._buffer.length-off>=188){
-        if(this._buffer[off]!==0x47){
-          const n=this._buffer.indexOf(0x47,off+1);
-          if(n<0){ off=this._buffer.length; break; }
-          off=n;
-          if(this._buffer.length-off<188) break;
+      const packets=[];
+      let off=0;
+      const b=this._buffer;
+      // Establish TS packet alignment using repeated 188-byte sync bytes.
+      if(!this._syncLocked){
+        let found=-1;
+        const need=b.length>=188*3 ? 3 : 2;
+        const last=b.length-188*(need-1);
+        for(let i=0;i<last;i++){
+          if(b[i]!==0x47 || b[i+188]!==0x47) continue;
+          if(need===3 && b[i+376]!==0x47) continue;
+          found=i; break;
         }
-        if(this._buffer.length-off<188) break;
-        let ok=true;
-        for(let i=1;i<4;i++){ if(this._buffer[off+i]===undefined){ok=false;break;} }
-        if(!ok) break;
-        packets.push(this._buffer.slice(off,off+188)); off+=188;
+        if(found<0){
+          if(b.length>188*3) this._buffer=b.slice(-188*2);
+          return new Uint8Array(0);
+        }
+        off=found;
+        this._syncLocked=true;
+        log('SAFARI_TS_FILTER: TS sync locked offset='+found+' chunkBytes='+chunk.length);
       }
-      this._buffer=this._buffer.slice(off);
+      while(b.length-off>=188){
+        if(b[off]!==0x47 || (b.length-off>=376 && b[off+188]!==0x47)){
+          this._syncLocked=false;
+          break;
+        }
+        const pkt=b.slice(off,off+188);
+        if(((pkt[3]>>4)&3)===0){ this._syncLocked=false; break; }
+        packets.push(pkt);
+        off+=188;
+      }
+      this._buffer=b.slice(off);
+      if(!this._syncLocked && this._buffer.length>188*3) this._buffer=this._buffer.slice(-188*2);
       const out=[];
       for(const pkt of packets){
         const pid=((pkt[1]&0x1f)<<8)|pkt[2];
-        if(pid===0){ this._inspectPAT(pkt); out.push(pkt); continue; }
+        if(pid===0){ const old=this._pmtPid; this._inspectPAT(pkt); if(old!==this._pmtPid) log('SAFARI_TS_FILTER: PAT PMT PID='+this._pmtPid); out.push(pkt); continue; }
         if(this._pmtPid!=null && pid===this._pmtPid){
           const rp=this._rewritePMTPacket(pkt);
           if(rp) out.push(rp);
           continue;
         }
-        if(this._videoPid!=null && pid===this._videoPid){ out.push(pkt); continue; }
+		const isVideoPid = (this._videoPids.size && this._videoPids.has(pid)) || (this._videoPid != null && pid === this._videoPid);
+		if (isVideoPid) {
+		  let fixer = this._openGopFixers.get(pid);
+		  if (!fixer) {
+  		    //fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), { dryRun: this._openGopDryRun });
+			fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), {
+							dryRun: this._openGopDryRun,
+							onBootstrap: (originalFn) => {          // ← 新增
+								if (onOpenGopBootstrap) {              // 闭包直接拿到 makeSafariVideoOnlyLoader 的参数
+									try { onOpenGopBootstrap(pid, originalFn); } catch (e) {}
+								}
+							}
+			});
+			this._openGopFixers.set(pid, fixer);
+		  }
+
+		  let fixedPkts;
+		  try {
+		    fixedPkts = fixer.feed(pkt);
+		  } catch (e) {
+		    log('SAFARI_OPENGOP: feed() threw PID=' + pid + ' err=' + (e && e.message));
+			fixedPkts = [pkt];
+		  }
+
+		  for (const fp of fixedPkts) {
+		    this._handleVideoPacket(fp, pid, out);
+		  }
+		  continue;
+		}
         if(this._pcrPid!=null && pid===this._pcrPid){ out.push(pkt); continue; }
       }
-      const total=out.length*188; const ret=new Uint8Array(total);
+      const total=out.length*188;
+      const now=performance.now();
+      if(state.diagEnabled && now-this._diagLastStats>5000){
+        this._diagLastStats=now;
+        log('SAFARI_TS_FILTER: stats inBytes='+this._diagInBytes+' outBytes='+this._outBytes+' videoPackets='+this._diagOutPackets+' sync='+!!this._syncLocked+' pmtPid='+this._pmtPid+' videoPids='+Array.from(this._videoPids).join(',')+' pcrPid='+this._pcrPid+' bufferedBytes='+this._buffer.length);
+		for (const [fpid, fx] of this._openGopFixers) {
+		  log('SAFARI_OPENGOP: stats PID=' + fpid +
+			  ' rewritten=' + fx.stats.rewritten +
+			  ' wouldRewrite=' + fx.stats.wouldRewrite +
+			  ' passthrough=' + fx.stats.passthrough +
+ 	          ' failed=' + fx.stats.failed);
+		}		
+      }
+      const ret=new Uint8Array(total);
       for(let i=0;i<out.length;i++) ret.set(out[i],i*188);
       return ret;
     }
@@ -1143,6 +2456,219 @@ function makeSafariVideoOnlyLoader(){
       if(afc===3){ const n=pkt[4]; o=5+n; if(o>188) return null; }
       return pkt.slice(o);
     }
+	_readPesTimestamp33(pl, offset, prefix) {
+	  if (offset + 5 > pl.length) return null;
+
+	  const b0 = pl[offset];
+	  const b1 = pl[offset + 1];
+	  const b2 = pl[offset + 2];
+	  const b3 = pl[offset + 3];
+	  const b4 = pl[offset + 4];
+
+	  if (
+		((b0 >> 4) & 0x0f) !== prefix ||
+		(b0 & 1) === 0 ||
+		(b2 & 1) === 0 ||
+		(b4 & 1) === 0
+	  ) {
+		return null;
+	  }
+
+	  return (b0 & 0x0e) * 536870912 +
+			 b1 * 4194304 +
+			 (b2 & 0xfe) * 16384 +
+			 b3 * 128 +
+			 (b4 & 0xfe) / 2;
+	}
+
+	_readVideoPesTimestamps(pkt) {
+	  const pl = this._payload(pkt);
+	  if (!pl || !(pkt[1] & 0x40) || pl.length < 9) return null;
+
+	  if (
+		pl[0] !== 0x00 || pl[1] !== 0x00 || pl[2] !== 0x01 ||
+		pl[3] < 0xe0 || pl[3] > 0xef ||
+		(pl[6] & 0xc0) !== 0x80
+	  ) {
+		return null;
+	  }
+
+	  const flags = (pl[7] >> 6) & 3;
+	  if (flags !== 2 && flags !== 3) return null;
+
+	  const headerLength = pl[8] || 0;
+	  if (headerLength < 5) return null;
+
+	  const pts = this._readPesTimestamp33(
+		pl, 9, flags === 3 ? 3 : 2
+	  );
+	  if (pts == null) return null;
+
+	  let dts = null;
+	  if (flags === 3 && headerLength >= 10) {
+		dts = this._readPesTimestamp33(pl, 14, 1);
+	  }
+
+	  return { flags, pts, dts };
+	}
+	
+    _trackStartupPts(data) {
+      const wrap = 8589934592; // 2^33
+      const half = 4294967296; // 2^32
+
+      for (let off = 0; off + 188 <= data.length; off += 188) {
+        const pkt = data.subarray(off, off + 188);
+
+        if (pkt[0] !== 0x47 || !(pkt[1] & 0x40)) continue;
+
+        const pid = ((pkt[1] & 0x1f) << 8) | pkt[2];
+        if (pid !== this._startupHoldPid) continue;
+
+        const ts = this._readVideoPesTimestamps(pkt);
+        if (!ts) continue;
+
+        if (this._startupFirstPts === null) {
+          this._startupFirstPts = ts.pts;
+          this._startupMinPtsDelta = 0;
+          this._startupMaxPtsDelta = 0;
+          continue;
+        }
+
+        // 处理 33-bit PTS 回绕；允许 B 帧导致 PTS 前后重排。
+        let d = ts.pts - this._startupFirstPts;
+        if (d > half) d -= wrap;
+        else if (d < -half) d += wrap;
+
+        if (d < this._startupMinPtsDelta) {
+          this._startupMinPtsDelta = d;
+        }
+        if (d > this._startupMaxPtsDelta) {
+          this._startupMaxPtsDelta = d;
+        }
+      }
+
+      if (this._startupFirstPts === null) return 0;
+      return this._startupMaxPtsDelta - this._startupMinPtsDelta;
+    }
+
+    _takeStartupHold() {
+      const out = new Uint8Array(this._startupHoldBytes);
+      let offset = 0;
+
+      for (let i = 0; i < this._startupHoldParts.length; i++) {
+        const part = this._startupHoldParts[i];
+        out.set(part, offset);
+        offset += part.length;
+      }
+
+      this._startupHoldParts.length = 0;
+      this._startupHoldBytes = 0;
+      return out;
+    }
+	
+	_diagLogVideoPts(pkt, pid, cc, pusi) {
+	  if (!pusi || this._diagVideoPtsCount >= 120) return;
+
+	  const ts = this._readVideoPesTimestamps(pkt);
+	  if (!ts) return;
+
+	  const previous = this._diagVideoPtsLast.get(pid);
+
+	  const delta33 = (current, last) => {
+		let d = current - last;
+		const half = 4294967296;
+		const wrap = 8589934592;
+		if (d > half) d -= wrap;
+		else if (d < -half) d += wrap;
+		return d;
+	  };
+
+	  const ptsDelta = previous
+		? delta33(ts.pts, previous.pts)
+		: null;
+
+	  const dtsDelta =
+		ts.dts != null && previous && previous.dts != null
+		  ? delta33(ts.dts, previous.dts)
+		  : null;
+
+	  this._diagVideoPtsLast.set(pid, {
+		pts: ts.pts,
+		dts: ts.dts
+	  });
+	  this._diagVideoPtsCount++;
+
+	  log(
+		'SAFARI_VIDEO_TS: PID=' + pid +
+		' CC=' + cc +
+		' flags=' + (ts.flags === 3 ? 'PTS+DTS' : 'PTS_ONLY') +
+		' PTS90k=' + Math.round(ts.pts) +
+		' PTSdeltaMs=' +
+		  (ptsDelta == null ? 'first' : (ptsDelta / 90).toFixed(3)) +
+		' DTS90k=' +
+		  (ts.dts == null ? 'none' : Math.round(ts.dts)) +
+		' DTSdeltaMs=' +
+		  (dtsDelta == null ? 'n/a' : (dtsDelta / 90).toFixed(3))
+	  );
+	}
+	_scanH264Nals(pkt, pid) {
+	  let pl = this._payload(pkt);
+	  if (!pl || !pl.length) return [];
+
+	  // PUSI 视频包从 PES header 开始；扫描 ES payload，不扫描 PES header。
+	  if (pkt[1] & 0x40) {
+		if (
+		  pl.length < 9 ||
+		  pl[0] !== 0x00 || pl[1] !== 0x00 || pl[2] !== 0x01 ||
+		  pl[3] < 0xe0 || pl[3] > 0xef
+		) {
+		  return [];
+		}
+
+		const esStart = 9 + pl[8];
+		if (esStart > pl.length) return [];
+		pl = pl.subarray(esStart);
+	  }
+
+	  const tail = this._h264TailByPid.get(pid) || new Uint8Array(0);
+	  const all = new Uint8Array(tail.length + pl.length);
+	  all.set(tail, 0);
+	  all.set(pl, tail.length);
+
+	  const types = [];
+	  for (let i = 0; i < all.length;) {
+		let nal = -1;
+
+		// 先检查 4 字节 Annex-B start code，再检查 3 字节。
+		if (
+		  i + 4 < all.length &&
+		  all[i] === 0 && all[i + 1] === 0 &&
+		  all[i + 2] === 0 && all[i + 3] === 1
+		) {
+		  nal = i + 4;
+		} else if (
+		  i + 3 < all.length &&
+		  all[i] === 0 && all[i + 1] === 0 && all[i + 2] === 1
+		) {
+		  nal = i + 3;
+		}
+
+		if (nal >= 0 && nal < all.length) {
+		  types.push(all[nal] & 0x1f);
+		  i = nal + 1;
+		} else {
+		  i++;
+		}
+	  }
+
+	  // start code 可能跨 TS 包，保留尾部字节供下一包拼接检查。
+	  this._h264TailByPid.set(
+		pid,
+		all.slice(Math.max(0, all.length - 4))
+	  );
+
+	  return types;
+	}	
     _inspectPAT(pkt){
       if(!(pkt[1]&0x40)) return;
       const pl=this._payload(pkt); if(!pl||pl.length<9) return;
@@ -1182,9 +2708,14 @@ function makeSafariVideoOnlyLoader(){
         const st=section[i], ep=((section[i+1]&0x1f)<<8)|section[i+2];
         const eil=((section[i+3]&0x0f)<<8)|section[i+4];
         if(i+5+eil>section.length-4) break;
-        const keep=(st===0x1b || st===0x24 || st===0x02 || st===0x10 || st===0x1f || st===0x20);
-        if(keep){ es.push(section.slice(i,i+5+eil)); if(this._videoPid==null) this._videoPid=ep; }
+        const keep=(st===0x01 || st===0x02 || st===0x10 || st===0x1b || st===0x20 || st===0x24 || st===0x42 || st===0xd1 || st===0xd4 || st===0xea || st===0x1f);
+        //if(keep){ es.push(section.slice(i,i+5+eil)); this._videoPids.add(ep); if(this._videoPid==null) this._videoPid=ep; }
+		if(keep){ es.push(section.slice(i,i+5+eil)); this._videoPids.add(ep); this._videoStreamTypeByPid.set(ep, st); if(this._videoPid==null) this._videoPid=ep; }
         i+=5+eil;
+      }
+      if(!this._loggedPmt){
+        this._loggedPmt=true;
+        log('SAFARI_TS_FILTER: PMT version='+((section[5]>>1)&0x1f)+' PCR PID='+pcr+' videoStreams='+es.map(e=>'0x'+e[0].toString(16)+':'+(((e[1]&0x1f)<<8)|e[2])).join(','));
       }
       if(this._videoPid==null || !es.length) return pkt;
       const body=section.slice(0,12+pil);
@@ -1272,7 +2803,8 @@ function scheduleSafariMseFallback(ch, url, seq, failedPlayer, details, type){
   state.safariFallbackTimer=setTimeout(()=>safariMseFallbackToVideo(ch,url,seq,failedPlayer),600);
 }
 
-function createPlayer(ch, url, seq, mode){
+function createPlayer(ch, url, seq, mode, extraOpts){
+  extraOpts = extraOpts || {};
   if(seq!==state.seq) return;
   const v=$('video');
   const iosSafari=isIOSSafari();
@@ -1287,10 +2819,13 @@ function createPlayer(ch, url, seq, mode){
   }
   const config=playerConfig();
   if(mode==='video' && iosSafari){
-    try{ config.customLoader=makeSafariVideoOnlyLoader(); log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
-      if(mode==='video') log('SAFARI_AUDIO: video MSE path is audio-free; WebAudio MPEG Audio PES experiment is independent'); }
+	try{
+      config.customLoader = makeSafariVideoOnlyLoader(extraOpts.onOpenGopBootstrap || null);
+      log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
+      log('SAFARI_AUDIO: video MSE path is audio-free; WebAudio MPEG Audio PES experiment is independent');
+    }
     catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
-  }
+  } 
   log('CONFIG '+JSON.stringify(config));
   log('MediaDataSource '+JSON.stringify(ds));
   if(iosSafari) log('iOS Safari path: ManagedMediaSource + isLive=true');
@@ -1321,7 +2856,6 @@ function createPlayer(ch, url, seq, mode){
     if(info&&info.width) state.lastVideoWidth=info.width;
     if(info&&info.height) state.lastVideoHeight=info.height;
     log('MEDIA_INFO '+JSON.stringify(info));
-    log('MSE after MEDIA_INFO '+mseDump());
     const vc=info&&info.videoCodec?info.videoCodec:'';
     const ac=info&&info.audioCodec?info.audioCodec:'';
     setStatus((mode==='video'?(state.safariFallbackTried?'Safari回退 Video-only · ':'Video-only · '):mode==='muted'?'Muted-AV · ':'A/V · ')+(vc||'')+(ac?' · '+ac:''));
@@ -1336,38 +2870,8 @@ function createPlayer(ch, url, seq, mode){
       log(name+(info?' '+JSON.stringify(info):''));
     });
   });
-  if(mpegts.LoggingControl && mpegts.LoggingControl.addLogListener){
-    try{
-      mpegts.LoggingControl.addLogListener((type, msg)=>{
-        if(seq!==state.seq) return;
-        const text=String(msg||'');
-        if(!/PMT|PTS|DTS|timestamp|continuity|discontinuity|PCR|PES|private|SourceBuffer|timestampOffset/i.test(text)) return;
-        if(/PTS/i.test(text)) state.ts.pts++;
-        if(/DTS/i.test(text)) state.ts.dts++;
-        if(/continuity|discontinuity/i.test(text)) state.ts.continuity++;
-        // TSLOG is intentionally suppressed to prevent video/transport diagnostics from
-        // pushing the MP2PCM diagnostic lines out of the on-page log buffer.
-        if(false && $('microMode').value==='full') log('TSLOG '+text.slice(0,700));
-      });
-    }catch(e){ log('TSLOG listener install failed '+e.message); }
-  }
-  startTimelineMicroscope(seq);
-  p.attachMediaElement(v); log('attachMediaElement');
-  p.load(); log('player.load()');
-  startStuckMonitor(seq); startDiagTimer(seq);
-  const startStableMonitor=()=>{
-    if(!isIOSSafari() || mode!=='video') return;
-    if(state.stableTimer) clearTimeout(state.stableTimer);
-    state.stableSince=performance.now(); state.stableLogged=false;
-    state.stableTimer=setTimeout(()=>{
-      if(seq!==state.seq || state.player!==p || v.paused || v.readyState<2) return;
-      state.stableTimer=0; state.stableLogged=true;
-      log('SAFARI_VIDEO_ONLY_STABLE: continuous playback >=30s');
-      setStatus('Safari Video-only · 稳定播放 ≥30s');
-      
-    },30000);
-  };
-  v.addEventListener('playing', startStableMonitor, {once:true});
+  p.attachMediaElement(v);
+  p.load();
   const start=()=>{
     if(seq!==state.seq || state.playIssuedAt) return;
     state.startTimer=0;
@@ -1378,8 +2882,94 @@ function createPlayer(ch, url, seq, mode){
       if(q&&q.then) q.then(()=>log('player.play resolved')).catch(e=>log('player.play rejected '+e.name+': '+e.message));
     }catch(e){ log('player.play threw '+e.name+': '+e.message); }
   };
-  if(v.readyState>=1) start();
-  else v.addEventListener('loadedmetadata', start, {once:true});
+
+  const needBufferGate = (mode==='video' && iosSafari);
+  const startGated=()=>{
+    log('startGated ENTERED readyState='+v.readyState+' bufferAhead='+bufferAhead(v).toFixed(3));
+    if(seq!==state.seq || state.playIssuedAt){ log('startGated SKIP seq/played'); return; }
+    const MIN_AHEAD=1.2;
+    const MAX_WAIT_MS=4000;
+    const t0=performance.now();
+    let fired=false;
+    const fire=(reason)=>{
+      if(fired||seq!==state.seq||state.playIssuedAt) return;
+      fired=true;
+      cleanup();
+      state.startTimer=0;
+      state.playIssuedAt=performance.now();
+      const ahead=bufferAhead(v);
+      log('EXPLICIT play() readyState='+v.readyState+' bufferAhead='+ahead.toFixed(3)+' reason='+reason);
+      try{
+        const q=p.play();
+        if(q&&q.then) q.then(()=>log('player.play resolved')).catch(e=>log('player.play rejected '+e.name+': '+e.message));
+      }catch(e){ log('player.play threw '+e.name+': '+e.message); }
+    };
+	let lastGateDiag = performance.now();
+
+	const rangesText = () => {
+	  const ranges = [];
+	  try {
+		for (let i = 0; i < v.buffered.length; i++) {
+		  ranges.push(
+			'[' + v.buffered.start(i).toFixed(3) +
+			',' + v.buffered.end(i).toFixed(3) + ']'
+		  );
+		}
+	  } catch (_) {}
+	  return '[' + ranges.join(',') + ']';
+	};
+
+	const check = () => {
+	  if (seq !== state.seq) {
+		cleanup();
+		return;
+	  }
+
+	  const ahead = bufferAhead(v);
+	  const now = performance.now();
+
+	  if (now - lastGateDiag >= 500) {
+		lastGateDiag = now;
+		log(
+		  'START_GATE_CHECK readyState=' + v.readyState +
+		  ' paused=' + v.paused +
+		  ' currentTime=' + (Number(v.currentTime) || 0).toFixed(3) +
+		  ' ahead=' + ahead.toFixed(3) +
+		  ' buffered=' + rangesText()
+		);
+	  }
+
+	  // 下面原有的阈值判断保持不变
+	  if (ahead >= MIN_AHEAD) {
+		fire('buffer>=' + MIN_AHEAD + 's(' + ahead.toFixed(3) + ')');
+		return;
+	  }
+	  if (performance.now() - t0 > MAX_WAIT_MS) {
+		fire('timeout(ahead=' + ahead.toFixed(3) + ')');
+	  }
+	};	
+    const onProgress=()=>check();
+    const ticker=setInterval(check, 100);
+    const cleanup=()=>{
+      v.removeEventListener('progress', onProgress);
+      v.removeEventListener('timeupdate', onProgress);
+      v.removeEventListener('canplaythrough', onProgress);
+      v.removeEventListener('canplay', onProgress);
+      v.removeEventListener('durationchange', onProgress);
+      clearInterval(ticker);
+    };
+    v.addEventListener('progress', onProgress);
+    v.addEventListener('timeupdate', onProgress);
+    v.addEventListener('canplaythrough', onProgress);
+    v.addEventListener('canplay', onProgress);
+    v.addEventListener('durationchange', onProgress);
+    check();
+  };
+
+  const kick = needBufferGate ? startGated : start;
+  log('START scheduling needBufferGate='+needBufferGate+' readyState='+v.readyState);
+  if(v.readyState>=1) kick();
+  else v.addEventListener('loadedmetadata', kick, {once:true});
 }
 
 function resetPlayState(){
@@ -1405,9 +2995,18 @@ function resetPlayState(){
 
 function play(ch){
   const seq=++state.seq;
+  state.safariAudioOnly=false;
   state.current=ch; state.active=ch.group; renderGroups();
   stopPlayer();
+
+  // 新频道开始前，先把上一个频道可能残留的遮罩/定时器清掉
+  if (state.cancelOpenGopConceal) {
+    try { state.cancelOpenGopConceal(); } catch(e){}
+    state.cancelOpenGopConceal = null;
+  }
+
   const v=$('video');
+  v.controls=true;
   installGestureHooks();
   try{ v.pause(); }catch(e){}
   v.autoplay=false; v.removeAttribute('autoplay'); v.removeAttribute('src'); v.load();
@@ -1415,73 +3014,68 @@ function play(ch){
   resetPlayState();
   $('now').firstChild.textContent=ch.name;
   const url=streamUrl(ch);
-  //state.avMode=isIOSSafari() ? 'video' : avMode();
-  //log('PLAY '+ch.name);
-  //log('URL '+url);
-  //log('isLive='+ (isIOSSafari()?'true (iOS Safari)':'false') +' avMode='+state.avMode+' safariFallbackTried='+state.safariFallbackTried+' rev='+REV);
-  // Start the WebAudio MPEG Audio PES experiment from the channel-selection gesture.
-  // It is independent of the video MSE path and is intentionally best-effort.
-  //if(isIOSSafari()) startWebAudioMpeg(ch, seq);
+  log('PLAY name='+ch.name+' url='+url+' seq='+seq+' ua='+navigator.userAgent);
 
   if (isIOSSafari()) {
-    // Safari 上如果要异步等待 probe，AudioContext 最好仍在频道点击手势中
-    // 同步创建/调用 resume；startWebAudioMpeg 应复用这个 context。
     prepareSafariAudioContextFromGesture();
 
-	detectSafariAudioRoute(ch, seq).then(route => {
-	  if (!route || seq !== state.seq) return;
+    detectSafariAudioRoute(ch, seq).then(route => {
+      if (!route || seq !== state.seq) return;
 
-	  if (route.kind === 'mpeg-audio') {
-		state.safariAudioRoute = 'mpeg-audio';
-		state.avMode = 'video';
+      if (route.kind === 'mpeg-audio') {
+        state.safariAudioRoute = 'mpeg-audio';
+        state.safariAudioOnly = route.hasVideo === false;
+        state.avMode = state.safariAudioOnly ? 'audio-only' : 'video';
 
-		log('SAFARI route=video-only + MPEG Audio stream_type=' +
-			route.streamType);
+        log('SAFARI route=video-only + MPEG Audio stream_type=' + route.streamType);
 
-		startWebAudioMpeg(ch, seq);
-		createPlayer(ch, url, seq, 'video');
-	  } else {
-		state.safariAudioRoute = 'av-mse';
-		state.avMode = 'av';
+        startWebAudioMpeg(ch, seq);
+        if (state.safariAudioOnly) {
+          const v2=$('video');
+          v2.controls=false;
+          try{ v2.pause(); v2.removeAttribute('src'); v2.load(); }catch(e){}
+          setStatus('Safari 广播音频 · MPEG Audio');
+          return;
+        }
 
-		log('SAFARI route=A/V MSE stream_type=' +
-			(route.streamType == null ? 'unknown' : route.streamType));
-
-		discardPreparedSafariAudioContext();
-		createPlayer(ch, url, seq, 'av');
-	  }
-	}).catch(e => {
-	  if (seq !== state.seq) return;
-
-	  state.safariAudioRoute = 'unknown';
-	  state.avMode = 'av';
-
-	  log('SAFARI route probe failed; keep A/V: ' + e.message);
-	  discardPreparedSafariAudioContext();
-	  createPlayer(ch, url, seq, 'av');
-	});
+        // 关键改动：不再无条件 arm，而是把回调传进去，
+        // 只有 OpenGopFixer 真正做了 bootstrap 才会触发遮罩
+        createPlayer(ch, url, seq, 'video', {
+          onOpenGopBootstrap: function (pid) {
+            if (seq !== state.seq) return;      // 频道已切换，忽略过期回调
+            log('OpenGOP bootstrap detected on PID=' + pid + ', arming recovery mask');
+            if (state.cancelOpenGopConceal) {
+              state.cancelOpenGopConceal();
+              state.cancelOpenGopConceal = null;
+            }
+            state.cancelOpenGopConceal = armOpenGopStartupConceal(
+              $('video'),
+              function (msg) { diagnosticLog('[' + ch.name + ']' + ' ' + msg); },
+              1600
+            );
+          }
+        });
+      } else {
+        state.safariAudioRoute = 'av-mse';
+        state.avMode = 'av';
+        log('SAFARI route=A/V MSE stream_type=' + (route.streamType == null ? 'unknown' : route.streamType));
+        discardPreparedSafariAudioContext();
+        createPlayer(ch, url, seq, 'av');
+      }
+    }).catch(e => {
+      if (seq !== state.seq) return;
+      state.safariAudioRoute = 'unknown';
+      state.avMode = 'av';
+      log('SAFARI route probe failed; keep A/V: ' + e.message);
+      discardPreparedSafariAudioContext();
+      createPlayer(ch, url, seq, 'av');
+    });
 
     return;
   }
 
   // 非 iOS Safari 保持原有逻辑
   state.avMode = avMode();
-  //createPlayer(ch, url, seq, state.avMode);
-  
-  //const iosSafari = isIOSSafari();
-  //const useAvMse = iosSafari && safariUsesAvMse(ch);
-  //const useMp2Pcm = iosSafari && !useAvMse;
-
-  //state.avMode = iosSafari
-  //  ? (useAvMse ? 'av' : 'video')
-  //  : avMode();
-
-  //log('Safari route=' + (useAvMse ? 'AV-MSE (AAC)' :
-  //  useMp2Pcm ? 'video-only + MP2PCM' : state.avMode));
-
-  // 只有走 MP2PCM 的频道才启动独立 MPEG 音频解码
-  //if (useMp2Pcm) startWebAudioMpeg(ch, seq);  
-
   if(!window.mpegts || !mpegts.isSupported()){
     setStatus('浏览器不支持 MSE MPEG-TS / mpegts.js 未安装');
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);
@@ -1494,6 +3088,15 @@ function stopPlayback(){
   state.stopping=true;
   stopWebAudio(); state.userPaused=false;
   log('STOP: 用户请求停止并断开流');
+
+  if (state.cancelOpenGopConceal) {
+    try { state.cancelOpenGopConceal(); }
+    catch (e) { log('STOP cancelOpenGopConceal error ' + e.message); }
+    state.cancelOpenGopConceal = null;
+  }
+  // 防御性兜底：万一 cancel 函数本身没把遮罩隐藏干净，这里强制隐藏一次
+  try { hideRecoveryMask(); } catch (e) {}
+
   stopDiagTimers();
   const p=state.player, v=$('video');
   try{ v.pause(); }catch(e){}
@@ -1505,7 +3108,209 @@ function stopPlayback(){
   setStatus('已停止并断开');
   log('STOP: player destroyed / stream disconnected');
   state.stopping=false;
-  
+}
+
+function armOpenGopStartupConceal(video, logFn, concealMs) {
+  if (!video) {
+    return function () {};
+  }
+
+  const log = logFn || function () {};
+  const targetMs =
+    Number.isFinite(concealMs) ? concealMs : 1600;
+
+  const host = video.parentElement;
+
+  const oldOpacity = video.style.opacity;
+  const oldTransition = video.style.transition;
+  const oldHostBackground =
+    host ? host.style.backgroundColor : '';
+
+  let firstMediaTime = null;
+  let callbackId = null;
+  let hardTimer = null;
+  let fadeTimer = null;
+  let timeUpdateHandler = null;
+  let finished = false;
+
+  if (host) {
+    host.style.backgroundColor = '#000';
+  }
+
+  /*
+   * 不能用 display:none 或 visibility:hidden。
+   * Safari 可能停止或降低视频解码频率。
+   * opacity:0 仍然允许正常解码和 requestVideoFrameCallback。
+   */
+  video.style.transition = 'none';
+  video.style.opacity = '0';
+
+  function restoreStyles() {
+    video.style.transition = oldTransition;
+    video.style.opacity = oldOpacity;
+
+    if (host) {
+      host.style.backgroundColor = oldHostBackground;
+    }
+  }
+
+  function reveal(reason, mediaTime) {
+    if (finished) return;
+    finished = true;
+
+    if (
+      callbackId != null &&
+      typeof video.cancelVideoFrameCallback === 'function'
+    ) {
+      try {
+        video.cancelVideoFrameCallback(callbackId);
+      } catch (_) {
+        // 忽略
+      }
+    }
+
+    callbackId = null;
+
+    if (timeUpdateHandler) {
+      video.removeEventListener(
+        'timeupdate',
+        timeUpdateHandler
+      );
+      timeUpdateHandler = null;
+    }
+
+    if (hardTimer != null) {
+      clearTimeout(hardTimer);
+      hardTimer = null;
+    }
+
+    video.style.transition = 'opacity 120ms linear';
+    video.style.opacity = '1';
+
+    log(
+      'OPEN_GOP_CONCEAL: reveal reason=' + reason +
+      ' mediaTime=' +
+      (
+        Number.isFinite(mediaTime)
+          ? mediaTime.toFixed(3)
+          : 'n/a'
+      ) +
+      ' targetMs=' + targetMs
+    );
+
+    fadeTimer = setTimeout(function () {
+      fadeTimer = null;
+      restoreStyles();
+    }, 160);
+  }
+
+  function onVideoFrame(now, metadata) {
+    if (finished) return;
+
+    const mediaTime =
+      metadata && Number.isFinite(metadata.mediaTime)
+        ? metadata.mediaTime
+        : video.currentTime;
+
+    if (firstMediaTime == null) {
+      firstMediaTime = mediaTime;
+
+      log(
+        'OPEN_GOP_CONCEAL: first hidden frame mediaTime=' +
+        mediaTime.toFixed(3) +
+        ' concealMs=' + targetMs
+      );
+    }
+
+    const decodedSpanMs =
+      (mediaTime - firstMediaTime) * 1000;
+
+    if (decodedSpanMs >= targetMs) {
+      reveal('decoded-media-span', mediaTime);
+      return;
+    }
+
+    callbackId =
+      video.requestVideoFrameCallback(onVideoFrame);
+  }
+
+  if (
+    typeof video.requestVideoFrameCallback === 'function'
+  ) {
+    callbackId =
+      video.requestVideoFrameCallback(onVideoFrame);
+  } else {
+    /*
+     * 旧 Safari 的后备路径。
+     */
+    timeUpdateHandler = function () {
+      if (finished) return;
+
+      const mediaTime = video.currentTime;
+
+      if (firstMediaTime == null) {
+        firstMediaTime = mediaTime;
+      }
+
+      if (
+        (mediaTime - firstMediaTime) * 1000 >= targetMs
+      ) {
+        reveal('timeupdate-span', mediaTime);
+      }
+    };
+
+    video.addEventListener(
+      'timeupdate',
+      timeUpdateHandler
+    );
+  }
+
+  /*
+   * 防止解码器异常时视频永久不可见。
+   * 正常情况下会先由 decoded-media-span 揭开。
+   */
+  hardTimer = setTimeout(function () {
+    reveal('safety-timeout', video.currentTime);
+  }, 8000);
+
+  /*
+   * 在 STOP 或切换频道时调用这个返回函数。
+   */
+  return function cancelOpenGopStartupConceal() {
+    if (
+      callbackId != null &&
+      typeof video.cancelVideoFrameCallback === 'function'
+    ) {
+      try {
+        video.cancelVideoFrameCallback(callbackId);
+      } catch (_) {
+        // 忽略
+      }
+    }
+
+    callbackId = null;
+
+    if (timeUpdateHandler) {
+      video.removeEventListener(
+        'timeupdate',
+        timeUpdateHandler
+      );
+      timeUpdateHandler = null;
+    }
+
+    if (hardTimer != null) {
+      clearTimeout(hardTimer);
+      hardTimer = null;
+    }
+
+    if (fadeTimer != null) {
+      clearTimeout(fadeTimer);
+      fadeTimer = null;
+    }
+
+    finished = true;
+    restoreStyles();
+  };
 }
 function jumpToLatest(){
   const v=$('video');
@@ -1561,6 +3366,11 @@ $('reinit').onclick=reinit;
 
 $('stopBtn').onclick=stopPlayback;
 $('stopBtn2').onclick=stopPlayback;
+$('recoverBtn').onclick=toggleVideoPlayback;
+$('diagToggle').onclick=()=>setDiagEnabled(!state.diagEnabled);
+$('diagHide').onclick=()=>setDiagEnabled(false);
+$('diagClear').onclick=()=>{state.log=[];renderDiag();};
+$('diagCopy').onclick=async()=>{const text=state.log.join('\n');try{await navigator.clipboard.writeText(text);$('diagCopy').textContent='已复制';setTimeout(()=>$('diagCopy').textContent='复制日志',1200);}catch(e){const out=$('diagOutput');out.focus();out.select();let ok=false;try{ok=document.execCommand('copy');}catch(_){}$('diagCopy').textContent=ok?'已复制，请检查':'已选中日志';setTimeout(()=>$('diagCopy').textContent='复制日志',1500);}};
 
 
 

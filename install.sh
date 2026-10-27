@@ -117,10 +117,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rc1."
+echo "Installed 0.2.2-rc1.5."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "RC1: retains PMT-based Safari audio routing, native A/V MSE for AAC/unknown audio, and independent MP2PCM for MPEG Audio."
-echo "      Diagnostic UI, experiment controls, and TS capture entry points are removed; mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
+echo "RC1.5: restores Chrome native controls, improves Safari video PID filtering, and validates udpxy host:port."
+echo "      Chrome video-surface clicks now cancel the browser's competing native default action; compact diagnostics are opt-in and off by default; experiment controls and TS capture entry points remain removed; mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
