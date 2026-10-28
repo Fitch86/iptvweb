@@ -117,10 +117,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rc2.0."
+echo "Installed 0.2.2-rc2.1."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "RC2.0: preserves the Safari-compatible playback path from rc1-fix1, removes production diagnostic controls, and unifies version identifiers."
-echo "      Production player UI has no diagnostic/log controls; mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
+echo "RC2.1: hides unused header controls and removes the stale playback status display; Safari playback logic is unchanged."
+echo "      Header refresh/jump/reinitialize/stop controls and status text are hidden; in-player playback and stop controls remain available. mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
