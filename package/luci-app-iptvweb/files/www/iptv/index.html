@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV RC2.0</title>
+<title>OpenWrt IPTV RC2.1</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -37,12 +37,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">RC2.0</span></h1>
-  <button id="refresh">刷新</button>
-  <button id="jumpLive">跳到最新帧</button>
-  <button id="reinit">重新初始化</button>
-  <button id="stopBtn" class="danger">⏹ 停止并断开</button>
-  <span id="status" class="small"></span>
+  <h1>OpenWrt IPTV <span class="small">RC2.1</span></h1>
 </header>
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
@@ -62,7 +57,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
 <script src="/luci-static/resources/iptvweb/mpg123-decoder.min.js" charset="UTF-8"></script>
 <script>
-const REV='RC2.0';
+const REV='RC2.1';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, diagEnabled:false, diagConsoleHooked:false, lastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
@@ -691,7 +686,7 @@ function renderGroups(){
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
 function log(_msg){}
 function videoSnapshot(_reason){}
-function setStatus(t){ $('status').textContent=t||''; }
+function setStatus(_t){}
 function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
 //function bufferAhead(v){
 //  try{
@@ -3304,11 +3299,7 @@ async function load(){
   }
 }
 
-$('refresh').onclick=load;
-$('jumpLive').onclick=jumpToLatest;
-$('reinit').onclick=reinit;
 
-$('stopBtn').onclick=stopPlayback;
 $('stopBtn2').onclick=stopPlayback;
 $('recoverBtn').onclick=toggleVideoPlayback;
 
