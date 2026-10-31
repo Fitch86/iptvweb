@@ -254,7 +254,7 @@ function parsePmtStreamType(value) {
   return null;
 }
 
-async function detectSafariAudioRoute(ch, seq) {
+/*async function detectSafariAudioRoute(ch, seq) {
   const audioUrl = audioStreamUrl(ch);
   if (!audioUrl) {
     return { kind: 'av-mse', streamType: null, reason: 'no audio URL' };
@@ -291,6 +291,117 @@ async function detectSafariAudioRoute(ch, seq) {
   } finally {
     clearTimeout(timer);
   }
+}*/
+async function detectSafariAudioRoute(ch, seq) {
+  const audioUrl = audioStreamUrl(ch);
+
+  if (!audioUrl) {
+    return {
+      kind: 'av-mse',
+      streamType: null,
+      reason: 'no audio URL'
+    };
+  }
+
+  let probe;
+
+  try {
+    const source = new URL(audioUrl, location.href);
+    probe = new URL('/cgi-bin/iptvweb-audio-probe', location.href);
+    probe.search = source.search;
+  } catch (e) {
+    return {
+      kind: 'probe-error',
+      streamType: null,
+      reason: 'invalid audio URL: ' + String(e && e.message || e)
+    };
+  }
+
+  const maxAttempts = 2;
+  let lastReason = 'unknown';
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    if (seq !== state.seq) return null;
+
+    const startedAt = performance.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 6500);
+
+    try {
+      const response = await fetch(probe.href, {
+        cache: 'no-store',
+        signal: controller.signal
+      });
+
+      if (!response.ok) {
+        throw new Error('HTTP ' + response.status);
+      }
+
+      const info = await response.json();
+
+      if (seq !== state.seq) return null;
+
+      log(
+        'SAFARI_AUDIO_PROBE: attempt=' + attempt +
+        ' elapsedMs=' + (performance.now() - startedAt).toFixed(0) +
+        ' raw=' + JSON.stringify(info)
+      );
+
+      if (!info || info.ok !== true || info.pmt_found !== true) {
+        throw new Error(
+          info && info.error
+            ? info.error
+            : 'PMT probe incomplete'
+        );
+      }
+
+      const streamType = parsePmtStreamType(info.pmt_stream_type);
+
+      if (streamType === 3 || streamType === 4) {
+        return {
+          kind: 'mpeg-audio',
+          streamType,
+          hasVideo: info.has_video !== false,
+          info
+        };
+      }
+
+      // 保留原有策略：AAC 或已解析 PMT 中未识别的音频类型走 A/V。
+      return {
+        kind: 'av-mse',
+        streamType,
+        info
+      };
+
+    } catch (e) {
+      if (seq !== state.seq) return null;
+
+      lastReason =
+        (e && e.name ? e.name + ': ' : '') +
+        (e && e.message ? e.message : String(e));
+
+      log(
+        'SAFARI_AUDIO_PROBE: attempt=' + attempt +
+        ' failed elapsedMs=' + (performance.now() - startedAt).toFixed(0) +
+        ' reason=' + lastReason
+      );
+
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (attempt < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, 150));
+    }
+  }
+
+  if (seq !== state.seq) return null;
+
+  return {
+    kind: 'probe-error',
+    streamType: null,
+    reason: lastReason
+  };
 }
 
 async function waitForWorkletSpace(seq){
@@ -2098,6 +2209,9 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
       return out;
     }
   }
+
+  const HEVC_IRAP_MIN = 16, HEVC_IRAP_MAX = 23; // BLA/IDR/CRA
+  const HEVC_VPS = 32, HEVC_SPS = 33, HEVC_PPS = 34;
   
   class SafariVideoOnlyLoader extends K {
     constructor(seekHandler, config){
@@ -2313,7 +2427,14 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
 	  }
 
 	  if (!this._videoStartedPids.has(pid)) {
-		const isH264 = this._videoStreamTypeByPid.get(pid) === 0x1b;
+		//const isH264 = this._videoStreamTypeByPid.get(pid) === 0x1b;
+		//let canOpen = pusi && hasPayload;
+		//let reason = 'PUSI';
+
+		const streamType = this._videoStreamTypeByPid.get(pid);
+		const isH264 = streamType === 0x1b;
+		const isHevc = streamType === 0x24;
+
 		let canOpen = pusi && hasPayload;
 		let reason = 'PUSI';
 
@@ -2324,6 +2445,14 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
 
 		  canOpen = pusi && hasPayload && hasSps && hasPps && (hasIdr || rai);
 		  reason = hasIdr ? 'IDR+SPS/PPS' : 'RAI+SPS/PPS';
+		} else if (isHevc) {
+		  const nals = this._scanHevcNals(pkt, pid); // 需要专门写HEVC版本的_scanH264Nals
+		  const hasVps = nals.some(t => t === HEVC_VPS);
+		  const hasSps = nals.some(t => t === HEVC_SPS);
+		  const hasPps = nals.some(t => t === HEVC_PPS);
+		  const hasIrap = nals.some(t => isHevcIrap(t));
+		  canOpen = pusi && hasPayload && hasSps && hasPps && hasIrap;
+		  reason = hasIrap ? 'IRAP+VPS/SPS/PPS' : 'wait-irap';
 		}
 
 		if (!canOpen) {
@@ -2356,7 +2485,71 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
 		log('SAFARI_TS_FILTER: first forwarded video packet PID=' + pid +
 		  ' CC=' + cc + ' PUSI=' + pusi + ' RAI=' + rai);
 	  }
-	}	
+	}
+	_forwardHevcForDiagnosis(pkt, pid, out) {
+	  const afc = (pkt[3] >> 4) & 0x03;
+	  const pusi = (pkt[1] & 0x40) !== 0;
+	  const tei = (pkt[1] & 0x80) !== 0;
+
+	  // afc=3 时，adaptation field 后必须至少留一个 payload 字节。
+	  const hasPayload =
+		afc === 1 ||
+		(afc === 3 && pkt[4] <= 182);
+
+	  // 发生 TS transport error 时，丢弃该包并等待下一个 PES 起点。
+	  if (tei) {
+		this._videoStartedPids.delete(pid);
+
+		this._hevcTeiCount = (this._hevcTeiCount || 0) + 1;
+
+		if (this._hevcTeiCount <= 5) {
+		  log(
+			'SAFARI_HEVC: TEI PID=' + pid +
+			', waiting for next PES'
+		  );
+		}
+
+		return;
+	  }
+
+	  /*
+	   * 这里只等待 PES 起点，避免从半个 PES 开始交给 demuxer。
+	   *
+	   * 不要求 VPS/SPS/PPS/IRAP 同时出现在这个 TS 包中。
+	   * 也不调用 _scanHevcNals() 或 OpenGopFixer。
+	   */
+	  if (!this._videoStartedPids.has(pid)) {
+		if (!pusi || !hasPayload) {
+		  this._diagSkippedVideoUntilPusi++;
+		  return;
+		}
+
+		this._videoStartedPids.add(pid);
+
+		log(
+		  'SAFARI_HEVC: passthrough PES gate opened' +
+		  ' PID=' + pid +
+		  ' CC=' + (pkt[3] & 0x0f) +
+		  ' skipped=' + this._diagSkippedVideoUntilPusi
+		);
+	  }
+
+	  // 视频 TS 包不做 NAL 重写、PES 重组或 CC 改写。
+	  // gate 打开后，adaptation-only 包也要转发，以免丢失 PCR。
+	  out.push(pkt);
+	  this._diagOutPackets++;
+
+	  if (!this._diagVideoPackets.has(pid)) {
+		this._diagVideoPackets.add(pid);
+
+		log(
+		  'SAFARI_HEVC: first forwarded video packet' +
+		  ' PID=' + pid +
+		  ' CC=' + (pkt[3] & 0x0f) +
+		  ' PUSI=' + pusi
+		);
+	  }
+	}
     _filterChunk(chunk){
       this._appendBuffer(chunk);
       const packets=[];
@@ -2402,31 +2595,48 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
           continue;
         }
 		const isVideoPid = (this._videoPids.size && this._videoPids.has(pid)) || (this._videoPid != null && pid === this._videoPid);
+		// CCTV16 / 浙江4K / 北京4K 这类标准 HEVC stream_type=0x24。
+		// 提前 continue，绕过 _scanHevcNals 和 H.264 OpenGopFixer。
+		if (
+		  isVideoPid &&
+		  this._videoStreamTypeByPid.get(pid) === 0x24
+		) {
+		  this._forwardHevcForDiagnosis(pkt, pid, out);
+		  continue;
+		}
 		if (isVideoPid) {
-		  let fixer = this._openGopFixers.get(pid);
-		  if (!fixer) {
-  		    //fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), { dryRun: this._openGopDryRun });
-			fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), {
-							dryRun: this._openGopDryRun,
-							onBootstrap: (originalFn) => {          // ← 新增
+		  const streamType = this._videoStreamTypeByPid.get(pid);
+
+		  if (streamType === 0x1b) {
+			// H.264：走原有 OpenGopFixer（I→IDR重写）
+		    let fixer = this._openGopFixers.get(pid);
+		    if (!fixer) {
+			  fixer = new OpenGopFixer(pid, (msg) => log('SAFARI_OPENGOP: ' + msg), {
+			  				  dryRun: this._openGopDryRun,
+							  onBootstrap: (originalFn) => {          // ← 新增
 								if (onOpenGopBootstrap) {              // 闭包直接拿到 makeSafariVideoOnlyLoader 的参数
 									try { onOpenGopBootstrap(pid, originalFn); } catch (e) {}
 								}
-							}
-			});
-			this._openGopFixers.set(pid, fixer);
-		  }
+							  }
+			  });
+			  this._openGopFixers.set(pid, fixer);
+		    }
 
-		  let fixedPkts;
-		  try {
-		    fixedPkts = fixer.feed(pkt);
-		  } catch (e) {
-		    log('SAFARI_OPENGOP: feed() threw PID=' + pid + ' err=' + (e && e.message));
-			fixedPkts = [pkt];
-		  }
+		    let fixedPkts;
+		    try {
+		      fixedPkts = fixer.feed(pkt);
+		    } catch (e) {
+		      log('SAFARI_OPENGOP: feed() threw PID=' + pid + ' err=' + (e && e.message));
+			  fixedPkts = [pkt];
+		    }
 
-		  for (const fp of fixedPkts) {
-		    this._handleVideoPacket(fp, pid, out);
+		    for (const fp of fixedPkts) {
+		      this._handleVideoPacket(fp, pid, out);
+		    }
+		  } else {
+			// HEVC：先不做NAL级别重写，直接走门控
+			// 如果之后发现有Open-GOP/CRA+RASL问题，再考虑单独写HEVC版本的leading-picture drop
+			this._handleVideoPacket(pkt, pid, out);
 		  }
 		  continue;
 		}
@@ -2611,6 +2821,18 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
 		  (dtsDelta == null ? 'n/a' : (dtsDelta / 90).toFixed(3))
 	  );
 	}
+	_scanHevcNals(buf, from) {
+	  // 复用 scanAnnexBNals 找 start code 位置，但是解析2字节header
+	  const nals = scanAnnexBNals(buf, from);
+	  return nals.map(n => {
+		const b0 = buf[n.start];
+		const nalType = (b0 >> 1) & 0x3f;
+		return { ...n, nalType };
+	  });
+	}
+	_isHevcIrap(nalType) {
+	  return nalType >= HEVC_IRAP_MIN && nalType <= HEVC_IRAP_MAX;
+	}
 	_scanH264Nals(pkt, pid) {
 	  let pl = this._payload(pkt);
 	  if (!pl || !pl.length) return [];
@@ -2744,6 +2966,114 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
     }
   }
   return SafariVideoOnlyLoader;
+}
+
+function startCCTV16VideoOnlyDiagnostic(videoEl, url) {
+  const dataSource = {
+    type: 'mpegts',
+    url,
+    isLive: true,
+    hasVideo: true,
+    hasAudio: false
+  };
+
+  const config = {
+    // 仅用于诊断：先关闭 worker，减少自定义 loader 调试变量。
+    enableWorker: false,
+    enableWorkerForMSE: false,
+
+    enableStashBuffer: true,
+    stashInitialSize: 393216,
+    lazyLoad: true,
+    deferLoadAfterSourceOpen: true,
+    autoCleanupSourceBuffer: false,
+    liveBufferLatencyChasing: false,
+    fixAudioTimestampGap: false,
+
+    customLoader: makeSafariVideoOnlyLoader(null)
+  };
+
+  videoEl.playsInline = true;
+  videoEl.muted = true;
+
+  // 仅用于此次诊断，避免远程播放选项干扰 MMS。
+  if ('disableRemotePlayback' in videoEl) {
+    videoEl.disableRemotePlayback = true;
+  }
+
+  // 测试实际 HEVC codec，而不是原日志中的 AVC codec。
+  const hevcMime = 'video/mp4; codecs="hvc1.1.1.L150.B0"';
+
+  for (const name of ['MediaSource', 'ManagedMediaSource']) {
+    const C = window[name];
+
+    if (C && typeof C.isTypeSupported === 'function') {
+      console.log(
+        'CCTV16_TEST: ' + name +
+        '.isTypeSupported(' + hevcMime + ')=',
+        C.isTypeSupported(hevcMime)
+      );
+    }
+  }
+
+  for (const eventName of [
+    'loadedmetadata', 'loadeddata', 'playing', 'waiting', 'error'
+  ]) {
+    videoEl.addEventListener(eventName, () => {
+      const err = videoEl.error;
+
+      console.log(
+        'CCTV16_TEST: video event=' + eventName,
+        'readyState=' + videoEl.readyState,
+        'currentTime=' + videoEl.currentTime,
+        'size=' + videoEl.videoWidth + 'x' + videoEl.videoHeight,
+        'error=' + (err ? `${err.code}: ${err.message}` : 'none')
+      );
+    });
+  }
+
+  if (typeof videoEl.requestVideoFrameCallback === 'function') {
+    videoEl.requestVideoFrameCallback((now, meta) => {
+      console.log(
+        'CCTV16_TEST: first video frame',
+        'mediaTime=' + meta.mediaTime,
+        'size=' + meta.width + 'x' + meta.height
+      );
+    });
+  }
+
+  console.log(
+    'CCTV16_TEST: FORCED video-only, customLoader enabled',
+    dataSource
+  );
+
+  const p = mpegts.createPlayer(dataSource, config);
+
+  p.on(mpegts.Events.ERROR, (type, detail, info) => {
+    console.error('CCTV16_TEST: mpegts.ERROR', type, detail, info);
+  });
+
+  p.on(mpegts.Events.MEDIA_INFO, info => {
+    console.log('CCTV16_TEST: MEDIA_INFO', info);
+  });
+
+  p.attachMediaElement(videoEl);
+  p.load();
+
+  // 本次测试不等 buffer gate，直接请求播放。
+  try {
+    const result = p.play();
+
+    if (result && typeof result.catch === 'function') {
+      result.catch(e => {
+        console.error('CCTV16_TEST: play rejected', e);
+      });
+    }
+  } catch (e) {
+    console.error('CCTV16_TEST: play threw', e);
+  }
+
+  return p;
 }
 
 function safariMseFallbackToVideo(ch, url, seq, failedPlayer){
@@ -3021,6 +3351,17 @@ function play(ch){
 
     detectSafariAudioRoute(ch, seq).then(route => {
       if (!route || seq !== state.seq) return;
+
+  	  if (route.kind === 'probe-error') {
+	    state.safariAudioRoute = 'unknown';
+	    state.avMode = 'av';
+
+	    discardPreparedSafariAudioContext();
+
+	    log('SAFARI route probe failed: ' + route.reason);
+	    setStatus('Safari 音频探测失败，请重试');
+	    return;
+	  }
 
       if (route.kind === 'mpeg-audio') {
         state.safariAudioRoute = 'mpeg-audio';
