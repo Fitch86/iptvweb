@@ -28,9 +28,30 @@ if not udpxy or not udpxy:match('^[%w%.%-]+:%d+$') then
   print('Content-Type: application/json\r\n\r\n{"ok":false,"error":"udpxy not configured"}')
   os.exit(0)
 end
-local pipe=io.popen("uclient-fetch -q -O - 'http://"..udpxy.."/udp/"..group..":"..port.."' 2>/dev/null", 'r')
+--local pipe=io.popen("uclient-fetch -q -O - 'http://"..udpxy.."/udp/"..group..":"..port.."' 2>/dev/null", 'r')
+--if not pipe then
+--  print('Content-Type: application/json\r\n\r\n{"ok":false,"error":"fetch failed"}')
+--  os.exit(0)
+--end
+local timeout_ok = os.execute('command -v timeout >/dev/null 2>&1')
+-- Lua 5.1 通常返回 0；兼容返回 true 的实现。
+if timeout_ok ~= 0 and timeout_ok ~= true then
+  print(
+    'Content-Type: application/json\r\n' ..
+    'Cache-Control: no-store\r\n\r\n' ..
+    '{"ok":false,"pmt_found":false,"error":"timeout command missing"}'
+  )
+  os.exit(0)
+end
+local cmd =
+  "timeout 4 uclient-fetch -q -O - 'http://"..udpxy.."/udp/"..group..":"..port.."' 2>/dev/null"
+local pipe = io.popen(cmd, 'r')
 if not pipe then
-  print('Content-Type: application/json\r\n\r\n{"ok":false,"error":"fetch failed"}')
+  print(
+    'Content-Type: application/json\r\n' ..
+    'Cache-Control: no-store\r\n\r\n' ..
+    '{"ok":false,"pmt_found":false,"error":"fetch failed"}'
+  )
   os.exit(0)
 end
 --local buf=''; local pmt_pid=nil; local audio_pid=nil
@@ -109,7 +130,7 @@ local function pmt(payload,pusi)
     local st=u8(payload,pos)
     local pid=(band(u8(payload,pos+1),31)*256)+u8(payload,pos+2)
     local eil=(band(u8(payload,pos+3),15)*256)+u8(payload,pos+4)
-    if pos+4+eil>entries_end then break end
+    if pos+4+eil>entries_end then return end
     local item={pid=pid,st=st}
     if st==3 then
       item.codec='MPEG-1 Audio'
@@ -200,47 +221,374 @@ local function esc(v) return jsonstr(v) end
 --    end
 --  end
 --end
-while not result and total_read < 1024*1024 do
-  local chunk=pipe:read(65536)
-  if not chunk or #chunk==0 then break end
+--while not result and total_read < 1024*1024 do
+--  local chunk=pipe:read(65536)
+--  if not chunk or #chunk==0 then break end
 
-  total_read=total_read+#chunk
-  buf=buf..chunk
+--  total_read=total_read+#chunk
+--  buf=buf..chunk
 
-  while #buf>=188 and not result do
+--  while #buf>=188 and not result do
     -- MPEG-TS 同步
-    if u8(buf,1)~=0x47 then
-      local found=buf:find(string.char(0x47),2,true)
-      if not found then
-        buf=buf:sub(-187)
-        break
-      end
-      buf=buf:sub(found)
-      if #buf<188 then break end
-    end
+--    if u8(buf,1)~=0x47 then
+--      local found=buf:find(string.char(0x47),2,true)
+--      if not found then
+--        buf=buf:sub(-187)
+--        break
+--      end
+--      buf=buf:sub(found)
+--      if #buf<188 then break end
+--    end
 
-    local pkt=buf:sub(1,188)
-    buf=buf:sub(189)
+--    local pkt=buf:sub(1,188)
+--    buf=buf:sub(189)
 
-    local pusi=band(u8(pkt,2),0x40)~=0
-    local pid=band(u8(pkt,2),31)*256+u8(pkt,3)
-    local afc=band(u8(pkt,4),0x30)/16
+--    local pusi=band(u8(pkt,2),0x40)~=0
+--    local pid=band(u8(pkt,2),31)*256+u8(pkt,3)
+--    local afc=band(u8(pkt,4),0x30)/16
 
-    local pos=5
-    if afc==2 or afc==3 then
-      pos=6+(u8(pkt,5) or 0)
-    end
+--    local pos=5
+--    if afc==2 or afc==3 then
+--      pos=6+(u8(pkt,5) or 0)
+--    end
 
     -- afc=1：只有 payload；afc=3：adaptation field 后有 payload
-    if (afc==1 or afc==3) and pos<=188 then
-      local payload=pkt:sub(pos)
+--    if (afc==1 or afc==3) and pos<=188 then
+--      local payload=pkt:sub(pos)
 
-      if pid==0 then
-        pat(payload,pusi)
-      elseif pmt_pid and pid==pmt_pid then
-        pmt(payload,pusi)
+--      if pid==0 then
+--        pat(payload,pusi)
+--      elseif pmt_pid and pid==pmt_pid then
+--        pmt(payload,pusi)
+--      end
+--    end
+--  end
+--end
+-- 累计读取上限，不是内存缓冲大小。
+-- 实际读取时间仍受外部 timeout 4 限制。
+local PROBE_MAX_BYTES = 32 * 1024 * 1024
+local READ_SIZE = 8192
+local TS_SYNC = string.char(0x47)
+local probe_stats = {
+  ts_packets = 0,
+  pat_packets = 0,
+  pmt_packets = 0,
+  pat_sections = 0,
+  pmt_sections = 0,
+  crc_errors = 0,
+  cc_errors = 0,
+  malformed = 0,
+  sync_losses = 0
+}
+local psi_by_pid = {}
+local sync_locked = false
+-- Lua 5.1 可用的无符号 XOR。
+local function bxor32(a, b)
+  local out = 0
+  local bit = 1
+
+  while a > 0 or b > 0 do
+    if (a % 2) ~= (b % 2) then
+      out = out + bit
+    end
+
+    a = math.floor(a / 2)
+    b = math.floor(b / 2)
+    bit = bit * 2
+  end
+
+  return out
+end
+
+-- CRC-32/MPEG-2。
+-- 对包含末尾 CRC 的完整 PAT/PMT section 计算，正确结果应为 0。
+local function psi_crc32(section)
+  local crc = 4294967295 -- 0xFFFFFFFF
+  local poly = 79764919  -- 0x04C11DB7
+  local mod = 4294967296 -- 2^32
+
+  for i = 1, #section do
+    crc = bxor32(crc, section:byte(i) * 16777216)
+
+    for _ = 1, 8 do
+      local high = crc >= 2147483648
+      crc = (crc * 2) % mod
+
+      if high then
+        crc = bxor32(crc, poly)
       end
     end
+  end
+
+  return crc
+end
+local function handle_section(pid, section)
+  if #section < 8 then return end
+
+  local table_id = section:byte(1)
+
+  local wanted_pat =
+    pid == 0 and table_id == 0x00
+
+  local wanted_pmt =
+    pmt_pid ~= nil and
+    pid == pmt_pid and
+    table_id == 0x02
+
+  if not wanted_pat and not wanted_pmt then return end
+
+  -- PAT/PMT 要求 section_syntax_indicator=1。
+  if section:byte(2) < 0x80 then return end
+
+  -- current_next_indicator=0 表示尚未生效，先忽略。
+  if (section:byte(6) % 2) == 0 then return end
+
+  if psi_crc32(section) ~= 0 then
+    probe_stats.crc_errors = probe_stats.crc_errors + 1
+    return
+  end
+
+  -- 原有 pat()/pmt() 接收的是带 pointer_field 的 payload。
+  -- 此处补一个值为 0 的 pointer_field，再交给原函数。
+  local payload = string.char(0) .. section
+
+  if wanted_pat then
+    probe_stats.pat_sections = probe_stats.pat_sections + 1
+    pat(payload, true)
+  else
+    probe_stats.pmt_sections = probe_stats.pmt_sections + 1
+    pmt(payload, true)
+  end
+end
+local function consume_sections(pid, st)
+  while #st.buf > 0 do
+    -- PSI section 后面的 stuffing。
+    if st.buf:byte(1) == 0xff then
+      st.buf = ''
+      return
+    end
+
+    if #st.buf < 3 then return end
+
+    local section_length =
+      (st.buf:byte(2) % 16) * 256 +
+      st.buf:byte(3)
+
+    -- PAT/PMT 的 section_length 不应超过 1021。
+    if section_length < 4 or section_length > 1021 then
+      probe_stats.malformed = probe_stats.malformed + 1
+      st.buf = ''
+      return
+    end
+
+    local need = 3 + section_length
+
+    if #st.buf < need then
+      -- 等待后续 TS 包。
+      return
+    end
+
+    local section = st.buf:sub(1, need)
+    st.buf = st.buf:sub(need + 1)
+
+    handle_section(pid, section)
+
+    if result then return end
+  end
+end
+local function feed_psi(pid, payload, pusi, cc)
+  local st = psi_by_pid[pid]
+
+  if not st then
+    st = {
+      buf = '',
+      cc = nil,
+      last_payload = nil,
+      last_pusi = nil
+    }
+
+    psi_by_pid[pid] = st
+  end
+
+  if st.cc ~= nil then
+    if cc == st.cc then
+      -- 相同 CC 且 payload 完全一致：按重复包处理。
+      if payload == st.last_payload and pusi == st.last_pusi then
+        return
+      end
+
+      probe_stats.cc_errors = probe_stats.cc_errors + 1
+      st.buf = ''
+
+    elseif cc ~= ((st.cc + 1) % 16) then
+      probe_stats.cc_errors = probe_stats.cc_errors + 1
+      st.buf = ''
+    end
+  end
+
+  st.cc = cc
+  st.last_payload = payload
+  st.last_pusi = pusi
+
+  if pusi then
+    local pointer = payload:byte(1)
+
+    if not pointer or pointer > (#payload - 1) then
+      probe_stats.malformed = probe_stats.malformed + 1
+      st.buf = ''
+      return
+    end
+
+    -- pointer 前的字节可能是上一个 section 的尾部。
+    if #st.buf > 0 and pointer > 0 then
+      st.buf = st.buf .. payload:sub(2, 1 + pointer)
+      consume_sections(pid, st)
+
+      if result then return end
+    end
+
+    -- pointer 指向新的 section；旧的不完整数据不能继续使用。
+    st.buf = payload:sub(2 + pointer)
+
+    if #st.buf > 0 then
+      consume_sections(pid, st)
+    end
+
+  elseif #st.buf > 0 then
+    -- 非 PUSI 包只用于补齐已有的不完整 section。
+    st.buf = st.buf .. payload
+    consume_sections(pid, st)
+  end
+end
+local function find_ts_sync(data)
+  -- 连续验证三个 188-byte 包的同步字节。
+  local last = #data - 376
+  local pos = 1
+
+  while pos <= last do
+    local found = data:find(TS_SYNC, pos, true)
+
+    if not found or found > last then
+      return nil
+    end
+
+    if
+      data:byte(found + 188) == 0x47 and
+      data:byte(found + 376) == 0x47
+    then
+      return found
+    end
+
+    pos = found + 1
+  end
+
+  return nil
+end
+local function process_ts_packet(data, pos)
+  local b1, b2, b3 = data:byte(pos + 1, pos + 3)
+
+  local pid = (b1 % 32) * 256 + b2
+
+  if pid ~= 0 and (pmt_pid == nil or pid ~= pmt_pid) then
+    return
+  end
+
+  if pid == 0 then
+    probe_stats.pat_packets = probe_stats.pat_packets + 1
+  else
+    probe_stats.pmt_packets = probe_stats.pmt_packets + 1
+  end
+
+  local tei = b1 >= 128
+  local pusi = (math.floor(b1 / 64) % 2) == 1
+  local scrambling = math.floor(b3 / 64) % 4
+  local afc = math.floor(b3 / 16) % 4
+  local cc = b3 % 16
+
+  if tei or scrambling ~= 0 or afc == 0 then
+    psi_by_pid[pid] = nil
+    return
+  end
+
+  local adaptation_length = 0
+
+  if afc == 2 or afc == 3 then
+    adaptation_length = data:byte(pos + 4)
+
+    if adaptation_length > 183 then
+      probe_stats.malformed = probe_stats.malformed + 1
+      psi_by_pid[pid] = nil
+      return
+    end
+
+    -- adaptation field 中的 discontinuity_indicator。
+    if adaptation_length >= 1 and data:byte(pos + 5) >= 128 then
+      psi_by_pid[pid] = nil
+    end
+  end
+
+  -- adaptation-only，没有 payload，也不推进 PSI payload 的 CC。
+  if afc == 2 then return end
+
+  local payload_start
+
+  if afc == 1 then
+    payload_start = pos + 4
+  else
+    payload_start = pos + 5 + adaptation_length
+  end
+
+  local packet_end = pos + 187
+
+  if payload_start > packet_end then return end
+
+  local payload = data:sub(payload_start, packet_end)
+  feed_psi(pid, payload, pusi, cc)
+end
+
+while not result and total_read < PROBE_MAX_BYTES do
+  local want = math.min(READ_SIZE, PROBE_MAX_BYTES - total_read)
+  local chunk = pipe:read(want)
+
+  if not chunk or #chunk == 0 then break end
+
+  total_read = total_read + #chunk
+  buf = buf .. chunk
+
+  if not sync_locked then
+    local start = find_ts_sync(buf)
+
+    if start then
+      buf = buf:sub(start)
+      sync_locked = true
+    elseif #buf > 376 then
+      -- 保留尾部，供下一批数据继续验证跨批次同步。
+      buf = buf:sub(-376)
+    end
+  end
+
+  if sync_locked then
+    local pos = 1
+
+    while pos + 187 <= #buf and not result do
+      if buf:byte(pos) ~= 0x47 then
+        probe_stats.sync_losses = probe_stats.sync_losses + 1
+        sync_locked = false
+        psi_by_pid = {}
+
+        -- 从下一个字节重新寻找同步。
+        pos = pos + 1
+        break
+      end
+
+      probe_stats.ts_packets = probe_stats.ts_packets + 1
+      process_ts_packet(buf, pos)
+
+      pos = pos + 188
+    end
+
+    -- 每批数据只截取一次剩余部分，避免逐 TS 包复制整个 buf。
+    buf = buf:sub(pos)
   end
 end
 --pipe:close()
@@ -263,5 +611,22 @@ if result then
         ',"has_video":'..has_video..
         ',"video_pid":'..video_pid..'}')
 else
-  print('{"ok":false,"pmt_found":false,"error":"PAT/PMT not found"}')
+  --print('{"ok":false,"pmt_found":false,"error":"PAT/PMT not found"}')
+  print(
+    '{"ok":false,"pmt_found":false' ..
+    ',"error":"PAT/PMT not found"' ..
+    ',"bytes_read":' .. tostring(total_read) ..
+    ',"probe_pmt_pid":' ..
+      (pmt_pid and tostring(pmt_pid) or 'null') ..
+    ',"ts_packets":' .. tostring(probe_stats.ts_packets) ..
+    ',"pat_packets":' .. tostring(probe_stats.pat_packets) ..
+    ',"pmt_packets":' .. tostring(probe_stats.pmt_packets) ..
+    ',"pat_sections":' .. tostring(probe_stats.pat_sections) ..
+    ',"pmt_sections":' .. tostring(probe_stats.pmt_sections) ..
+    ',"crc_errors":' .. tostring(probe_stats.crc_errors) ..
+    ',"cc_errors":' .. tostring(probe_stats.cc_errors) ..
+    ',"malformed":' .. tostring(probe_stats.malformed) ..
+    ',"sync_losses":' .. tostring(probe_stats.sync_losses) ..
+    '}'
+  )
 end
