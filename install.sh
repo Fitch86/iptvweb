@@ -117,10 +117,10 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rc2.2."
+echo "Installed 0.2.2-rc2.3."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "RC2.2: adds iOS Safari HEVC/4K video handling for channels such as CCTV16 and strengthens PAT/PMT probing; retains the simplified RC2.1 player interface."
+echo "RC2.3: adds iOS Safari HEVC/4K video handling for channels such as CCTV16 and strengthens PAT/PMT probing; retains the simplified RC2.1 player interface."
 echo "      Header controls, diagnostic panel and status text are hidden; in-player playback and stop controls remain available. mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
