@@ -1041,17 +1041,20 @@ function makeRelayFetchLoader(options){
  return class IPTVRelayFetchLoader extends Base{
   constructor(seekHandler,config){super('IPTVRelayFetchLoader');this._status=0;this._closed=false;this._controller=null;this._reader=null;this._bytes=0;this._timedOut=false;this._timer=0;}
   open(dataSource,range){
-   this._status=1;this._closed=false;this._controller=new AbortController();
-   this._timer=setTimeout(()=>{this._timedOut=true;try{this._controller.abort();}catch(e){}},20000);
+   this._status=1;this._closed=false;this._timedOut=false;this._controller=new AbortController();
+   const armTimeout=()=>{if(this._timer)clearTimeout(this._timer);this._timer=setTimeout(()=>{this._timedOut=true;try{this._controller.abort();}catch(e){}},20000);};
+   // 20 秒仅限制连接建立；收到响应后改为无数据空闲超时，不能限制回看总时长。
+   armTimeout();
    fetch(dataSource.url,{cache:'no-store',signal:this._controller.signal}).then(async response=>{
+    if(this._timer)clearTimeout(this._timer);this._timer=0;
     if(!response.ok)throw new Error('HTTP '+response.status);if(!response.body)throw new Error('ReadableStream unavailable');
-    this._status=2;this._reader=response.body.getReader();let pos=0;
-    while(!this._closed){const item=await this._reader.read();if(item.done)break;if(!item.value||!item.value.byteLength)continue;
+    this._status=2;this._reader=response.body.getReader();let pos=0;armTimeout();
+    while(!this._closed){const item=await this._reader.read();if(item.done)break;armTimeout();if(!item.value||!item.value.byteLength)continue;
      const chunk=item.value,ab=chunk.buffer.slice(chunk.byteOffset,chunk.byteOffset+chunk.byteLength);this._bytes+=chunk.byteLength;
      if(options&&options.onBytes)options.onBytes(chunk.byteLength);if(this.onDataArrival)this.onDataArrival(ab,pos,this._bytes);pos+=chunk.byteLength;
     }
     if(this._closed)return;clearTimeout(this._timer);this._timer=0;this._status=4;if(this.onComplete)this.onComplete(0,pos-1);
-   }).catch(error=>{if(this._closed)return;clearTimeout(this._timer);this._timer=0;this._status=3;if(this.onError)this.onError('Exception',{code:-1,msg:this._timedOut?'中继流读取超时':String(error&&error.message||error)});});
+   }).catch(error=>{if(this._closed)return;clearTimeout(this._timer);this._timer=0;this._status=3;if(this.onError)this.onError('Exception',{code:-1,msg:this._timedOut?'中继流读取空闲超时':String(error&&error.message||error)});});
   }
   abort(){try{if(this._controller)this._controller.abort();}catch(e){}try{if(this._reader)this._reader.cancel();}catch(e){}this._status=0;}
   destroy(){this._closed=true;this.abort();if(this._timer)clearTimeout(this._timer);this._timer=0;}
