@@ -31,6 +31,7 @@ mkdir -p /etc/uci-defaults /usr/bin /www/iptv /www/cgi-bin \
 
 cp -f "$FILES/usr/bin/iptvweb-fetch" /usr/bin/iptvweb-fetch
 cp -f "$FILES/www/iptv/index.html" /www/iptv/index.html
+cp -f "$FILES/www/luci-static/resources/iptvweb/unicast-map.json" /www/luci-static/resources/iptvweb/unicast-map.json
 cp -f "$FILES/www/cgi-bin/iptvweb-m3u" /www/cgi-bin/iptvweb-m3u
 cp -f "$FILES/www/cgi-bin/iptvweb-stream" /www/cgi-bin/iptvweb-stream
 cp -f "$FILES/www/cgi-bin/iptvweb-audio" /www/cgi-bin/iptvweb-audio
