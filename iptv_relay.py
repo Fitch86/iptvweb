@@ -148,14 +148,18 @@ def pump(s, sess, final_url, write, stop_ev, log=lambda *a: None, idle_timeout=2
         raise RuntimeError("PLAY失败: " + (t.splitlines()[0] if t else "<empty>"))
     log("[%s] PLAY accepted (channel=%d); waiting for RTP data" % (reqid, ch))
     carry = b""; total = 0; last = time.time()
-    last_report = last; recv_bytes = 0; interleaved_frames = 0
+    media_started = last; last_report = last
+    recv_bytes = 0; interleaved_frames = 0
     rtp_frames = 0; rtp_payload_bytes = 0; ts_bytes = 0
     s.settimeout(idle_timeout)
     while not (stop_ev and stop_ev.is_set()):
         try:
             d = s.recv(65536)
         except socket.timeout:
-            log("空闲超时, 结束"); break
+            log("[%s] MEDIA_IDLE_TIMEOUT elapsed=%.1fs since_last_data=%.1fs recv_tcp=%d interleaved=%d rtp_frames=%d rtp_payload=%d ts_out=%d" %
+                (reqid, time.time() - media_started, time.time() - last,
+                 recv_bytes, interleaved_frames, rtp_frames, rtp_payload_bytes, total))
+            break
         if not d:
             log("[%s] upstream TCP EOF" % reqid)
             break
@@ -190,7 +194,7 @@ def pump(s, sess, final_url, write, stop_ev, log=lambda *a: None, idle_timeout=2
         now = time.time()
         if now - last_report >= 5:
             log("[%s] MEDIA stats elapsed=%.1fs recv_tcp=%d interleaved=%d rtp_frames=%d rtp_payload=%d ts_out=%d since_last_data=%.1fs" %
-                (reqid, now - (last_report if last_report == last else now),
+                (reqid, now - media_started,
                  recv_bytes, interleaved_frames, rtp_frames, rtp_payload_bytes,
                  ts_bytes, now - last))
             last_report = now
