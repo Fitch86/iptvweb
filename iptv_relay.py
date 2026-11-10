@@ -96,10 +96,6 @@ def rtsp_connect(url, seek=None, log=lambda *a: None, reqid="-"):
             s.close()
             raise RuntimeError("DESCRIBE失败: " + status)
         break
-    else:
-        if s:
-            s.close()
-        raise RuntimeError("DESCRIBE重定向超过6跳")
     sess = re.search(r"Session:\s*([^;\r\n]+)", t, re.I)
     sess = sess.group(1) if sess else ""
     log("[%s] DESCRIBE complete session_present=%s final_target=%s" %
