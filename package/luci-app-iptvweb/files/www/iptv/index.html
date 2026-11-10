@@ -3465,7 +3465,7 @@ function play(ch){
 }
 
 function stopPlayback(){
-  stopCatchupTicker();state.catchup.active=false;
+  state.seq++;stopCatchupTicker();state.catchup.active=false;
   state.stopping=true;
   stopWebAudio(); state.userPaused=false;
   log('STOP: 用户请求停止并断开流');
