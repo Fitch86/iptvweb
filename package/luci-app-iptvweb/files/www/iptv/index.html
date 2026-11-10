@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV RC2.2</title>
+<title>OpenWrt IPTV RC2.3</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -31,13 +31,31 @@ main{flex:1;min-width:0;min-height:0;padding:12px;display:flex;flex-direction:co
 .player{width:100%;max-width:1200px;margin:0 auto;background:#000;border-radius:8px;overflow:hidden;position:relative}
 video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 .now{width:100%;max-width:1200px;margin:9px auto 0;padding:8px 2px;font-size:15px}
+#catchupPanel{margin-top:10px;padding:10px;background:#1b1b1b;border:1px solid #333;border-radius:7px}
+.catchup-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:7px 0}
+.catchup-row label{font-size:13px;color:#bbb}
+.catchup-row input{background:#090909;color:#eee;border:1px solid #555;border-radius:5px;padding:6px;min-height:34px}
+.catchup-row button{min-height:34px}
+.catchup-status{font-size:13px;color:#8fc7ff;margin-top:6px}
+.channel{position:relative}
+.channel .name{flex:1}
+.channel .catchup-btn{padding:5px 7px;font-size:12px;flex:0 0 auto}
+.channel .catchup-btn:disabled{background:#444;color:#777;cursor:not-allowed}
 .hint{color:#999;font-size:12px;margin-top:3px}
 @media(max-width:700px){body{overflow:auto}.layout{height:auto;min-height:calc(100vh - 86px);flex-direction:column}#sidebar{order:2;width:100%;flex:none;max-height:45vh;border-right:0;border-top:1px solid #292929}main{order:1;padding:0 0 8px;overflow:visible}.player{border-radius:0}}
+@media(max-height:520px) and (orientation:landscape) and (max-width:950px){
+ body{overflow:hidden}
+ .layout{height:calc(100dvh - 50px);min-height:0;flex-direction:row}
+ #sidebar{order:0;width:34vw;flex:0 0 34vw;height:100%;max-height:none;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
+ main{order:1;min-height:0;overflow:auto;padding:6px}
+ .player{max-width:none}
+ .channel{min-height:44px}
+}
 </style>
 </head>
 <body>
 <header>
-  <h1>OpenWrt IPTV <span class="small">RC2.2</span></h1>
+  <h1>OpenWrt IPTV <span class="small">RC2.3</span></h1>
 </header>
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
@@ -50,16 +68,36 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
       </div>
     </div>
     <div class="now" id="now">选择频道开始播放
-      <div class="hint">通过 LuCI 配置 M3U 频道列表。选择频道即可播放；停止按钮会断开当前流。</div>
+      <div class="hint">直播默认使用组播；支持回看的频道可从频道列表进入回看。</div>
+      <section id="catchupPanel" hidden>
+        <strong>回看设置（北京时间）</strong>
+        <div class="catchup-row">
+          <label>日期 <input id="catchupDate" type="date"></label>
+          <label>开始 <input id="catchupStart" type="time" step="60"></label>
+          <label>结束 <input id="catchupEnd" type="time" step="60"></label>
+        </div>
+        <div class="catchup-row">
+          <button type="button" data-back-min="10">最近10分钟</button>
+          <button type="button" data-back-min="30">最近30分钟</button>
+          <button type="button" data-back-min="60">最近1小时</button>
+          <button type="button" data-back-min="240">最近4小时</button>
+        </div>
+        <div class="catchup-row">
+          <button id="catchupStartBtn" type="button">▶ 开始回看</button>
+          <button id="catchupExitBtn" type="button" class="danger" disabled>↩ 退出回看，返回直播</button>
+        </div>
+        <div class="catchup-status" id="catchupStatus">选择时间后开始回看，单次窗口最多4小时。</div>
+      </section>
     </div>
   </main>
 </div>
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
 <script src="/luci-static/resources/iptvweb/mpg123-decoder.min.js" charset="UTF-8"></script>
 <script>
-const REV='RC2.2';
+const REV='RC2.3';
 const state={
-  items:[], groups:[], active:'', current:null, player:null, seq:0, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
+  items:[], groups:[], active:'', current:null, player:null, seq:0, unicastMap:[], sourceKind:'multicast', liveFallbackTried:false,
+  catchup:{active:false,startMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:''}, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
@@ -780,18 +818,11 @@ function resetAudioSchedule(seq,reason){
 function scheduleWebAudioAfterVideo(seq){ schedulePcmQueue(seq); }
 
 function renderGroups(){
-  const html=state.groups.map(g=>{
-    const list=state.items.filter(x=>x.group===g);
-    const open=state.active===g;
-    return `<section class="group ${open?'open':''}" data-g="${esc(g)}"><div class="group-head"><span class="arrow">${open?'▼':'▶'}</span><span>${esc(g)}</span><span class="count">${list.length}</span></div><div class="group-channels">${list.map(x=>`<div class="channel ${state.current===x?'active':''}" data-i="${state.items.indexOf(x)}">${x.logo?`<img src="${esc(x.logo)}" loading="lazy" alt="">`:''}<div class="name">${esc(x.name)}</div></div>`).join('')}</div></section>`;
-  }).join('');
-  $('groups').innerHTML=html;
-  document.querySelectorAll('.group-head').forEach(h=>h.onclick=()=>{
-    const g=h.parentElement.dataset.g;
-    state.active=state.active===g?'':g;
-    renderGroups();
-  });
-  document.querySelectorAll('.channel').forEach(x=>x.onclick=()=>play(state.items[+x.dataset.i]));
+ const markup=state.groups.map(g=>{const list=state.items.filter(x=>x.group===g),open=state.active===g;return `<section class="group ${open?'open':''}" data-g="${esc(g)}"><div class="group-head"><span class="arrow">${open?'▼':'▶'}</span><span>${esc(g)}</span><span class="count">${list.length}</span></div><div class="group-channels">${list.map(x=>{const i=state.items.indexOf(x);return `<div class="channel ${state.current===x?'active':''}" data-i="${i}">${x.logo?`<img src="${esc(x.logo)}" loading="lazy" alt="">`:''}<div class="name">${esc(x.name)}</div><button type="button" class="catchup-btn" data-catchup-i="${i}" ${x.rtsp?'':'disabled'} title="${x.rtsp?'回看':'没有匹配的单播 RTSP 地址'}">回看</button></div>`}).join('')}</div></section>`;}).join('');
+ $('groups').innerHTML=markup;
+ document.querySelectorAll('.group-head').forEach(h=>h.onclick=()=>{const g=h.parentElement.dataset.g;state.active=state.active===g?'':g;renderGroups();});
+ document.querySelectorAll('.channel').forEach(x=>x.onclick=()=>play(state.items[+x.dataset.i]));
+ document.querySelectorAll('.catchup-btn').forEach(x=>x.onclick=e=>{e.stopPropagation();const ch=state.items[+x.dataset.catchupI];if(ch&&ch.rtsp)openCatchup(ch);});
 }
 
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
@@ -1002,6 +1033,70 @@ function attachVideoDiagnostics(v, seq){
     };
     v.requestVideoFrameCallback(cb);
   }
+}
+
+
+function makeRelayFetchLoader(options){
+ const Base=mpegts.BaseLoader;if(!Base)throw new Error('mpegts.BaseLoader unavailable');
+ return class IPTVRelayFetchLoader extends Base{
+  constructor(seekHandler,config){super('IPTVRelayFetchLoader');this._status=0;this._closed=false;this._controller=null;this._reader=null;this._bytes=0;this._timedOut=false;this._timer=0;}
+  open(dataSource,range){
+   this._status=1;this._closed=false;this._controller=new AbortController();
+   this._timer=setTimeout(()=>{this._timedOut=true;try{this._controller.abort();}catch(e){}},20000);
+   fetch(dataSource.url,{cache:'no-store',signal:this._controller.signal}).then(async response=>{
+    if(!response.ok)throw new Error('HTTP '+response.status);if(!response.body)throw new Error('ReadableStream unavailable');
+    this._status=2;this._reader=response.body.getReader();let pos=0;
+    while(!this._closed){const item=await this._reader.read();if(item.done)break;if(!item.value||!item.value.byteLength)continue;
+     const chunk=item.value,ab=chunk.buffer.slice(chunk.byteOffset,chunk.byteOffset+chunk.byteLength);this._bytes+=chunk.byteLength;
+     if(options&&options.onBytes)options.onBytes(chunk.byteLength);if(this.onDataArrival)this.onDataArrival(ab,pos,this._bytes);pos+=chunk.byteLength;
+    }
+    if(this._closed)return;clearTimeout(this._timer);this._timer=0;this._status=4;if(this.onComplete)this.onComplete(0,pos-1);
+   }).catch(error=>{if(this._closed)return;clearTimeout(this._timer);this._timer=0;this._status=3;if(this.onError)this.onError('Exception',{code:-1,msg:this._timedOut?'中继流读取超时':String(error&&error.message||error)});});
+  }
+  abort(){try{if(this._controller)this._controller.abort();}catch(e){}try{if(this._reader)this._reader.cancel();}catch(e){}this._status=0;}
+  destroy(){this._closed=true;this.abort();if(this._timer)clearTimeout(this._timer);this._timer=0;}
+  isWorking(){return this._status===1||this._status===2;}get status(){return this._status;}get needStashBuffer(){return false;}
+ };
+}
+function relayStreamUrl(rtsp,seek){const u=new URL(location.protocol+'//'+location.hostname+':4023/stream');u.searchParams.set('url',rtsp);if(seek)u.searchParams.set('seek',seek);return u.href;}
+function normalizeChannelKey(value){return String(value||'').toLowerCase().replace(/(超高清|高清|标清|4k|uhd|hd)/g,'').replace(/[\s_\-+（）()]/g,'');}
+function resolveUnicast(ch){
+ if(!ch)return '';if(/^rtsp:\/\//i.test(ch.url||''))return ch.url;
+ const id=String(ch.id||''),name=String(ch.name||'');let list=state.unicastMap.filter(x=>id&&x.id===id);
+ if(!list.length){const keys=[normalizeChannelKey(id),normalizeChannelKey(name)].filter(Boolean);list=state.unicastMap.filter(x=>keys.includes(normalizeChannelKey(x.id))||keys.includes(normalizeChannelKey(x.name)));}
+ if(!list.length)return '';
+ const label=(id+' '+name).toLowerCase(),want4k=/4k|超高清/.test(label),wantSd=/标清|sd/.test(label);
+ list.sort((a,b)=>{const score=x=>{let n=0;if(x.id===id)n+=100;if(want4k&&/4k|超高清/.test(x.group))n+=40;else if(wantSd&&/标清/.test(x.group))n+=40;else if(!want4k&&!wantSd&&/高清/.test(x.group))n+=20;if(/广播/.test(x.group))n-=50;return n;};return score(b)-score(a);});
+ return list[0].url;
+}
+function bjInput(ms){const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).formatToParts(new Date(ms)),v={};p.forEach(x=>v[x.type]=x.value);return {date:v.year+'-'+v.month+'-'+v.day,time:v.hour+':'+v.minute};}
+function bjEpoch(date,time){const d=String(date||'').split('-').map(Number),t=String(time||'').split(':').map(Number);if(d.length!==3||t.length<2||d.some(x=>!Number.isFinite(x))||t.some(x=>!Number.isFinite(x)))return NaN;return Date.UTC(d[0],d[1]-1,d[2],t[0]-8,t[1],0);}
+function bjCompact(date,time){return String(date).replace(/-/g,'')+String(time).replace(':','')+'00';}
+function setCatchupDefault(minutes){const end=Date.now(),start=end-(minutes||10)*60000,a=bjInput(start),b=bjInput(end);$('catchupDate').value=a.date;$('catchupStart').value=a.time;$('catchupEnd').value=b.time;}
+function openCatchup(ch){if(!ch.rtsp)return;state.current=ch;state.active=ch.group;renderGroups();$('catchupPanel').hidden=false;setCatchupDefault(10);$('catchupStatus').textContent='频道：'+ch.name+'；时间按北京时间计算。';$('catchupExitBtn').disabled=true;}
+function stopCatchupTicker(){if(state.catchup.timer){clearInterval(state.catchup.timer);state.catchup.timer=0;}}
+function updateCatchupClock(){if(!state.catchup.active)return;const v=$('video'),ms=state.catchup.startMs+Math.max(0,Number(v.currentTime)||0)*1000;const p=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(ms));$('catchupStatus').textContent='回看中 · '+p+'（北京时间）';}
+function finishCatchup(message){if(!state.catchup.active)return;state.catchup.active=false;stopCatchupTicker();stopPlayer();$('catchupExitBtn').disabled=false;$('catchupStatus').textContent=message;}
+function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
+ if(seq!==state.seq)return;stopPlayer();state.catchup.active=true;state.catchup.startMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';$('catchupExitBtn').disabled=false;$('catchupStatus').textContent='正在连接回看中继…';
+ const url=relayStreamUrl(ch.rtsp,seek);let settled=false;
+ const failed=reason=>{if(settled||seq!==state.seq)return;settled=true;if(retry<1){$('catchupStatus').textContent='回看连接中断，正在重试…';setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
+ const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
+ const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}
+ createPlayer(ch,url,seq,'av',{rawFetch:true,isLive:false,onBytes:n=>{if(seq===state.seq)state.catchup.bytes+=n;},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
+ video.onended=complete;video.ontimeupdate=()=>{if(seq!==state.seq||!state.catchup.active)return;updateCatchupClock();if(video.currentTime>=Math.max(0,(endMs-startMs)/1000-1.5))complete();};
+ state.catchup.timer=setInterval(updateCatchupClock,1000);
+}
+function startCatchup(){
+ const ch=state.current;if(!ch||!ch.rtsp)return;const date=$('catchupDate').value,start=$('catchupStart').value,end=$('catchupEnd').value;
+ const a=bjEpoch(date,start);let z=bjEpoch(date,end);if(!Number.isFinite(a)||!Number.isFinite(z)){$('catchupStatus').textContent='请填写有效的日期和起止时间。';return;}
+ if(z<=a)z+=86400000;if(z-a>14400000){$('catchupStatus').textContent='单次回看不能超过4小时。';return;}
+ const seek=bjCompact(date,start)+'-'+bjCompact(bjInput(z).date,end),seq=++state.seq;state.liveFallbackTried=true;state.catchup.rtsp=ch.rtsp;startCatchupAttempt(ch,a,z,seek,seq,0);
+}
+function exitCatchup(){const ch=state.current;stopCatchupTicker();state.catchup.active=false;$('catchupPanel').hidden=true;if(ch)play(ch);}
+function startLiveRelayFallback(ch,seq){
+ if(seq!==state.seq||state.liveFallbackTried)return;if(!ch.rtsp){$('now').firstChild.textContent=ch.name+' · 组播失败，且无单播地址';return;}state.liveFallbackTried=true;
+ setTimeout(()=>{if(seq!==state.seq)return;stopPlayer();state.sourceKind='relay-live';createPlayer(ch,relayStreamUrl(ch.rtsp,''),seq,'av',{rawFetch:true,isLive:true,onError:e=>{$('now').firstChild.textContent=ch.name+' · 单播兜底失败：'+(e&&e.message||'连接错误');},onComplete:()=>{$('now').firstChild.textContent=ch.name+' · 单播直播已断开';}});},0);
 }
 
 function playerConfig(){
@@ -3082,12 +3177,13 @@ function createPlayer(ch, url, seq, mode, extraOpts){
   else { v.muted=false; }
   // iPhone/iPad Safari uses ManagedMediaSource. Marking the source live is important
   // for Apple's live-MSE path; keep the proven isLive=false path on other browsers.
-  const ds={type:'mpegts', url:url, isLive:iosSafari};
+  const ds={type:'mpegts', url:url, isLive:extraOpts.isLive!==undefined?!!extraOpts.isLive:iosSafari};
   if(mode==='video') {
     ds.hasAudio=false;
   }
   const config=playerConfig();
-  if(mode==='video' && iosSafari){
+  if(extraOpts.rawFetch) config.customLoader=makeRelayFetchLoader(extraOpts);
+  if(mode==='video' && iosSafari && !extraOpts.rawFetch){
 	try{
       config.customLoader = makeSafariVideoOnlyLoader(extraOpts.onOpenGopBootstrap || null);
       log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
@@ -3112,6 +3208,7 @@ function createPlayer(ch, url, seq, mode, extraOpts){
   p.on(mpegts.Events.ERROR, (type, details, info)=>{
     if(seq!==state.seq) return;
     state.lastErrorText=String(details||type);
+    if(extraOpts.onError){try{extraOpts.onError(new Error(String(details||type)));}catch(e){}}
     if(/audio/i.test(String(details||'')+' '+JSON.stringify(info||{}))) state.audioDecodeError=true;
     log('mpegts.ERROR type='+type+' details='+details+' info='+JSON.stringify(info||{}));
     scheduleSafariMseFallback(ch,url,seq,p,details,type);
@@ -3136,6 +3233,7 @@ function createPlayer(ch, url, seq, mode, extraOpts){
     p.on(ev, info=>{
       if(seq!==state.seq) return;
       if(name==='STATISTICS_INFO'){ state.stats=info||{}; return; }
+      if(name==='LOADING_COMPLETE'&&extraOpts.onComplete){try{extraOpts.onComplete();}catch(e){}}
       log(name+(info?' '+JSON.stringify(info):''));
     });
   });
@@ -3263,7 +3361,8 @@ function resetPlayState(){
 }
 
 function play(ch){
-  const seq=++state.seq;
+  stopCatchupTicker();state.catchup.active=false;$('catchupPanel').hidden=true;
+  const seq=++state.seq;state.sourceKind='multicast';state.liveFallbackTried=false;
   state.safariAudioOnly=false;
   state.current=ch; state.active=ch.group; renderGroups();
   stopPlayer();
@@ -3321,6 +3420,7 @@ function play(ch){
         // 关键改动：不再无条件 arm，而是把回调传进去，
         // 只有 OpenGopFixer 真正做了 bootstrap 才会触发遮罩
         createPlayer(ch, url, seq, 'video', {
+          onError:e=>startLiveRelayFallback(ch,seq),onComplete:()=>startLiveRelayFallback(ch,seq),
           onOpenGopBootstrap: function (pid) {
             if (seq !== state.seq) return;      // 频道已切换，忽略过期回调
             log('OpenGOP bootstrap detected on PID=' + pid + ', arming recovery mask');
@@ -3340,7 +3440,7 @@ function play(ch){
         state.avMode = 'av';
         log('SAFARI route=A/V MSE stream_type=' + (route.streamType == null ? 'unknown' : route.streamType));
         discardPreparedSafariAudioContext();
-        createPlayer(ch, url, seq, 'av');
+        createPlayer(ch, url, seq, 'av',{onError:e=>startLiveRelayFallback(ch,seq),onComplete:()=>startLiveRelayFallback(ch,seq)});
       }
     }).catch(e => {
       if (seq !== state.seq) return;
@@ -3361,10 +3461,11 @@ function play(ch){
     log('mpegts.isSupported=false localMarker='+!!window.__iptvwebMpegtsLocalRequired);
     return;
   }
-  createPlayer(ch, url, seq, state.avMode);
+  createPlayer(ch, url, seq, state.avMode,{onError:e=>startLiveRelayFallback(ch,seq),onComplete:()=>startLiveRelayFallback(ch,seq)});
 }
 
 function stopPlayback(){
+  stopCatchupTicker();state.catchup.active=false;
   state.stopping=true;
   stopWebAudio(); state.userPaused=false;
   log('STOP: 用户请求停止并断开流');
@@ -3620,7 +3721,8 @@ async function load(){
     const r=await fetch('/cgi-bin/iptvweb-m3u?'+Date.now(), {cache:'no-store', signal:ac.signal});
     if(!r.ok) throw new Error('HTTP '+r.status);
     const text=await r.text();
-    state.items=parseM3U(text);
+    try{const mr=await fetch('/luci-static/resources/iptvweb/unicast-map.json?'+Date.now(),{cache:'no-store'});state.unicastMap=mr.ok?await mr.json():[];}catch(e){state.unicastMap=[];}
+    state.items=parseM3U(text);state.items.forEach(ch=>{ch.rtsp=resolveUnicast(ch);});
     state.groups=[...new Set(state.items.map(x=>x.group))];
     if(state.items.length) state.active=state.items[0].group;
     renderGroups();
@@ -3640,8 +3742,11 @@ async function load(){
   }
 }
 
-$('stopBtn2').onclick=stopPlayback;
+$('stopBtn2').onclick=()=>{stopCatchupTicker();state.catchup.active=false;$('catchupPanel').hidden=true;stopPlayback();};
 $('recoverBtn').onclick=toggleVideoPlayback;
+$('catchupStartBtn').onclick=startCatchup;
+$('catchupExitBtn').onclick=exitCatchup;
+document.querySelectorAll('[data-back-min]').forEach(x=>x.onclick=()=>setCatchupDefault(Number(x.dataset.backMin)));
 
 
 
