@@ -58,49 +58,77 @@ def _tcp_connect(h, p, timeout=15):
     """直连(数字IP不走getaddrinfo, 绕开python3-light缺idna编码的问题)"""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
-    s.connect((h, p))
-    return s
+    try:
+        s.connect((h, p))
+        return s
+    except Exception:
+        s.close()
+        raise
 
 def rtsp_connect(url, seek=None, log=lambda *a: None, reqid="-"):
-    """DESCRIBE(跟随302) -> 返回 (sock, session, final_url)"""
+    """DESCRIBE(跟随302) -> 返回 (sock, session, final_url)。
+
+    若302跳转后的节点TCP建链失败，从原始URL重新走完整跳转链一次；
+    只重试一次，且不对首节点失败、DESCRIBE失败或媒体阶段错误重试。
+    """
     global CSEQ
-    full = url + (("?playseek=" + seek) if seek else "")
-    s = None
-    for hop in range(6):
-        h, p = hostport(full)
-        target = _safe_rtsp_target(full)
-        log("[%s] DESCRIBE hop=%d/6 target=%s seek_present=%s" %
-            (reqid, hop + 1, target, "yes" if "playseek=" in full else "no"))
-        started = time.monotonic()
-        try:
-            s = _tcp_connect(h, p)
-        except Exception as e:
-            log("[%s] TCP_CONNECT ERROR target=%s after %.3fs: %s" %
-                (reqid, target, time.monotonic() - started, e))
-            raise
-        log("[%s] TCP_CONNECT OK target=%s elapsed=%.3fs" %
-            (reqid, target, time.monotonic() - started))
-        CSEQ += 1
-        s.sendall((f"DESCRIBE {full} RTSP/1.0\r\nCSeq: {CSEQ}\r\nUser-Agent: {UA}\r\n"
-                   f"Accept: application/sdp\r\n\r\n").encode())
-        t, _ = _read_resp_diag(s, reqid, "DESCRIBE", log)
-        status = t.splitlines()[0] if t else ""
-        loc = re.search(r"Location:\s*(\S+)", t, re.I)
-        if status.startswith("RTSP/1.0 3") and loc:
-            next_url = loc.group(1)
-            log("[%s] REDIRECT status=%s location=%s location_has_playseek=%s" %
-                (reqid, status, _safe_rtsp_target(next_url),
-                 "yes" if "playseek=" in next_url else "no"))
-            full = next_url; s.close(); s = None; continue
-        if not status.startswith("RTSP/1.0 2"):
-            s.close()
-            raise RuntimeError("DESCRIBE失败: " + status)
-        break
-    sess = re.search(r"Session:\s*([^;\r\n]+)", t, re.I)
-    sess = sess.group(1) if sess else ""
-    log("[%s] DESCRIBE complete session_present=%s final_target=%s" %
-        (reqid, "yes" if sess else "no", _safe_rtsp_target(full)))
-    return s, sess, full
+    for attempt in range(2):
+        # 每次都从原始地址重新开始，确保 playseek 不丢失且重新获取调度节点。
+        full = url + (("?playseek=" + seek) if seek else "")
+        s = None
+        restart_chain = False
+        for hop in range(6):
+            h, p = hostport(full)
+            target = _safe_rtsp_target(full)
+            log("[%s] DESCRIBE attempt=%d/2 hop=%d/6 target=%s seek_present=%s" %
+                (reqid, attempt + 1, hop + 1, target,
+                 "yes" if "playseek=" in full else "no"))
+            started = time.monotonic()
+            try:
+                s = _tcp_connect(h, p)
+            except OSError as e:
+                elapsed = time.monotonic() - started
+                log("[%s] TCP_CONNECT ERROR attempt=%d/2 target=%s after %.3fs: %s" %
+                    (reqid, attempt + 1, target, elapsed, e))
+                if hop > 0 and attempt == 0:
+                    log("[%s] REDIRECT_NODE_CONNECT_FAILED; restart full chain from original URL" %
+                        reqid)
+                    restart_chain = True
+                    break
+                raise
+            log("[%s] TCP_CONNECT OK attempt=%d/2 target=%s elapsed=%.3fs" %
+                (reqid, attempt + 1, target, time.monotonic() - started))
+            CSEQ += 1
+            s.sendall((f"DESCRIBE {full} RTSP/1.0\r\nCSeq: {CSEQ}\r\nUser-Agent: {UA}\r\n"
+                       f"Accept: application/sdp\r\n\r\n").encode())
+            t, _ = _read_resp_diag(s, reqid, "DESCRIBE", log)
+            status = t.splitlines()[0] if t else ""
+            loc = re.search(r"Location:\s*(\S+)", t, re.I)
+            if status.startswith("RTSP/1.0 3") and loc:
+                next_url = loc.group(1)
+                log("[%s] REDIRECT status=%s location=%s location_has_playseek=%s" %
+                    (reqid, status, _safe_rtsp_target(next_url),
+                     "yes" if "playseek=" in next_url else "no"))
+                full = next_url
+                s.close()
+                s = None
+                continue
+            if not status.startswith("RTSP/1.0 2"):
+                s.close()
+                raise RuntimeError("DESCRIBE失败: " + status)
+            break
+
+        if restart_chain:
+            time.sleep(0.5)
+            continue
+
+        sess = re.search(r"Session:\s*([^;\r\n]+)", t, re.I)
+        sess = sess.group(1) if sess else ""
+        log("[%s] DESCRIBE complete attempt=%d/2 session_present=%s final_target=%s" %
+            (reqid, attempt + 1, "yes" if sess else "no", _safe_rtsp_target(full)))
+        return s, sess, full
+
+    raise RuntimeError("redirect node TCP connect failed after retry")
 
 def _read_resp(s):
     buf = b""
