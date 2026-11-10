@@ -34,6 +34,7 @@ cp -f "$FILES/www/iptv/index.html" /www/iptv/index.html
 cp -f "$FILES/www/luci-static/resources/iptvweb/unicast-map.json" /www/luci-static/resources/iptvweb/unicast-map.json
 cp -f "$FILES/www/cgi-bin/iptvweb-m3u" /www/cgi-bin/iptvweb-m3u
 cp -f "$FILES/www/cgi-bin/iptvweb-stream" /www/cgi-bin/iptvweb-stream
+cp -f "$FILES/www/cgi-bin/iptvweb-relay" /www/cgi-bin/iptvweb-relay
 cp -f "$FILES/www/cgi-bin/iptvweb-audio" /www/cgi-bin/iptvweb-audio
 cp -f "$FILES/www/cgi-bin/iptvweb-audio-probe" /www/cgi-bin/iptvweb-audio-probe
 cp -f "$FILES/www/cgi-bin/iptvweb-audio-pes" /www/cgi-bin/iptvweb-audio-pes
@@ -107,8 +108,9 @@ else
     fi
 fi
 
-chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-audio /www/cgi-bin/iptvweb-audio-probe /www/cgi-bin/iptvweb-audio-pes
+chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-relay /www/cgi-bin/iptvweb-audio /www/cgi-bin/iptvweb-audio-probe /www/cgi-bin/iptvweb-audio-pes
 [ -x /www/cgi-bin/iptvweb-stream ] || { echo "ERROR: iptvweb-stream was not installed" >&2; exit 1; }
+[ -x /www/cgi-bin/iptvweb-relay ] || { echo "ERROR: iptvweb-relay was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-m3u ] || { echo "ERROR: iptvweb-m3u was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-audio ] || { echo "ERROR: iptvweb-audio was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-audio-probe ] || { echo "ERROR: iptvweb-audio-probe was not installed" >&2; exit 1; }
