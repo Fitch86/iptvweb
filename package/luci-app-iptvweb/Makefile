@@ -37,7 +37,6 @@ define Package/luci-app-iptvweb/install
 	$(INSTALL_DIR) $(1)/www/cgi-bin
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-m3u $(1)/www/cgi-bin/iptvweb-m3u
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-stream $(1)/www/cgi-bin/iptvweb-stream
-	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-relay $(1)/www/cgi-bin/iptvweb-relay
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio $(1)/www/cgi-bin/iptvweb-audio
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-probe $(1)/www/cgi-bin/iptvweb-audio-probe
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-pes $(1)/www/cgi-bin/iptvweb-audio-pes
