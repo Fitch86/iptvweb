@@ -56,6 +56,7 @@ define Package/luci-app-iptvweb/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/iptvweb
 	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/mpegts.min.js $(1)/www/luci-static/resources/iptvweb/mpegts.min.js
 	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/mpg123-decoder.min.js $(1)/www/luci-static/resources/iptvweb/mpg123-decoder.min.js
+	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/unicast-map.json $(1)/www/luci-static/resources/iptvweb/unicast-map.json
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/iptvweb/audio-worklet
 	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js $(1)/www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js
 endef
