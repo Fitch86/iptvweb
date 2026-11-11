@@ -122,7 +122,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 const REV='RC2.3';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, unicastMap:[], sourceKind:'multicast', liveFallbackTried:false,
-  epgById:Object.create(null), epgLoaded:false, epgUpdatedAt:0, epgTimer:0, selectedEpg:null, epgDate:'', epgLocatePending:true,
+  epgById:Object.create(null), epgLoaded:false, epgUpdatedAt:0, epgTimer:0, epgStats:null, selectedEpg:null, epgDate:'', epgLocatePending:true,
   catchup:{active:false,startMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:''}, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
@@ -880,9 +880,17 @@ function renderEpgPanel(ch){
   const list=epgPrograms(ch),now=Date.now(),current=currentProgramme(ch,now);
   const epgChannelCount=Object.keys(state.epgById).length;
   const matchedChannelCount=state.items.filter(item=>item.id&&state.epgById[String(item.id)]).length;
+  const today=bjInput(now).date, todayStart=bjEpoch(today,'00:00'),todayEnd=todayStart+86400000;
+  const channelTodayCount=list.filter(p=>p.stop>todayStart&&p.start<todayEnd).length;
+  let globalTodayCount=0;
+  Object.keys(state.epgById).forEach(id=>{globalTodayCount+=state.epgById[id].filter(p=>p.stop>todayStart&&p.start<todayEnd).length;});
+  const stats=state.epgStats||{};
+  const globalRange=stats.minDate&&stats.maxDate?(stats.minDate+' 至 '+stats.maxDate):'未知';
   status.textContent=state.epgLoaded
-    ?('M3U 匹配 '+matchedChannelCount+'/'+state.items.length+' 个频道 · EPG '+epgChannelCount+' 个 · '+new Date(state.epgUpdatedAt).toLocaleTimeString('zh-CN',{hour12:false}))
+    ?('M3U 匹配 '+matchedChannelCount+'/'+state.items.length+' 个频道 · EPG '+epgChannelCount+' 个频道/'+(stats.valid||0)+' 条有效节目 · '+new Date(state.epgUpdatedAt).toLocaleTimeString('zh-CN',{hour12:false}))
     :'节目单尚未加载';
+  const dateHint=$('epgDateHint');
+  if(dateHint)dateHint.textContent='诊断：XMLTV '+(stats.raw||0)+' 条 / 有效 '+(stats.valid||0)+' / 忽略 '+(stats.invalid||0)+' · 全局 '+globalRange+'，今天 '+globalTodayCount+' 条 · 当前频道 '+(ch.id||'无 tvg-id')+' 今天 '+channelTodayCount+' 条';
   if(!list.length){
     content.className='epg-empty';
     content.textContent=state.epgLoaded
@@ -891,7 +899,6 @@ function renderEpgPanel(ch){
     $('catchupPanel').hidden=true;
     return;
   }
-  const today=bjInput(now).date;
   if(!state.epgDate)state.epgDate=today;
   const dates=availableEpgDates(ch);
   const dateInput=$('epgDate'),prevBtn=$('epgPrevDay'),nextBtn=$('epgNextDay'),todayBtn=$('epgToday');
@@ -954,17 +961,21 @@ async function loadEpg(force){
     const doc=new DOMParser().parseFromString(xml,'application/xml');
     if(doc.getElementsByTagName('parsererror').length)throw new Error('XMLTV XML 解析失败');
     const byId=Object.create(null),nodes=doc.getElementsByTagName('programme');
+    let validCount=0,invalidCount=0,minStart=Infinity,maxStop=-Infinity;
     for(let i=0;i<nodes.length;i++){
       const node=nodes[i],id=node.getAttribute('channel');
       if(!id)continue;
       const start=parseXmltvTimestamp(node.getAttribute('start')),stop=parseXmltvTimestamp(node.getAttribute('stop'));
-      if(!Number.isFinite(start)||!Number.isFinite(stop)||stop<=start)continue;
+      if(!Number.isFinite(start)||!Number.isFinite(stop)||stop<=start){invalidCount++;continue;}
+      validCount++;minStart=Math.min(minStart,start);maxStop=Math.max(maxStop,stop);
       const titleNode=node.getElementsByTagName('title')[0],descNode=node.getElementsByTagName('desc')[0];
       (byId[id]||(byId[id]=[])).push({start,stop,title:titleNode?(titleNode.textContent||'').trim():'',desc:descNode?(descNode.textContent||'').trim():''});
     }
     Object.keys(byId).forEach(id=>byId[id].sort((a,b)=>a.start-b.start));
     if(!Object.keys(byId).length)throw new Error('XMLTV 中没有有效 programme 记录');
-    state.epgById=byId;state.epgLoaded=true;state.epgUpdatedAt=Date.now();
+    state.epgById=byId;
+    state.epgStats={raw:nodes.length,valid:validCount,invalid:invalidCount,minDate:Number.isFinite(minStart)?bjInput(minStart).date:'',maxDate:Number.isFinite(maxStop)?bjInput(maxStop-1).date:''};
+    state.epgLoaded=true;state.epgUpdatedAt=Date.now();
     if(status)status.textContent='已加载 '+nodes.length+' 条节目记录';
     renderGroups();renderEpgPanel(state.current);
     if(!state.epgTimer)state.epgTimer=setInterval(()=>{renderGroups();renderEpgPanel(state.current);},60000);
