@@ -889,8 +889,7 @@ function renderEpgPanel(ch){
   status.textContent=state.epgLoaded
     ?('M3U 匹配 '+matchedChannelCount+'/'+state.items.length+' 个频道 · EPG '+epgChannelCount+' 个频道/'+(stats.valid||0)+' 条有效节目 · '+new Date(state.epgUpdatedAt).toLocaleTimeString('zh-CN',{hour12:false}))
     :'节目单尚未加载';
-  const dateHint=$('epgDateHint');
-  if(dateHint)dateHint.textContent='诊断：XMLTV '+(stats.raw||0)+' 条 / 有效 '+(stats.valid||0)+' / 忽略 '+(stats.invalid||0)+' · 全局 '+globalRange+'，今天 '+globalTodayCount+' 条 · 当前频道 '+(ch.id||'无 tvg-id')+' 今天 '+channelTodayCount+' 条';
+  const epgDiagnosticText='诊断：XMLTV '+(stats.raw||0)+' 条 / 有效 '+(stats.valid||0)+' / 忽略 '+(stats.invalid||0)+' · 全局 '+globalRange+'，今天 '+globalTodayCount+' 条 · 当前频道 '+(ch.id||'无 tvg-id')+' 今天 '+channelTodayCount+' 条';
   if(!list.length){
     content.className='epg-empty';
     content.textContent=state.epgLoaded
@@ -908,7 +907,7 @@ function renderEpgPanel(ch){
   if(nextBtn)nextBtn.disabled=!nextDate;
   if(todayBtn)todayBtn.disabled=state.epgDate===today;
   const dateHint=$('epgDateHint');
-  if(dateHint)dateHint.textContent=dates.length?('节目单覆盖 '+dates[0]+' 至 '+dates[dates.length-1]+'（'+dates.length+' 天）'):'该频道暂无可用日期';
+  if(dateHint)dateHint.textContent=(dates.length?('节目单覆盖 '+dates[0]+' 至 '+dates[dates.length-1]+'（'+dates.length+' 天）'):'该频道暂无可用日期')+' · '+epgDiagnosticText;
   const dayStart=bjEpoch(state.epgDate,'00:00'),dayEnd=dayStart+86400000;
   const dayList=list.filter(p=>p.stop>dayStart&&p.start<dayEnd);
   const selected=state.selectedEpg&&state.selectedEpg.channelId===String(ch.id)
