@@ -14,7 +14,7 @@ button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px
 button.danger{background:#7a2e2e}
 .toolbar{width:100%;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .layout{display:flex;height:calc(100vh - 86px);min-height:0}
-#sidebar{width:290px;flex:0 0 290px;background:#171717;overflow:auto;border-right:1px solid #292929;padding:8px}
+#sidebar{width:290px;flex:0 0 290px;background:#171717;overflow:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;scroll-padding-bottom:24px;border-right:1px solid #292929;padding:8px 8px calc(24px + env(safe-area-inset-bottom));min-height:0}
 .side-title{font-weight:600;padding:5px 8px 9px}
 .group{margin-bottom:3px}
 .group-head{display:flex;align-items:center;gap:5px;padding:8px 7px;border-radius:6px;cursor:pointer;user-select:none}
@@ -73,7 +73,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .catchup-select-info{font-size:13px;color:#c7dced;margin-bottom:8px}
 .catchup-select-info strong{color:#fff}
 #catchupStartBtn{min-height:34px}
-@media(max-width:700px){body{overflow:auto}.layout{height:auto;min-height:calc(100vh - 86px);flex-direction:column}#sidebar{order:2;width:100%;flex:none;max-height:45vh;border-right:0;border-top:1px solid #292929}main{order:1;padding:0 0 8px;overflow:visible}.player{border-radius:0}}
+@media(max-width:700px){body{overflow:hidden;height:100%;height:100dvh}.layout{height:calc(100dvh - 86px);min-height:0;flex-direction:column}#sidebar{order:2;width:100%;flex:1 1 0;min-height:0;height:auto;max-height:none;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;border-right:0;border-top:1px solid #292929;padding-bottom:calc(24px + env(safe-area-inset-bottom))}main{order:1;flex:0 0 auto;max-height:55dvh;min-height:0;padding:0 0 8px;overflow:auto;overscroll-behavior:contain}.player{border-radius:0}}
 @media(max-height:520px) and (orientation:landscape) and (max-width:950px){
  body{overflow:hidden}
  .layout{height:calc(100dvh - 50px);min-height:0;flex-direction:row}
@@ -1246,7 +1246,7 @@ function stopCatchupTicker(){if(state.catchup.timer){clearInterval(state.catchup
 function updateCatchupClock(){if(!state.catchup.active)return;const v=$('video'),ms=state.catchup.startMs+Math.max(0,Number(v.currentTime)||0)*1000;const p=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(ms));$('catchupStatus').textContent='回看中 · '+p+'（北京时间）';}
 function finishCatchup(message){if(!state.catchup.active)return;state.catchup.active=false;stopCatchupTicker();stopPlayer();$('catchupExitBtn').disabled=false;$('catchupStatus').textContent=message;}
 function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
- if(seq!==state.seq)return;stopPlayer();state.catchup.active=true;state.catchup.startMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';$('catchupExitBtn').disabled=false;$('catchupStatus').textContent='正在连接回看中继…';
+ if(seq!==state.seq)return;stopPlayer();state.playIssuedAt=0;state.userPaused=false;state.catchup.active=true;state.catchup.startMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';$('catchupExitBtn').disabled=false;$('catchupStatus').textContent='正在连接回看中继…';
  const url=relayStreamUrl(ch.rtsp,seek);let settled=false;
  const failed=reason=>{if(settled||seq!==state.seq)return;settled=true;if(retry<1){$('catchupStatus').textContent='回看连接中断，正在重试…';setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
  const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
