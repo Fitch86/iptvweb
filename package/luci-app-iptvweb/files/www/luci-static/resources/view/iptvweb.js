@@ -17,6 +17,22 @@ return view.extend({
         o.rmempty = false;
         o.description = _('Example: https://myepg.org/api/subscribe/multicast/m3u?udpxy=192.168.1.1:4022');
 
+        o = s.option(form.Value, 'epg_url', _('EPG XMLTV URL'));
+        o.datatype = 'string';
+        o.default = 'https://myepg.org/EPG/Zhejiang_Multicast.xml.gz';
+        o.rmempty = false;
+        o.description = _('XMLTV program guide. Default: Zhejiang Telecom multicast EPG from myepg.org.');
+        o.validate = function(section_id, value) {
+            if (String(value || '').indexOf('https://') !== 0)
+                return _('Enter an HTTPS URL for the XMLTV file.');
+            return true;
+        };
+
+        o = s.option(form.Value, 'epg_cache_ttl', _('EPG cache TTL (seconds)'));
+        o.datatype = 'uinteger';
+        o.default = '21600';
+        o.description = _('How long the router keeps the downloaded EPG before refreshing it.');
+
         o = s.option(form.Value, 'udpxy', _('udpxy address'));
         // LuCI's built-in "host" validator rejects the required :port suffix.
         // Validate the full host:port value instead.
