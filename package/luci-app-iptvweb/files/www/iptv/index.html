@@ -853,8 +853,10 @@ function renderEpgPanel(ch){
   if(!content||!status)return;
   if(!ch){content.className='epg-empty';content.textContent='选择频道后显示节目时间轴。';return;}
   const list=epgPrograms(ch),now=Date.now(),current=currentProgramme(ch,now);
+  const epgChannelCount=Object.keys(state.epgById).length;
+  const matchedChannelCount=state.items.filter(item=>item.id&&state.epgById[String(item.id)]).length;
   status.textContent=state.epgLoaded
-    ?('已匹配 '+Object.keys(state.epgById).length+' 个频道 · '+new Date(state.epgUpdatedAt).toLocaleTimeString('zh-CN',{hour12:false}))
+    ?('M3U 匹配 '+matchedChannelCount+'/'+state.items.length+' 个频道 · EPG '+epgChannelCount+' 个 · '+new Date(state.epgUpdatedAt).toLocaleTimeString('zh-CN',{hour12:false}))
     :'节目单尚未加载';
   if(!list.length){
     content.className='epg-empty';
