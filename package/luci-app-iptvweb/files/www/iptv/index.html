@@ -964,7 +964,7 @@ async function loadEpg(force){
     let validCount=0,invalidCount=0,minStart=Infinity,maxStop=-Infinity;
     for(let i=0;i<nodes.length;i++){
       const node=nodes[i],id=node.getAttribute('channel');
-      if(!id)continue;
+      if(!id){invalidCount++;continue;}
       const start=parseXmltvTimestamp(node.getAttribute('start')),stop=parseXmltvTimestamp(node.getAttribute('stop'));
       if(!Number.isFinite(start)||!Number.isFinite(stop)||stop<=start){invalidCount++;continue;}
       validCount++;minStart=Math.min(minStart,start);maxStop=Math.max(maxStop,stop);
