@@ -1,6 +1,6 @@
 #!/bin/sh
-# Same-origin XMLTV endpoint. The upstream file is gzip-compressed;
-# Content-Encoding lets the browser transparently decompress it.
+# Same-origin XMLTV endpoint. Cache is always gzip-compressed; the browser
+# transparently decompresses the response using Content-Encoding.
 set -u
 cache="$(uci -q get iptvweb.main.epg_cache 2>/dev/null || echo /tmp/iptvweb-epg.xml.gz)"
 url="$(uci -q get iptvweb.main.epg_url 2>/dev/null || echo https://myepg.org/EPG/Zhejiang_Multicast.xml.gz)"
@@ -26,8 +26,17 @@ if [ ! -s "$cache" ] || [ "$force" -eq 1 ] || [ $((now - mtime)) -ge "$ttl" ]; t
     else
         rm -f "$tmp"
     fi
-    if [ -s "$tmp" ] && gzip -t "$tmp" >/dev/null 2>&1; then
-        mv -f "$tmp" "$cache"
+    if [ -s "$tmp" ]; then
+        if gzip -t "$tmp" >/dev/null 2>&1; then
+            mv -f "$tmp" "$cache"
+        elif grep -q '<tv' "$tmp" 2>/dev/null; then
+            # Some fetch clients transparently decode HTTP Content-Encoding.
+            # Re-compress plain XML so the CGI response contract stays stable.
+            gzip -c "$tmp" > "${tmp}.gz" && mv -f "${tmp}.gz" "$cache"
+            rm -f "$tmp"
+        else
+            rm -f "$tmp"
+        fi
     else
         rm -f "$tmp"
     fi
