@@ -27,9 +27,9 @@ button.danger{background:#7a2e2e}
 .channel:hover,.channel.active{background:#2a2a2a}
 .channel img{width:34px;height:34px;flex:0 0 34px;object-fit:contain;background:#fff;border-radius:4px}
 .channel .name{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-main{flex:1;min-width:0;min-height:0;padding:12px;display:flex;flex-direction:column;overflow:auto}
-.player{width:100%;max-width:1200px;margin:0 auto;background:#000;border-radius:8px;overflow:hidden;position:relative}
-video{display:block;width:100%;aspect-ratio:16/9;background:#000}
+main{flex:1;min-width:0;min-height:0;padding:12px;display:flex;flex-direction:column;overflow:auto;overscroll-behavior:contain}
+.player{width:100%;max-width:1200px;margin:0 auto;background:#000;border-radius:8px;overflow:hidden;position:relative;flex:0 0 auto}
+video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;flex:none}
 .now{width:100%;max-width:1200px;margin:9px auto 0;padding:8px 2px;font-size:15px}
 #catchupPanel{margin-top:10px;padding:10px;background:#1b1b1b;border:1px solid #333;border-radius:7px}
 .catchup-row{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:7px 0}
@@ -49,6 +49,17 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 .epg-head{display:flex;align-items:center;gap:8px;margin-bottom:8px}
 .epg-head strong{font-size:14px}.epg-status{font-size:11px;color:#999;flex:1}
 .epg-head button{padding:4px 8px;font-size:12px}
+.epg-date-nav{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:0 0 8px}
+.epg-date-nav button{padding:5px 8px;font-size:12px;background:#303030}
+.epg-date-nav button:disabled{opacity:.35;cursor:default}
+.epg-date-nav input{background:#090909;color:#eee;border:1px solid #555;border-radius:5px;padding:5px 7px;min-height:30px;color-scheme:dark}
+.epg-date-hint{font-size:11px;color:#888}
+.epg-timeline-wrap{scroll-behavior:smooth;scroll-snap-type:x proximity}
+.epg-program{scroll-snap-align:center}
+#now{flex:0 0 auto}
+#catchupPanel{flex:0 0 auto}
+.catchup-row{align-items:center}
+.catchup-status{line-height:1.45}
 .epg-now{padding:8px;background:#242424;border-radius:5px;margin-bottom:8px}
 .epg-now .epg-now-label{font-size:11px;color:#8fc7ff}.epg-now .epg-now-title{font-size:14px;font-weight:600;margin-top:3px}
 .epg-timeline-wrap{overflow-x:auto;overflow-y:hidden;padding:3px 0 10px;scrollbar-width:thin;-webkit-overflow-scrolling:touch}
@@ -91,6 +102,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
       <div class="hint">直播默认使用组播；支持回看的频道可从频道列表进入回看。</div>
       <section id="epgPanel" class="epg-panel">
         <div class="epg-head"><strong>频道节目单</strong><span class="epg-status" id="epgStatus">等待读取节目单…</span><button id="epgRefresh" type="button">刷新</button></div>
+        <div class="epg-date-nav"><button id="epgPrevDay" type="button">‹ 较早</button><input id="epgDate" type="date" aria-label="节目单日期"><button id="epgNextDay" type="button">较新 ›</button><button id="epgToday" type="button">今天</button><span class="epg-date-hint" id="epgDateHint">按节目单可用日期切换</span></div>
         <div id="epgContent" class="epg-empty">选择频道后显示当前节目和后续节目。</div>
       </section>
       <section id="catchupPanel" hidden>
@@ -110,7 +122,7 @@ video{display:block;width:100%;aspect-ratio:16/9;background:#000}
 const REV='RC2.3';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, unicastMap:[], sourceKind:'multicast', liveFallbackTried:false,
-  epgById:Object.create(null), epgLoaded:false, epgUpdatedAt:0, epgTimer:0, selectedEpg:null,
+  epgById:Object.create(null), epgLoaded:false, epgUpdatedAt:0, epgTimer:0, selectedEpg:null, epgDate:'', epgLocatePending:true,
   catchup:{active:false,startMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:''}, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
@@ -848,6 +860,19 @@ function currentProgramme(ch,now){
 function epgTime(ms){
   return new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(ms));
 }
+function shiftEpgDate(date,days){const d=new Date(date+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10);}
+function availableEpgDates(ch){
+  const dates=new Set();
+  epgPrograms(ch).forEach(p=>{
+    let d=bjInput(p.start).date,last=bjInput(p.stop-1).date,guard=0;
+    while(d<=last&&guard++<370){dates.add(d);d=shiftEpgDate(d,1);}
+  });
+  return [...dates].sort();
+}
+function chooseEpgDate(date){
+  if(!/^\d{4}-\d{2}-\d{2}$/.test(String(date||'')))return;
+  state.epgDate=date;state.selectedEpg=null;state.epgLocatePending=true;renderEpgPanel(state.current);
+}
 function renderEpgPanel(ch){
   const content=$('epgContent'),status=$('epgStatus');
   if(!content||!status)return;
@@ -867,7 +892,17 @@ function renderEpgPanel(ch){
     return;
   }
   const today=bjInput(now).date;
-  const dayStart=bjEpoch(today,'00:00'),dayEnd=dayStart+86400000;
+  if(!state.epgDate)state.epgDate=today;
+  const dates=availableEpgDates(ch);
+  const dateInput=$('epgDate'),prevBtn=$('epgPrevDay'),nextBtn=$('epgNextDay'),todayBtn=$('epgToday');
+  const prevDate=dates.filter(d=>d<state.epgDate).pop()||'',nextDate=dates.find(d=>d>state.epgDate)||'';
+  if(dateInput){dateInput.value=state.epgDate;dateInput.min=dates[0]||today;dateInput.max=dates[dates.length-1]||today;}
+  if(prevBtn)prevBtn.disabled=!prevDate;
+  if(nextBtn)nextBtn.disabled=!nextDate;
+  if(todayBtn)todayBtn.disabled=state.epgDate===today;
+  const dateHint=$('epgDateHint');
+  if(dateHint)dateHint.textContent=dates.length?('节目单覆盖 '+dates[0]+' 至 '+dates[dates.length-1]+'（'+dates.length+' 天）'):'该频道暂无可用日期';
+  const dayStart=bjEpoch(state.epgDate,'00:00'),dayEnd=dayStart+86400000;
   const dayList=list.filter(p=>p.stop>dayStart&&p.start<dayEnd);
   const selected=state.selectedEpg&&state.selectedEpg.channelId===String(ch.id)
     ?dayList.find(p=>p.start===state.selectedEpg.start&&p.stop===state.selectedEpg.stop):null;
@@ -878,7 +913,16 @@ function renderEpgPanel(ch){
     return '<button type="button" class="epg-program '+(isCurrent?'current ':'')+(isSelected?'selected':'')+'" data-epg-start="'+p.start+'" data-epg-stop="'+p.stop+'" '+(p.start>now?'disabled':'')+'><span class="epg-time">'+epgTime(p.start)+' – '+epgTime(p.stop)+'</span><span class="epg-title">'+esc(p.title||'未命名节目')+'</span><span class="epg-state">'+label+'</span></button>';
   }).join('');
   content.className='';
-  content.innerHTML='<div class="epg-day">'+esc(today)+' · 北京时间 · 横向滚动查看当天节目，点击已播出的节目可回看</div><div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">当天没有节目数据</div>')+'</div></div>';
+  content.innerHTML='<div class="epg-day">'+esc(state.epgDate)+' · 北京时间 · 横向滚动查看节目，点击已播出节目可回看</div><div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">该日期没有节目数据</div>')+'</div></div>';
+  if(state.epgLocatePending){
+    const focus=(state.epgDate===today?current:null)||selected||dayList[0]||null;
+    if(focus){
+      const target=content.querySelector('.epg-program[data-epg-start="'+focus.start+'"][data-epg-stop="'+focus.stop+'"]');
+      const wrap=$('epgTimeline');
+      if(target&&wrap){const left=Math.max(0,target.offsetLeft-(wrap.clientWidth-target.offsetWidth)/2);requestAnimationFrame(()=>wrap.scrollTo({left,behavior:'smooth'}));}
+    }
+    state.epgLocatePending=false;
+  }
   content.querySelectorAll('.epg-program:not(:disabled)').forEach(btn=>btn.onclick=()=>{
     const p=dayList.find(x=>x.start===Number(btn.dataset.epgStart)&&x.stop===Number(btn.dataset.epgStop));
     if(!p)return;
@@ -1222,7 +1266,7 @@ function startCatchup(){
  startCatchupAttempt(ch,a,z,seek,seq,0);
 }
 
-function exitCatchup(){const ch=state.current;stopCatchupTicker();state.catchup.active=false;$('catchupPanel').hidden=true;if(ch)play(ch);}
+function exitCatchup(){const ch=state.current;stopCatchupTicker();state.catchup.active=false;state.selectedEpg=null;state.epgDate=bjInput(Date.now()).date;state.epgLocatePending=true;$('catchupPanel').hidden=true;if(ch)play(ch);else renderEpgPanel(null);}
 function startLiveRelayFallback(ch,seq){
  if(seq!==state.seq||state.liveFallbackTried)return;if(!ch.rtsp){$('now').firstChild.textContent=ch.name+' · 组播失败，且无单播地址';return;}state.liveFallbackTried=true;
  setTimeout(()=>{if(seq!==state.seq)return;stopPlayer();state.sourceKind='relay-live';createPlayer(ch,relayStreamUrl(ch.rtsp,''),seq,'av',{rawFetch:true,isLive:true,onError:e=>{$('now').firstChild.textContent=ch.name+' · 单播兜底失败：'+(e&&e.message||'连接错误');},onComplete:()=>{$('now').firstChild.textContent=ch.name+' · 单播直播已断开';}});},0);
@@ -3493,7 +3537,7 @@ function play(ch){
   stopCatchupTicker();state.catchup.active=false;$('catchupPanel').hidden=true;
   const seq=++state.seq;state.sourceKind='multicast';state.liveFallbackTried=false;
   state.safariAudioOnly=false;
-  state.current=ch; state.active=ch.group; renderGroups();
+  state.current=ch; state.active=ch.group; state.selectedEpg=null; state.epgDate=bjInput(Date.now()).date; state.epgLocatePending=true; renderGroups();
   stopPlayer();
 
   // 新频道开始前，先把上一个频道可能残留的遮罩/定时器清掉
@@ -3877,6 +3921,10 @@ $('stopBtn2').onclick=()=>{stopCatchupTicker();state.catchup.active=false;$('cat
 $('recoverBtn').onclick=toggleVideoPlayback;
 $('catchupStartBtn').onclick=startCatchup;
 $('epgRefresh').onclick=()=>loadEpg(true);
+$('epgPrevDay').onclick=()=>{const d=availableEpgDates(state.current).filter(x=>x<state.epgDate).pop();if(d)chooseEpgDate(d);};
+$('epgNextDay').onclick=()=>{const d=availableEpgDates(state.current).find(x=>x>state.epgDate);if(d)chooseEpgDate(d);};
+$('epgToday').onclick=()=>chooseEpgDate(bjInput(Date.now()).date);
+$('epgDate').onchange=e=>chooseEpgDate(e.target.value);
 $('catchupExitBtn').onclick=exitCatchup;
 
 
