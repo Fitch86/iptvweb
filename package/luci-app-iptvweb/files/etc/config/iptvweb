@@ -1,5 +1,7 @@
 config iptvweb 'main'
 	option m3u_url 'https://myepg.org/api/subscribe/multicast/m3u?udpxy=192.168.1.1:4022'
+	option epg_url 'https://myepg.org/EPG/Zhejiang_Multicast.xml.gz'
+	option epg_cache_ttl '21600'
 	option udpxy '192.168.1.1:4022'
 	option cache '/tmp/iptvweb.m3u'
 	option cache_ttl '21600'
