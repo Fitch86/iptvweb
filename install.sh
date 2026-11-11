@@ -33,6 +33,7 @@ cp -f "$FILES/usr/bin/iptvweb-fetch" /usr/bin/iptvweb-fetch
 cp -f "$FILES/www/iptv/index.html" /www/iptv/index.html
 cp -f "$FILES/www/luci-static/resources/iptvweb/unicast-map.json" /www/luci-static/resources/iptvweb/unicast-map.json
 cp -f "$FILES/www/cgi-bin/iptvweb-m3u" /www/cgi-bin/iptvweb-m3u
+cp -f "$FILES/www/cgi-bin/iptvweb-epg" /www/cgi-bin/iptvweb-epg
 cp -f "$FILES/www/cgi-bin/iptvweb-stream" /www/cgi-bin/iptvweb-stream
 cp -f "$FILES/www/cgi-bin/iptvweb-audio" /www/cgi-bin/iptvweb-audio
 cp -f "$FILES/www/cgi-bin/iptvweb-audio-probe" /www/cgi-bin/iptvweb-audio-probe
@@ -107,9 +108,10 @@ else
     fi
 fi
 
-chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-audio /www/cgi-bin/iptvweb-audio-probe /www/cgi-bin/iptvweb-audio-pes
+chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-epg /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-audio /www/cgi-bin/iptvweb-audio-probe /www/cgi-bin/iptvweb-audio-pes
 [ -x /www/cgi-bin/iptvweb-stream ] || { echo "ERROR: iptvweb-stream was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-m3u ] || { echo "ERROR: iptvweb-m3u was not installed" >&2; exit 1; }
+[ -x /www/cgi-bin/iptvweb-epg ] || { echo "ERROR: iptvweb-epg was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-audio ] || { echo "ERROR: iptvweb-audio was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-audio-probe ] || { echo "ERROR: iptvweb-audio-probe was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-audio-pes ] || { echo "ERROR: iptvweb-audio-pes was not installed" >&2; exit 1; }
@@ -122,6 +124,7 @@ echo "Installed 0.2.2-rc2.3."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "RC2.3: adds per-channel catch-up through the existing relay on port 4023; live multicast on port 4022 remains the default."
+echo "RC2.3: adds XMLTV EPG retrieval/display for the Zhejiang Telecom multicast playlist, with a cached same-origin endpoint."
+echo "      Live multicast on port 4022 and the existing catch-up relay on port 4023 are unchanged."
 echo "      Catch-up uses a single cancellable relay stream and is enabled only when a unicast RTSP address is available; live playback continues to use multicast. mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
 echo "Force-refresh the player page (Ctrl+F5) after installing."
