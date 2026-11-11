@@ -1,0 +1,40 @@
+#!/bin/sh
+# Same-origin XMLTV endpoint. The upstream file is gzip-compressed;
+# Content-Encoding lets the browser transparently decompress it.
+set -u
+cache="$(uci -q get iptvweb.main.epg_cache 2>/dev/null || echo /tmp/iptvweb-epg.xml.gz)"
+url="$(uci -q get iptvweb.main.epg_url 2>/dev/null || echo https://myepg.org/EPG/Zhejiang_Multicast.xml.gz)"
+ttl="$(uci -q get iptvweb.main.epg_cache_ttl 2>/dev/null || echo 21600)"
+case "$ttl" in ''|*[!0-9]*) ttl=21600;; esac
+case "$url" in
+    https://*) ;;
+    *) printf 'Status: 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\n\r\nInvalid EPG URL (HTTPS required).\n'; exit 0 ;;
+esac
+now="$(date +%s)"
+mtime=0
+[ -f "$cache" ] && mtime="$(stat -c %Y "$cache" 2>/dev/null || echo 0)"
+case "$mtime" in ''|*[!0-9]*) mtime=0;; esac
+force=0
+case "&${QUERY_STRING:-}&" in *"&refresh=1&"*) force=1;; esac
+if [ ! -s "$cache" ] || [ "$force" -eq 1 ] || [ $((now - mtime)) -ge "$ttl" ]; then
+    tmp="${cache}.tmp.$$"
+    rm -f "$tmp"
+    if command -v uclient-fetch >/dev/null 2>&1; then
+        uclient-fetch -q -T 90 -O "$tmp" "$url" >/dev/null 2>&1 || rm -f "$tmp"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -q -T 90 -O "$tmp" "$url" >/dev/null 2>&1 || rm -f "$tmp"
+    else
+        rm -f "$tmp"
+    fi
+    if [ -s "$tmp" ] && gzip -t "$tmp" >/dev/null 2>&1; then
+        mv -f "$tmp" "$cache"
+    else
+        rm -f "$tmp"
+    fi
+fi
+if [ -s "$cache" ]; then
+    printf 'Content-Type: application/xml; charset=utf-8\r\nContent-Encoding: gzip\r\nCache-Control: no-cache\r\nVary: Accept-Encoding\r\n\r\n'
+    cat "$cache"
+else
+    printf 'Status: 502 Bad Gateway\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\n\r\nUnable to download XMLTV EPG. Check the EPG URL and router connectivity.\n'
+fi
