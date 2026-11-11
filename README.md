@@ -9,6 +9,7 @@
 
 - 通过 LuCI 配置 M3U 播放列表 URL、udpxy 地址、缓存文件和缓存有效期。
 - 自动读取并解析 M3U，按频道分组展示频道名称和台标。
+- 获取并缓存 myepg.org 浙江电信组播 XMLTV 节目单，按 `tvg-id` 匹配频道；频道列表显示当前节目，选中频道后显示当前节目和后续节目。
 - 支持刷新频道列表、重新初始化当前频道、跳到当前缓冲区的最新位置，以及停止并断开当前流。
 - 通过本机 CGI 将 udpxy 的组播 HTTP 流转发给浏览器。
 - 桌面浏览器保留 mpegts.js 的常规音视频播放路径。
@@ -68,6 +69,8 @@ http://192.168.1.1/iptv/
 
 - **M3U playlist URL**：频道列表地址。
 - **udpxy address**：udpxy 的 `主机或 IP:端口`，例如 `192.168.1.1:4022`。
+- **EPG XMLTV URL**：默认 `https://myepg.org/EPG/Zhejiang_Multicast.xml.gz`。
+- **EPG cache TTL**：节目单缓存有效期，默认 21600 秒（6 小时）。
 - **M3U cache TTL / cache file**：频道列表缓存设置。
 
 如果升级后仍看到旧页面，请在浏览器中强制刷新页面，或关闭旧页面后重新打开。
