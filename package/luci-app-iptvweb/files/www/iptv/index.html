@@ -1281,6 +1281,7 @@ function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
  const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;log('CATCHUP complete bytes='+bytes+' elapsedMs='+elapsed);videoSnapshot('catchup-complete');if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
  const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}
  const safariVideoOnly=isIOSSafari();
+  if(safariVideoOnly) state.avMode='video-catchup';
   createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
  state.diagTimer=setInterval(()=>{if(seq!==state.seq||!state.catchup.active)return;log('CATCHUP heartbeat bytes='+state.catchup.bytes+' mode='+state.avMode+' fallback='+state.safariFallbackTried);videoSnapshot('catchup-heartbeat');},2000);
  video.onended=complete;video.ontimeupdate=()=>{if(seq!==state.seq||!state.catchup.active)return;updateCatchupClock();if(video.currentTime>=Math.max(0,(endMs-startMs)/1000-1.5))complete();};
