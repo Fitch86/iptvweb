@@ -73,6 +73,12 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .catchup-select-info{font-size:13px;color:#c7dced;margin-bottom:8px}
 .catchup-select-info strong{color:#fff}
 #catchupStartBtn{min-height:34px}
+#diagPanel{margin-top:8px;padding:9px;background:#171d24;border:1px solid #38516a;border-radius:7px}
+#diagPanel[hidden]{display:none}
+.diag-head{display:flex;align-items:center;gap:7px;margin-bottom:7px;font-size:13px}
+.diag-head strong{flex:1}
+.diag-head button{padding:5px 8px;font-size:12px}
+#diagLog{display:block;width:100%;height:220px;max-height:32dvh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;background:#080b0e;color:#c9e4c5;border:1px solid #303a43;border-radius:4px;padding:7px;font:11px/1.45 ui-monospace,SFMono-Regular,monospace;user-select:text;-webkit-user-select:text}
 @media(max-width:700px){body{overflow:hidden;height:100%;height:100dvh}.layout{height:calc(100dvh - 86px);min-height:0;flex-direction:column}#sidebar{order:2;width:100%;flex:1 1 0;min-height:0;height:auto;max-height:none;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;border-right:0;border-top:1px solid #292929;padding-bottom:calc(24px + env(safe-area-inset-bottom))}main{order:1;flex:0 0 auto;max-height:55dvh;min-height:0;padding:0 0 8px;overflow:auto;overscroll-behavior:contain}.player{border-radius:0}}
 @media(max-height:520px) and (orientation:landscape) and (max-width:950px){
  body{overflow:hidden}
@@ -87,6 +93,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 <body>
 <header>
   <h1>OpenWrt IPTV <span class="small">RC2.3</span></h1>
+  <button id="diagToggleBtn" type="button">诊断日志</button>
 </header>
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
@@ -113,6 +120,10 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
         </div>
         <div class="catchup-status" id="catchupStatus">在上方节目时间轴选择已播出的节目即可回看。</div>
       </section>
+      <section id="diagPanel" hidden>
+        <div class="diag-head"><strong>播放诊断（最近 500 条）</strong><button id="diagCopyBtn" type="button">复制</button><button id="diagClearBtn" type="button">清空</button><button id="diagCloseBtn" type="button" class="danger">关闭</button></div>
+        <pre id="diagLog" role="log" aria-live="polite">等待播放日志…</pre>
+      </section>
     </div>
   </main>
 </div>
@@ -123,7 +134,7 @@ const REV='RC2.3';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, unicastMap:[], sourceKind:'multicast', liveFallbackTried:false,
   epgById:Object.create(null), epgLoaded:false, epgUpdatedAt:0, epgTimer:0, epgStats:null, selectedEpg:null, epgDate:'', epgLocatePending:true,
-  catchup:{active:false,startMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:''}, diagEnabled:false, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
+  catchup:{active:false,startMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:''}, diagEnabled:true, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
@@ -1006,8 +1017,9 @@ function renderGroups(){
 }
 
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
-function log(_msg){}
-function videoSnapshot(_reason){}
+function renderDiagLog(){const el=$('diagLog');if(!el)return;const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<36;el.textContent=state.log.length?state.log.join('\\n'):'暂无诊断日志';if(nearBottom)el.scrollTop=el.scrollHeight;}
+function log(msg){const stamp=new Date().toLocaleTimeString('zh-CN',{hour12:false});state.log.push('['+stamp+' +'+rel()+'s] '+String(msg));if(state.log.length>500)state.log.splice(0,state.log.length-500);if(!$('diagPanel').hidden)renderDiagLog();}
+function videoSnapshot(reason){const v=$('video');if(!v)return;let ranges=[];try{for(let i=0;i<v.buffered.length;i++)ranges.push('['+v.buffered.start(i).toFixed(3)+','+v.buffered.end(i).toFixed(3)+']');}catch(e){}const e=v.error;log('VIDEO '+reason+' readyState='+v.readyState+' networkState='+v.networkState+' paused='+v.paused+' ended='+v.ended+' currentTime='+Number(v.currentTime||0).toFixed(3)+' duration='+v.duration+' size='+v.videoWidth+'x'+v.videoHeight+' buffered='+ranges.join(',')+' error='+(e?(e.code+':'+e.message):'none')+' visibility='+document.visibilityState);}
 function setStatus(_t){}
 function avMode(){ return $('avMode') && $('avMode').value==='video' ? 'video' : ($('avMode') && $('avMode').value==='muted' ? 'muted' : 'av'); }
 //function bufferAhead(v){
@@ -1175,10 +1187,12 @@ function toggleVideoPlayback(){
 
 function attachVideoDiagnostics(v, seq){
   v.autoplay=false; v.removeAttribute('autoplay');
+  log('VIDEO_DIAG attach seq='+seq+' ua='+navigator.userAgent+' MediaSource='+(!!window.MediaSource)+' ManagedMediaSource='+(!!window.ManagedMediaSource));
   if(state.diagEnabled) videoSnapshot('attachVideoDiagnostics');
   ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','seeking','seeked','ended','emptied','abort','durationchange','resize','error'].forEach(name=>{
     v.addEventListener(name,()=>{if(seq===state.seq && state.diagEnabled) videoSnapshot('event='+name);});
   });
+  v.addEventListener('error',()=>{if(seq===state.seq)videoSnapshot('fatal-error');});
   v.addEventListener('pause', ()=>{
     if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
     state.userPaused=true;
@@ -1263,10 +1277,11 @@ function finishCatchup(message){if(!state.catchup.active)return;state.catchup.ac
 function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
  if(seq!==state.seq)return;stopPlayer();state.playIssuedAt=0;state.userPaused=false;state.catchup.active=true;state.catchup.startMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';$('catchupExitBtn').disabled=false;$('catchupStatus').textContent='正在连接回看中继…';
  const url=relayStreamUrl(ch.rtsp,seek);let settled=false;
- const failed=reason=>{if(settled||seq!==state.seq)return;settled=true;if(retry<1){$('catchupStatus').textContent='回看连接中断，正在重试…';setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
- const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
+ log('CATCHUP begin channel='+ch.name+' seq='+seq+' seek='+seek+' iosSafari='+isIOSSafari()+' rtspHost='+(()=>{try{return new URL(ch.rtsp).host;}catch(e){return 'unknown';}})());
+ const failed=reason=>{if(settled||seq!==state.seq)return;log('CATCHUP failed reason='+reason+' bytes='+state.catchup.bytes+' elapsedMs='+(Date.now()-state.catchup.startedAt));videoSnapshot('catchup-failed');settled=true;if(retry<1){$('catchupStatus').textContent='回看连接中断，正在重试…';setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
+ const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;log('CATCHUP complete bytes='+bytes+' elapsedMs='+elapsed);videoSnapshot('catchup-complete');if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
  const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}
- createPlayer(ch,url,seq,'av',{rawFetch:true,isLive:false,onBytes:n=>{if(seq===state.seq)state.catchup.bytes+=n;},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
+ createPlayer(ch,url,seq,'av',{rawFetch:true,isLive:false,onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
  video.onended=complete;video.ontimeupdate=()=>{if(seq!==state.seq||!state.catchup.active)return;updateCatchupClock();if(video.currentTime>=Math.max(0,(endMs-startMs)/1000-1.5))complete();};
  state.catchup.timer=setInterval(updateCatchupClock,1000);
 }
@@ -3941,6 +3956,10 @@ $('epgNextDay').onclick=()=>{const d=availableEpgDates(state.current).find(x=>x>
 $('epgToday').onclick=()=>chooseEpgDate(bjInput(Date.now()).date);
 $('epgDate').onchange=e=>chooseEpgDate(e.target.value);
 $('catchupExitBtn').onclick=exitCatchup;
+$('diagToggleBtn').onclick=()=>{$('diagPanel').hidden=!$('diagPanel').hidden;if(!$('diagPanel').hidden)renderDiagLog();};
+$('diagCloseBtn').onclick=()=>{$('diagPanel').hidden=true;};
+$('diagClearBtn').onclick=()=>{state.log=[];renderDiagLog();};
+$('diagCopyBtn').onclick=async()=>{const value=state.log.join('\\n');try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(value);$('diagCopyBtn').textContent='已复制';}else{const el=$('diagLog');const range=document.createRange();range.selectNodeContents(el);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);$('diagCopyBtn').textContent='请长按复制';}}catch(e){$('diagCopyBtn').textContent='请长按复制';}};
 
 
 
