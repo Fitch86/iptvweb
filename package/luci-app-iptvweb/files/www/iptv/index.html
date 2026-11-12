@@ -592,6 +592,7 @@ function startSafariCatchupAudio(seq) {
     state.safariCatchupAudioNextPts = null;
     state.safariCatchupVideoPtsBase = null;
     state.safariCatchupAudioLastLog = 0;
+    state.safariCatchupAudioPesCount = 0;
     const decoder = new decNS.MPEGDecoder({enableGapless:false});
     state.webAudioDecoder = decoder;
     const video = $('video');
@@ -641,6 +642,8 @@ function queueSafariCatchupAudioPes(bytes, pts, pid, seq) {
   }
   const queue = state.safariCatchupAudioQueue || (state.safariCatchupAudioQueue = []);
   const size = bytes.byteLength || bytes.length;
+  state.safariCatchupAudioPesCount = (state.safariCatchupAudioPesCount || 0) + 1;
+  if (state.safariCatchupAudioPesCount <= 3) log('SAFARI_CATCHUP_AUDIO: first PES#' + state.safariCatchupAudioPesCount + ' PID=' + pid + ' bytes=' + size + ' PTS90k=' + Math.round(pts));
   if (queue.length >= 128 || (state.safariCatchupAudioQueueBytes || 0) + size > 2 * 1024 * 1024) {
     log('SAFARI_CATCHUP_AUDIO: input queue limit reached; dropping PES PID=' + pid);
     return;
@@ -3145,7 +3148,7 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap, onBytes, onAudioPes, onVi
       const now=performance.now();
       if(state.diagEnabled && now-this._diagLastStats>5000){
         this._diagLastStats=now;
-        log('SAFARI_TS_FILTER: stats inBytes='+this._diagInBytes+' outBytes='+this._outBytes+' videoPackets='+this._diagOutPackets+' sync='+!!this._syncLocked+' pmtPid='+this._pmtPid+' videoPids='+Array.from(this._videoPids).join(',')+' pcrPid='+this._pcrPid+' bufferedBytes='+this._buffer.length);
+        log('SAFARI_TS_FILTER: stats inBytes='+this._diagInBytes+' outBytes='+this._outBytes+' videoPackets='+this._diagOutPackets+' sync='+!!this._syncLocked+' pmtPid='+this._pmtPid+' videoPids='+Array.from(this._videoPids).join(',')+' pcrPid='+this._pcrPid+' audioPids='+Array.from(this._audioPids).join(',')+' bufferedBytes='+this._buffer.length);
 		for (const [fpid, fx] of this._openGopFixers) {
 		  log('SAFARI_OPENGOP: stats PID=' + fpid +
 			  ' rewritten=' + fx.stats.rewritten +
@@ -3438,7 +3441,7 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap, onBytes, onAudioPes, onVi
       }
       if(!this._loggedPmt){
         this._loggedPmt=true;
-        log('SAFARI_TS_FILTER: PMT version='+((section[5]>>1)&0x1f)+' PCR PID='+pcr+' videoStreams='+es.map(e=>'0x'+e[0].toString(16)+':'+(((e[1]&0x1f)<<8)|e[2])).join(','));
+        log('SAFARI_TS_FILTER: PMT version='+((section[5]>>1)&0x1f)+' PCR PID='+pcr+' videoStreams='+es.map(e=>'0x'+e[0].toString(16)+':'+(((e[1]&0x1f)<<8)|e[2])).join(',')+' MPEG-audio PIDs='+Array.from(this._audioPids).join(','));
       }
       if(this._videoPid==null || !es.length) return pkt;
       const body=section.slice(0,12+pil);
@@ -3654,7 +3657,7 @@ function createPlayer(ch, url, seq, mode, extraOpts){
 	try{
       config.customLoader = makeSafariVideoOnlyLoader(extraOpts.onOpenGopBootstrap || null, extraOpts.onBytes || null, extraOpts.onAudioPes || null, extraOpts.onVideoPts || null);
       log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
-      log('SAFARI_AUDIO: video MSE path is audio-free; WebAudio MPEG Audio PES experiment is independent');
+      log('SAFARI_AUDIO: video MSE path is audio-free; MPEG audio PES is extracted from the same catch-up TS response');
     }
     catch(e){ log('SAFARI_TS_FILTER: custom loader unavailable '+e.message); }
   } 
