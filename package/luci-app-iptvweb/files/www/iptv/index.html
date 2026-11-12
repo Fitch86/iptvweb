@@ -1017,7 +1017,7 @@ function renderGroups(){
 }
 
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
-function renderDiagLog(){const el=$('diagLog');if(!el)return;const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<36;el.textContent=state.log.length?state.log.join('\\n'):'暂无诊断日志';if(nearBottom)el.scrollTop=el.scrollHeight;}
+function renderDiagLog(){const el=$('diagLog');if(!el)return;const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<36;el.textContent=state.log.length?state.log.join('\n'):'暂无诊断日志';if(nearBottom)el.scrollTop=el.scrollHeight;}
 function log(msg){const stamp=new Date().toLocaleTimeString('zh-CN',{hour12:false});state.log.push('['+stamp+' +'+rel()+'s] '+String(msg));if(state.log.length>500)state.log.splice(0,state.log.length-500);if(!$('diagPanel').hidden)renderDiagLog();}
 function videoSnapshot(reason){const v=$('video');if(!v)return;let ranges=[];try{for(let i=0;i<v.buffered.length;i++)ranges.push('['+v.buffered.start(i).toFixed(3)+','+v.buffered.end(i).toFixed(3)+']');}catch(e){}const e=v.error;log('VIDEO '+reason+' readyState='+v.readyState+' networkState='+v.networkState+' paused='+v.paused+' ended='+v.ended+' currentTime='+Number(v.currentTime||0).toFixed(3)+' duration='+v.duration+' size='+v.videoWidth+'x'+v.videoHeight+' buffered='+ranges.join(',')+' error='+(e?(e.code+':'+e.message):'none')+' visibility='+document.visibilityState);}
 function setStatus(_t){}
@@ -3958,7 +3958,7 @@ $('catchupExitBtn').onclick=exitCatchup;
 $('diagToggleBtn').onclick=()=>{$('diagPanel').hidden=!$('diagPanel').hidden;if(!$('diagPanel').hidden)renderDiagLog();};
 $('diagCloseBtn').onclick=()=>{$('diagPanel').hidden=true;};
 $('diagClearBtn').onclick=()=>{state.log=[];renderDiagLog();};
-$('diagCopyBtn').onclick=async()=>{const value=state.log.join('\\n');try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(value);$('diagCopyBtn').textContent='已复制';}else{const el=$('diagLog');const range=document.createRange();range.selectNodeContents(el);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);$('diagCopyBtn').textContent='请长按复制';}}catch(e){$('diagCopyBtn').textContent='请长按复制';}};
+$('diagCopyBtn').onclick=async()=>{const value=state.log.join('\n');try{if(navigator.clipboard&&navigator.clipboard.writeText){await navigator.clipboard.writeText(value);$('diagCopyBtn').textContent='已复制';}else{const el=$('diagLog');const range=document.createRange();range.selectNodeContents(el);const sel=window.getSelection();sel.removeAllRanges();sel.addRange(range);$('diagCopyBtn').textContent='请长按复制';}}catch(e){$('diagCopyBtn').textContent='请长按复制';}};
 
 
 
