@@ -1280,7 +1280,8 @@ function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
  const failed=reason=>{if(settled||seq!==state.seq)return;log('CATCHUP failed reason='+reason+' bytes='+state.catchup.bytes+' elapsedMs='+(Date.now()-state.catchup.startedAt));videoSnapshot('catchup-failed');settled=true;if(retry<1){$('catchupStatus').textContent='回看连接中断，正在重试…';setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
  const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;log('CATCHUP complete bytes='+bytes+' elapsedMs='+elapsed);videoSnapshot('catchup-complete');if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
  const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}
- createPlayer(ch,url,seq,'av',{rawFetch:true,isLive:false,onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
+ const safariVideoOnly=isIOSSafari();
+  createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
  state.diagTimer=setInterval(()=>{if(seq!==state.seq||!state.catchup.active)return;log('CATCHUP heartbeat bytes='+state.catchup.bytes+' mode='+state.avMode+' fallback='+state.safariFallbackTried);videoSnapshot('catchup-heartbeat');},2000);
  video.onended=complete;video.ontimeupdate=()=>{if(seq!==state.seq||!state.catchup.active)return;updateCatchupClock();if(video.currentTime>=Math.max(0,(endMs-startMs)/1000-1.5))complete();};
  state.catchup.timer=setInterval(updateCatchupClock,1000);
@@ -1331,7 +1332,7 @@ function isIOSSafari(){
 // We keep PAT/PMT/PCR/video packets, rewrite PMT to remove audio ES entries,
 // and drop all other elementary-stream packets. This is intentionally a
 // browser-side custom loader experiment; the normal A/V path is untouched.
-function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
+function makeSafariVideoOnlyLoader(onOpenGopBootstrap, onBytes){
   const Base=mpegts.BaseLoader;
   if(!Base) throw new Error('mpegts.BaseLoader unavailable');
   const K=Base;
@@ -2483,6 +2484,7 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
 	  this.gopFrameNumOffset = null;
 	  this._openGopDryRun = false; 
 	  this._onOpenGopBootstrap = (config && config.onOpenGopBootstrap) || null;  // 新增
+      this._onBytes = typeof onBytes === 'function' ? onBytes : null;
     }
     open(dataSource, range){
       this._status=1; this._dataSource=dataSource; this._range=range||{};
@@ -2526,6 +2528,7 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap){
           if (!q.value || !q.value.length) continue;
 
           this._diagInBytes += q.value.byteLength;
+          if (this._onBytes) { try { this._onBytes(q.value.byteLength); } catch(e) {} }
           const out = this._filterChunk(q.value);
 
           if (!out.length) continue;
@@ -3385,10 +3388,10 @@ function createPlayer(ch, url, seq, mode, extraOpts){
     ds.hasAudio=false;
   }
   const config=playerConfig();
-  if(extraOpts.rawFetch) config.customLoader=makeRelayFetchLoader(extraOpts);
-  if(mode==='video' && iosSafari && !extraOpts.rawFetch){
+  if(extraOpts.rawFetch && !(mode==='video' && iosSafari && extraOpts.safariVideoOnly)) config.customLoader=makeRelayFetchLoader(extraOpts);
+  if(mode==='video' && iosSafari && (!extraOpts.rawFetch || extraOpts.safariVideoOnly)){
 	try{
-      config.customLoader = makeSafariVideoOnlyLoader(extraOpts.onOpenGopBootstrap || null);
+      config.customLoader = makeSafariVideoOnlyLoader(extraOpts.onOpenGopBootstrap || null, extraOpts.onBytes || null);
       log('SAFARI_TS_FILTER: custom MPEG-TS video-only loader enabled via Config.customLoader');
       log('SAFARI_AUDIO: video MSE path is audio-free; WebAudio MPEG Audio PES experiment is independent');
     }
