@@ -553,6 +553,204 @@ function appendMpegAudioBytes(part){
   state.audioMpegBuffer=b;
 }
 
+
+// Safari catch-up audio is extracted from the same RTSP/TS response as video.
+// PES PTS is mapped to the first forwarded video PES PTS; no second fetch/session.
+function safariPtsDelta33(value, base) {
+  let d = value - base;
+  const wrap = 8589934592, half = 4294967296;
+  if (d > half) d -= wrap;
+  else if (d < -half) d += wrap;
+  return d;
+}
+function startSafariCatchupAudio(seq) {
+  if (seq !== state.seq || !isIOSSafari()) return;
+  const Ctx = window.AudioContext || window.webkitAudioContext;
+  const decNS = window['mpg123-decoder'];
+  if (!Ctx || !decNS || !decNS.MPEGDecoder) {
+    state.webAudioState = 'unsupported';
+    state.webAudioError = !Ctx ? 'AudioContext unavailable' : 'local mpg123-decoder unavailable';
+    log('SAFARI_CATCHUP_AUDIO: disabled ' + state.webAudioError);
+    return;
+  }
+  try {
+    const ctx = prepareSafariAudioContextFromGesture();
+    if (!ctx) throw new Error('AudioContext unavailable');
+    state.webAudioState = 'connecting';
+    state.webAudioBackend = 'catchup-pts';
+    state.audioCtxRate = ctx.sampleRate;
+    state.audioDecodeCalls = 0;
+    state.audioDecodeEmpty = 0;
+    state.audioDecodeErrors = 0;
+    state.audioChunks = 0;
+    state.audioDecodedSamples = 0;
+    state.audioScheduledSources = [];
+    state.safariCatchupAudioQueue = [];
+    state.safariCatchupAudioQueueBytes = 0;
+    state.safariCatchupPcmQueue = [];
+    state.safariCatchupAudioReady = false;
+    state.safariCatchupAudioNextPts = null;
+    state.safariCatchupVideoPtsBase = null;
+    state.safariCatchupAudioLastLog = 0;
+    const decoder = new decNS.MPEGDecoder({enableGapless:false});
+    state.webAudioDecoder = decoder;
+    const video = $('video');
+    state.safariCatchupPauseHandler = () => {
+      if (seq === state.seq && state.webAudioCtx === ctx && ctx.state === 'running') {
+        try { ctx.suspend(); } catch (_) {}
+      }
+    };
+    state.safariCatchupPlayHandler = () => {
+      if (seq === state.seq && state.webAudioCtx === ctx && ctx.state !== 'running') {
+        const p = ctx.resume();
+        if (p && p.catch) p.catch(e => log('SAFARI_CATCHUP_AUDIO: resume failed ' + e.message));
+      }
+      flushSafariCatchupPcm(seq);
+    };
+    video.addEventListener('pause', state.safariCatchupPauseHandler);
+    video.addEventListener('playing', state.safariCatchupPlayHandler);
+    Promise.resolve(decoder.ready).then(() => {
+      if (seq !== state.seq || state.webAudioDecoder !== decoder) return;
+      state.safariCatchupAudioReady = true;
+      state.webAudioState = 'streaming';
+      log('SAFARI_CATCHUP_AUDIO: MPEG decoder ready; source=single-RTSP-TS backend=PTS-buffer-source');
+      flushSafariCatchupAudio(seq);
+    }).catch(e => {
+      if (seq !== state.seq) return;
+      state.webAudioState = 'decode-error';
+      state.webAudioError = e.name + ': ' + e.message;
+      state.audioDecodeErrors++;
+      log('SAFARI_CATCHUP_AUDIO: decoder init failed ' + state.webAudioError);
+    });
+    if (state.audioSyncTimer) clearInterval(state.audioSyncTimer);
+    state.audioSyncTimer = setInterval(() => {
+      if (seq !== state.seq) return;
+      flushSafariCatchupPcm(seq);
+    }, 80);
+  } catch (e) {
+    state.webAudioState = 'decode-error';
+    state.webAudioError = e.name + ': ' + e.message;
+    log('SAFARI_CATCHUP_AUDIO: init failed ' + state.webAudioError);
+  }
+}
+function queueSafariCatchupAudioPes(bytes, pts, pid, seq) {
+  if (seq !== state.seq || !bytes || !bytes.length) return;
+  if (pts == null) {
+    log('SAFARI_CATCHUP_AUDIO: PES without PTS dropped PID=' + pid);
+    return;
+  }
+  const queue = state.safariCatchupAudioQueue || (state.safariCatchupAudioQueue = []);
+  const size = bytes.byteLength || bytes.length;
+  if (queue.length >= 128 || (state.safariCatchupAudioQueueBytes || 0) + size > 2 * 1024 * 1024) {
+    log('SAFARI_CATCHUP_AUDIO: input queue limit reached; dropping PES PID=' + pid);
+    return;
+  }
+  queue.push({bytes, pts, pid});
+  state.safariCatchupAudioQueueBytes = (state.safariCatchupAudioQueueBytes || 0) + size;
+  if (state.safariCatchupAudioReady && state.safariCatchupVideoPtsBase != null) flushSafariCatchupAudio(seq);
+}
+function flushSafariCatchupAudio(seq) {
+  if (seq !== state.seq || !state.safariCatchupAudioReady || state.safariCatchupVideoPtsBase == null) return;
+  const queue = state.safariCatchupAudioQueue || [];
+  const decoder = state.webAudioDecoder;
+  while (queue.length && decoder && seq === state.seq) {
+    const item = queue.shift();
+    state.safariCatchupAudioQueueBytes = Math.max(0, (state.safariCatchupAudioQueueBytes || 0) - item.bytes.byteLength);
+    let result;
+    try {
+      result = decoder.decode(item.bytes);
+      state.audioDecodeCalls++;
+    } catch (e) {
+      state.audioDecodeErrors++;
+      log('SAFARI_CATCHUP_AUDIO: decode error PID=' + item.pid + ' ' + e.name + ': ' + e.message);
+      continue;
+    }
+    if (!result || !result.samplesDecoded) {
+      state.audioDecodeEmpty++;
+      continue;
+    }
+    const samples = result.samplesDecoded;
+    const rate = result.sampleRate || 48000;
+    const left = result.channelData[0];
+    const right = result.channelData[1] || left;
+    if (!left || !right || !rate) continue;
+    const pcm = new Float32Array(samples * 2);
+    for (let i = 0; i < samples; i++) {
+      pcm[i * 2] = left[i] || 0;
+      pcm[i * 2 + 1] = right[i] || 0;
+    }
+    const mediaPts = safariPtsDelta33(item.pts, state.safariCatchupVideoPtsBase);
+    state.safariCatchupAudioNextPts = mediaPts + samples * 90000 / rate;
+    state.audioRate = rate;
+    state.audioChannels = result.channelData.length;
+    state.audioChunks++;
+    state.audioDecodedSamples += samples;
+    const pcmQueue = state.safariCatchupPcmQueue || (state.safariCatchupPcmQueue = []);
+    pcmQueue.push({pcm, samples, rate, mediaPts});
+    if (pcmQueue.length > 160) {
+      pcmQueue.shift();
+      log('SAFARI_CATCHUP_AUDIO: PCM queue overrun; oldest block dropped');
+    }
+    const now = performance.now();
+    if (now - (state.safariCatchupAudioLastLog || 0) > 1000) {
+      state.safariCatchupAudioLastLog = now;
+      log('SAFARI_CATCHUP_AUDIO: decoded=' + state.audioChunks +
+        ' samples=' + state.audioDecodedSamples + ' rate=' + rate +
+        ' PID=' + item.pid + ' PTSdelta=' + (mediaPts / 90000).toFixed(3) + 's');
+    }
+  }
+  flushSafariCatchupPcm(seq);
+}
+function flushSafariCatchupPcm(seq) {
+  if (seq !== state.seq || state.webAudioBackend !== 'catchup-pts' ||
+      !state.webAudioCtx || state.webAudioCtx.state !== 'running') return;
+  const video = $('video'), ctx = state.webAudioCtx;
+  if (!video || video.paused || video.readyState < 2) return;
+  const queue = state.safariCatchupPcmQueue || [];
+  while (queue.length) {
+    const item = queue[0];
+    const delta = item.mediaPts / 90000 - Number(video.currentTime || 0);
+    if (delta > 2.0) break;
+    let trim = delta < 0 ? Math.ceil(-delta * item.rate) : 0;
+    let frames = item.samples - trim;
+    if (frames <= 0) { queue.shift(); continue; }
+    let startAt = ctx.currentTime + Math.max(0, delta);
+    if (startAt < ctx.currentTime + 0.015) {
+      const extra = Math.ceil((ctx.currentTime + 0.015 - startAt) * item.rate);
+      trim += extra;
+      frames -= extra;
+      startAt = ctx.currentTime + 0.015;
+    }
+    if (frames <= 0) { queue.shift(); continue; }
+    const buffer = ctx.createBuffer(2, frames, item.rate);
+    const left = new Float32Array(frames), right = new Float32Array(frames);
+    for (let i = 0; i < frames; i++) {
+      left[i] = item.pcm[(trim + i) * 2] || 0;
+      right[i] = item.pcm[(trim + i) * 2 + 1] || 0;
+    }
+    buffer.copyToChannel(left, 0);
+    buffer.copyToChannel(right, 1);
+    const source = ctx.createBufferSource();
+    source.buffer = buffer;
+    source.connect(ctx.destination);
+    try { source.start(startAt); }
+    catch (e) {
+      state.audioDecodeErrors++;
+      try { source.disconnect(); } catch (_) {}
+      queue.shift();
+      continue;
+    }
+    const sources = state.audioScheduledSources || (state.audioScheduledSources = []);
+    sources.push(source);
+    source.onended = () => {
+      try { source.disconnect(); } catch (_) {}
+      const i = sources.indexOf(source);
+      if (i >= 0) sources.splice(i, 1);
+    };
+    queue.shift();
+  }
+}
+
 async function startWebAudioMpeg(ch, seq){
   if(!isIOSSafari() || seq!==state.seq) return;
   const url=audioStreamUrl(ch);
@@ -1075,6 +1273,13 @@ function stopWebAudio(){
   state.audioReader=null;
   state.audioSources.forEach(x=>{try{x.onended=null;x.stop(0);x.disconnect();}catch(e){}});
   state.audioSources=[];
+  (state.audioScheduledSources||[]).forEach(x=>{try{x.onended=null;x.stop(0);x.disconnect();}catch(e){}});
+  state.audioScheduledSources=[];
+  const catchupVideo=$('video');
+  if(state.safariCatchupPauseHandler) catchupVideo.removeEventListener('pause',state.safariCatchupPauseHandler);
+  if(state.safariCatchupPlayHandler) catchupVideo.removeEventListener('playing',state.safariCatchupPlayHandler);
+  state.safariCatchupPauseHandler=null; state.safariCatchupPlayHandler=null;
+  state.safariCatchupAudioQueue=[]; state.safariCatchupAudioQueueBytes=0; state.safariCatchupPcmQueue=[]; state.safariCatchupAudioReady=false; state.safariCatchupAudioNextPts=null; state.safariCatchupVideoPtsBase=null;
   try{ if(state.webAudioWorkletNode){ state.webAudioWorkletNode.port.postMessage({type:'stop'}); state.webAudioWorkletNode.disconnect(); state.webAudioWorkletNode.port.close(); } }catch(e){}
   state.webAudioWorkletNode=null;
   try{ if(state.webAudioScriptNode){ state.webAudioScriptNode.onaudioprocess=null; state.webAudioScriptNode.disconnect(); } }catch(e){}
