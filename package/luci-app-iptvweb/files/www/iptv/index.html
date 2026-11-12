@@ -590,6 +590,7 @@ function startSafariCatchupAudio(seq) {
     state.safariCatchupPcmQueue = [];
     state.safariCatchupAudioReady = false;
     state.safariCatchupAudioNextPts = null;
+    state.safariCatchupAudioScheduleCursor = 0;
     state.safariCatchupVideoPtsBase = null;
     state.safariCatchupAudioLastLog = 0;
     state.safariCatchupAudioPesCount = 0;
@@ -714,16 +715,21 @@ function flushSafariCatchupPcm(seq) {
     const item = queue[0];
     const delta = item.mediaPts / 90000 - Number(video.currentTime || 0);
     if (delta > 2.0) break;
-    let trim = delta < 0 ? Math.ceil(-delta * item.rate) : 0;
-    let frames = item.samples - trim;
-    if (frames <= 0) { queue.shift(); continue; }
-    let startAt = ctx.currentTime + Math.max(0, delta);
-    if (startAt < ctx.currentTime + 0.015) {
-      const extra = Math.ceil((ctx.currentTime + 0.015 - startAt) * item.rate);
-      trim += extra;
-      frames -= extra;
-      startAt = ctx.currentTime + 0.015;
+    const targetAt = ctx.currentTime + delta;
+    const cursor = state.safariCatchupAudioScheduleCursor || 0;
+    const earliestAt = ctx.currentTime + 0.015;
+    let trim = 0;
+    let startAt;
+    if (!cursor) {
+      startAt = Math.max(targetAt, earliestAt);
+      if (startAt > targetAt) trim = Math.ceil((startAt - targetAt) * item.rate);
+    } else {
+      const expectedAt = Math.max(targetAt, cursor);
+      if (targetAt < cursor - 0.05) trim += Math.ceil((cursor - targetAt) * item.rate);
+      startAt = Math.max(expectedAt, earliestAt);
+      if (startAt > expectedAt + 0.05) trim += Math.ceil((startAt - expectedAt) * item.rate);
     }
+    let frames = item.samples - trim;
     if (frames <= 0) { queue.shift(); continue; }
     const buffer = ctx.createBuffer(2, frames, item.rate);
     const left = new Float32Array(frames), right = new Float32Array(frames);
@@ -745,6 +751,7 @@ function flushSafariCatchupPcm(seq) {
     }
     const sources = state.audioScheduledSources || (state.audioScheduledSources = []);
     sources.push(source);
+    state.safariCatchupAudioScheduleCursor = startAt + frames / item.rate;
     source.onended = () => {
       try { source.disconnect(); } catch (_) {}
       const i = sources.indexOf(source);
@@ -1282,7 +1289,7 @@ function stopWebAudio(){
   if(state.safariCatchupPauseHandler) catchupVideo.removeEventListener('pause',state.safariCatchupPauseHandler);
   if(state.safariCatchupPlayHandler) catchupVideo.removeEventListener('playing',state.safariCatchupPlayHandler);
   state.safariCatchupPauseHandler=null; state.safariCatchupPlayHandler=null;
-  state.safariCatchupAudioQueue=[]; state.safariCatchupAudioQueueBytes=0; state.safariCatchupPcmQueue=[]; state.safariCatchupAudioReady=false; state.safariCatchupAudioNextPts=null; state.safariCatchupVideoPtsBase=null;
+  state.safariCatchupAudioQueue=[]; state.safariCatchupAudioQueueBytes=0; state.safariCatchupPcmQueue=[]; state.safariCatchupAudioReady=false; state.safariCatchupAudioNextPts=null; state.safariCatchupAudioScheduleCursor=0; state.safariCatchupVideoPtsBase=null;
   try{ if(state.webAudioWorkletNode){ state.webAudioWorkletNode.port.postMessage({type:'stop'}); state.webAudioWorkletNode.disconnect(); state.webAudioWorkletNode.port.close(); } }catch(e){}
   state.webAudioWorkletNode=null;
   try{ if(state.webAudioScriptNode){ state.webAudioScriptNode.onaudioprocess=null; state.webAudioScriptNode.disconnect(); } }catch(e){}
