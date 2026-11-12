@@ -918,6 +918,8 @@ function renderEpgPanel(ch){
     const label=isCurrent?'正在播出':(ended?'已播出':'即将播出');
     return '<button type="button" class="epg-program '+(isCurrent?'current ':'')+(isSelected?'selected':'')+'" data-epg-start="'+p.start+'" data-epg-stop="'+p.stop+'" '+(p.start>now?'disabled':'')+'><span class="epg-time">'+epgTime(p.start)+' – '+epgTime(p.stop)+'</span><span class="epg-title">'+esc(p.title||'未命名节目')+'</span><span class="epg-state">'+label+'</span></button>';
   }).join('');
+  const previousTimeline=$('epgTimeline');
+  const previousScrollLeft=previousTimeline?previousTimeline.scrollLeft:0;
   content.className='';
   content.innerHTML='<div class="epg-day">'+esc(state.epgDate)+' · 北京时间 · 横向滚动查看节目，点击已播出节目可回看</div><div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">该日期没有节目数据</div>')+'</div></div>';
   if(state.epgLocatePending){
@@ -928,6 +930,9 @@ function renderEpgPanel(ch){
       if(target&&wrap){const left=Math.max(0,target.offsetLeft-(wrap.clientWidth-target.offsetWidth)/2);requestAnimationFrame(()=>wrap.scrollTo({left,behavior:'smooth'}));}
     }
     state.epgLocatePending=false;
+  }else{
+    const wrap=$('epgTimeline');
+    if(wrap){wrap.style.scrollBehavior='auto';wrap.scrollLeft=previousScrollLeft;requestAnimationFrame(()=>{wrap.style.scrollBehavior='';});}
   }
   content.querySelectorAll('.epg-program:not(:disabled)').forEach(btn=>btn.onclick=()=>{
     const p=dayList.find(x=>x.start===Number(btn.dataset.epgStart)&&x.stop===Number(btn.dataset.epgStop));
