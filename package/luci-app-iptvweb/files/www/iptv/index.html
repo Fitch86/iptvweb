@@ -1192,7 +1192,6 @@ function attachVideoDiagnostics(v, seq){
   ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','seeking','seeked','ended','emptied','abort','durationchange','resize','error'].forEach(name=>{
     v.addEventListener(name,()=>{if(seq===state.seq && state.diagEnabled) videoSnapshot('event='+name);});
   });
-  v.addEventListener('error',()=>{if(seq===state.seq)videoSnapshot('fatal-error');});
   v.addEventListener('pause', ()=>{
     if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
     state.userPaused=true;
