@@ -7,8 +7,7 @@
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
-header{min-height:50px;padding:6px 14px;background:#181818;display:flex;flex-wrap:wrap;gap:8px;align-items:center;border-bottom:1px solid #292929}
-header h1{font-size:16px;margin:0}
+header{min-height:50px;padding:6px 14px;background:#181818;border-bottom:1px solid #292929}header .header-inner{width:100%;max-width:1200px;min-height:36px;margin:0 auto;display:flex;align-items:center;gap:8px}header h1{font-size:16px;margin:0;flex:0 0 auto}#channelInfo{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa;font-size:12px}#playStatus{flex:0 1 28%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;color:#9db4c9;font-size:12px}
 .small{color:#999;font-size:12px}
 button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px;cursor:pointer}
 button.danger{background:#7a2e2e}
@@ -38,8 +37,6 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .channel .channel-title{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .channel .epg-mini{font-size:11px;color:#999;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .epg-panel{margin-top:10px;padding:10px;background:#1b1b1b;border:1px solid #333;border-radius:7px}
-.player-topbar{width:100%;max-width:1200px;margin:0 auto 7px;display:flex;align-items:center;gap:8px;min-height:30px}
-#channelInfo{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#aaa;font-size:12px}#playStatus{flex:0 1 34%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;color:#9db4c9;font-size:12px}
 .epg-head{display:flex;align-items:center;gap:6px;margin-bottom:8px;flex-wrap:nowrap;min-width:0}
 .epg-head strong{font-size:14px;flex:0 0 auto}.epg-status{font-size:11px;color:#999;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .epg-head button{padding:4px 7px;font-size:12px;white-space:nowrap;flex:0 0 auto}.epg-head button[hidden]{display:none}.epg-head button:disabled{opacity:.4;cursor:default}
@@ -79,13 +76,15 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 </style>
 </head>
 <body>
-<header>
+<header><div class="header-inner">
   <h1>OpenWrt IPTV <span class="small">RC2.3</span></h1>
-</header>
+  <button id="diagToggleBtn" type="button">诊断日志</button>
+  <span id="channelInfo">选择频道开始播放 · 直播默认使用组播；支持回看的频道可从频道列表进入回看。</span>
+  <span id="playStatus" role="status" aria-live="polite">待机</span>
+</div></header>
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
   <main>
-    <div class="player-topbar"><button id="diagToggleBtn" type="button">诊断日志</button><span id="channelInfo">选择频道开始播放 · 直播默认使用组播；支持回看的频道可从频道列表进入回看。</span><span id="playStatus" role="status" aria-live="polite">待机</span></div>
     <div class="player"><video id="video" controls playsinline preload="none" webkit-playsinline></video></div>
     <div class="now" id="now">
       <section id="epgPanel" class="epg-panel">
