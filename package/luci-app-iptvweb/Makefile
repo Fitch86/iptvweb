@@ -15,6 +15,32 @@ define Package/luci-app-iptvweb
   SUBMENU:=Applications
   TITLE:=IPTV Web Player
   DEPENDS:=+uhttpd +luci-base +lua
+  CONFFILES:=/etc/config/iptvweb
+endef
+
+
+define Package/luci-app-iptvweb/preinst
+#!/bin/sh
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+rm -f /tmp/iptvweb-epg-url.upgrade
+if [ -f /etc/config/iptvweb ] && command -v uci >/dev/null 2>&1; then
+	uci -q get iptvweb.main.epg_url > /tmp/iptvweb-epg-url.upgrade
+fi
+exit 0
+endef
+
+define Package/luci-app-iptvweb/postinst
+#!/bin/sh
+[ -n "${IPKG_INSTROOT}" ] && exit 0
+if [ -s /tmp/iptvweb-epg-url.upgrade ]; then
+	old_url="$(cat /tmp/iptvweb-epg-url.upgrade)"
+	if [ -n "$old_url" ] && [ "$old_url" != "https://myepg.org/EPG/Zhejiang_Multicast.xml.gz" ]; then
+		uci -q set "iptvweb.main.epg_url=$old_url"
+		uci -q commit iptvweb
+	fi
+	rm -f /tmp/iptvweb-epg-url.upgrade
+fi
+exit 0
 endef
 
 define Package/luci-app-iptvweb/description
