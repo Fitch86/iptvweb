@@ -1197,14 +1197,6 @@ function renderGroups(){
  document.querySelectorAll('.group-head').forEach(h=>h.onclick=()=>{const g=h.parentElement.dataset.g;state.active=state.active===g?'':g;renderGroups();});
  document.querySelectorAll('.channel').forEach(x=>x.onclick=()=>play(state.items[+x.dataset.i]));
 }
-function openChannelCatchup(ch){
- if(!ch||!ch.rtsp)return;
- stopPlayback();
- state.current=ch;state.active=ch.group;state.selectedEpg=null;state.epgDate=bjInput(Date.now()).date;state.epgLocatePending=true;
- renderGroups();renderEpgPanel(ch);
- setStatus('已选择 '+ch.name+' · 请在节目单中选择已播节目');
-}
-
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
 function renderDiagLog(){const el=$('diagLog');if(!el)return;const nearBottom=el.scrollHeight-el.scrollTop-el.clientHeight<36;el.textContent=state.log.length?state.log.join('\n'):'暂无诊断日志';if(nearBottom)el.scrollTop=el.scrollHeight;}
 function log(msg){const stamp=new Date().toLocaleTimeString('zh-CN',{hour12:false});state.log.push('['+stamp+' +'+rel()+'s] '+String(msg));if(state.log.length>500)state.log.splice(0,state.log.length-500);if(!$('diagPanel').hidden)renderDiagLog();}
