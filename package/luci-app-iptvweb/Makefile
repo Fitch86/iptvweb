@@ -34,15 +34,18 @@ define Package/luci-app-iptvweb/postinst
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 if [ -s /tmp/iptvweb-epg-url.upgrade ]; then
 	old_url="$$(cat /tmp/iptvweb-epg-url.upgrade)"
-	if [ -n "$$old_url" ] && [ "$$old_url" != "https://myepg.org/EPG/Zhejiang_Multicast.xml.gz" ]; then
-		uci -q set "iptvweb.main.epg_url=$$old_url"
+	if [ -n "$$old_url" ]; then
+		if [ "$$old_url" = "https://myepg.org/EPG/Zhejiang_Multicast.xml.gz" ]; then
+			uci -q set iptvweb.main.epg_url='https://epg.zsdc.eu.org/t.xml.gz'
+		else
+			uci -q set "iptvweb.main.epg_url=$$old_url"
+		fi
 		uci -q commit iptvweb
 	fi
 	rm -f /tmp/iptvweb-epg-url.upgrade
 fi
 exit 0
 endef
-
 define Package/luci-app-iptvweb/description
 Lightweight LuCI-configured IPTV web player using M3U and udpxy.
 endef
