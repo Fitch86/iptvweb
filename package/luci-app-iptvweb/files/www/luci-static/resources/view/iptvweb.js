@@ -19,9 +19,9 @@ return view.extend({
 
         o = s.option(form.Value, 'epg_url', _('EPG XMLTV URL'));
         o.datatype = 'string';
-        o.default = 'https://myepg.org/EPG/Zhejiang_Multicast.xml.gz';
+        o.default = 'https://epg.zsdc.eu.org/t.xml.gz';
         o.rmempty = false;
-        o.description = _('XMLTV program guide. Default: Zhejiang Telecom multicast EPG from myepg.org.');
+        o.description = _('Multi-day XMLTV program guide. Default: https://epg.zsdc.eu.org/t.xml.gz. Existing custom URLs are preserved.');
         o.validate = function(section_id, value) {
             if (String(value || '').indexOf('https://') !== 0)
                 return _('Enter an HTTPS URL for the XMLTV file.');
