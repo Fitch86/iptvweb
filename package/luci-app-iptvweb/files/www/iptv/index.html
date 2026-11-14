@@ -7,7 +7,7 @@
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
-header{min-height:50px;padding:6px 14px;background:#181818;border-bottom:1px solid #292929}header .header-inner{position:relative;width:100%;max-width:1200px;min-height:36px;margin:0 auto;display:flex;align-items:center;gap:8px}header h1{font-size:16px;margin:0;flex:0 0 auto}#channelInfo{position:absolute;left:calc(302px - max(0px,(100vw - 1200px)/2) + max(0px,(100vw - 1514px)/2));right:calc(28% + 8px);top:50%;transform:translateY(-50%);min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden;white-space:nowrap;color:#aaa;font-size:12px}#channelName{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#eee;font-size:15px;font-weight:700}#channelHint{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#999;font-size:12px}#playStatus{position:absolute;right:0;top:50%;transform:translateY(-50%);width:28%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;color:#9db4c9;font-size:12px}
+header{min-height:50px;padding:6px 14px;background:#181818;border-bottom:1px solid #292929}header .header-inner{position:relative;width:100%;max-width:1200px;min-height:36px;margin:0 auto;display:flex;align-items:center;gap:8px}header h1{font-size:16px;margin:0;flex:0 0 auto}#channelInfo{position:absolute;left:calc(302px - max(14px,(100vw - 1200px)/2) + max(0px,(100vw - 1514px)/2));right:calc(28% + 8px);top:50%;transform:translateY(-50%);min-width:0;display:flex;align-items:baseline;gap:8px;overflow:hidden;white-space:nowrap;color:#aaa;font-size:12px}#channelName{flex:0 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#eee;font-size:15px;font-weight:700}#channelHint{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;color:#999;font-size:12px}#playStatus{position:absolute;right:0;top:50%;transform:translateY(-50%);width:28%;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right;color:#9db4c9;font-size:12px}
 .small{color:#999;font-size:12px}
 button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px;cursor:pointer}
 button.danger{background:#7a2e2e}
@@ -69,7 +69,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 @media(max-width:700px){.epg-panel{padding:7px}.epg-toolbar{gap:6px}.epg-date-nav{gap:5px}.epg-date-nav button,.epg-toolbar-actions button{min-height:42px;padding:8px 10px;font-size:13px}.epg-date-nav input{width:132px;min-height:42px}.epg-catchup-clock{min-width:100px;font-size:11px}}
 @media(max-height:520px) and (orientation:landscape) and (max-width:950px){
  body{overflow:hidden}
- header{min-height:50px}header .header-inner{min-height:36px}#channelInfo{left:calc(302px - max(0px,(100vw - 1200px)/2) + max(0px,(100vw - 1514px)/2));right:calc(28% + 8px);top:50%;transform:translateY(-50%)}
+ header{min-height:50px}header .header-inner{min-height:36px}#channelInfo{left:calc(302px - max(14px,(100vw - 1200px)/2) + max(0px,(100vw - 1514px)/2));right:calc(28% + 8px);top:50%;transform:translateY(-50%)}
  .layout{height:calc(100dvh - 50px);min-height:0;flex-direction:row}
  #sidebar{order:0;width:34vw;flex:0 0 34vw;height:100%;max-height:none;min-height:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
  main{order:1;min-height:0;overflow:auto;padding:6px}
@@ -576,7 +576,9 @@ function startSafariCatchupAudio(seq) {
     state.webAudioDecoder = decoder;
     const video = $('video');
     state.safariCatchupPauseHandler = () => {
-      if (seq === state.seq && state.webAudioCtx === ctx && ctx.state === 'running') {
+      if (seq === state.seq && state.webAudioCtx === ctx &&
+          !state.safariCatchupFullscreenTransition && ctx.state === 'running') {
+        log('SAFARI_CATCHUP_AUDIO: video pause -> suspend AudioContext');
         try { ctx.suspend(); } catch (_) {}
       }
     };
@@ -587,8 +589,72 @@ function startSafariCatchupAudio(seq) {
       }
       flushSafariCatchupPcm(seq);
     };
+    const resumeAfterFullscreen = reason => {
+      if (seq !== state.seq || !state.catchup.active || state.webAudioCtx !== ctx) return;
+      if (video.paused || state.userPaused) {
+        log('SAFARI_CATCHUP_AUDIO: '+reason+' no resume; videoPaused='+video.paused+' userPaused='+state.userPaused+' ctx='+ctx.state);
+        return;
+      }
+      const interrupted = ctx.state === 'interrupted';
+      if (interrupted) {
+        (state.audioScheduledSources || []).forEach(source => {
+          try { source.onended=null; source.stop(0); source.disconnect(); } catch (_) {}
+        });
+        state.audioScheduledSources=[];
+        state.safariCatchupAudioScheduleCursor=0;
+        log('SAFARI_CATCHUP_AUDIO: interrupted context; cleared stale scheduled sources');
+      }
+      if (ctx.state !== 'running') {
+        let resumePromise;
+        try { resumePromise=ctx.resume(); } catch(e) {
+          log('SAFARI_CATCHUP_AUDIO: '+reason+' resume threw '+e.name+': '+e.message);
+          return;
+        }
+        Promise.resolve(resumePromise).then(() => {
+          if (seq !== state.seq || state.webAudioCtx !== ctx) return;
+          log('SAFARI_CATCHUP_AUDIO: '+reason+' resumed ctx='+ctx.state+' videoTime='+Number(video.currentTime||0).toFixed(3));
+          flushSafariCatchupPcm(seq);
+        }).catch(e => log('SAFARI_CATCHUP_AUDIO: '+reason+' resume failed '+e.name+': '+e.message));
+      } else {
+        log('SAFARI_CATCHUP_AUDIO: '+reason+' ctx already running; flush');
+        flushSafariCatchupPcm(seq);
+      }
+    };
+    state.safariCatchupFullscreenWasPlaying=false;
+    state.safariCatchupFullscreenTransition=false;
+    state.safariCatchupFullscreenStartHandler=() => {
+      state.safariCatchupFullscreenWasPlaying=!video.paused&&!state.userPaused;
+      state.safariCatchupFullscreenTransition=true;
+      log('SAFARI_FULLSCREEN: begin wasPlaying='+state.safariCatchupFullscreenWasPlaying+' ctx='+ctx.state+' videoTime='+Number(video.currentTime||0).toFixed(3));
+    };
+    state.safariCatchupFullscreenEndHandler=() => {
+      const wasPlaying=state.safariCatchupFullscreenWasPlaying;
+      if(state.safariCatchupResumeTimer)clearTimeout(state.safariCatchupResumeTimer);
+      state.safariCatchupResumeTimer=setTimeout(() => {
+        state.safariCatchupResumeTimer=0;
+        state.safariCatchupFullscreenTransition=false;
+        if(seq!==state.seq||state.webAudioCtx!==ctx)return;
+        if(wasPlaying&&!video.paused)state.userPaused=false;
+        log('SAFARI_FULLSCREEN: end wasPlaying='+wasPlaying+' videoPaused='+video.paused+' ctx='+ctx.state);
+        resumeAfterFullscreen('webkitendfullscreen');
+      },180);
+    };
+    state.safariCatchupFullscreenChangeHandler=() => {
+      setTimeout(() => resumeAfterFullscreen('fullscreenchange'),120);
+    };
+    state.safariCatchupVisibilityHandler=() => {
+      if(document.visibilityState==='visible')resumeAfterFullscreen('visibility-visible');
+    };
+    state.safariCatchupContextStateHandler=() => {
+      log('SAFARI_CATCHUP_AUDIO: AudioContext state='+ctx.state+' videoPaused='+video.paused+' videoTime='+Number(video.currentTime||0).toFixed(3));
+    };
     video.addEventListener('pause', state.safariCatchupPauseHandler);
     video.addEventListener('playing', state.safariCatchupPlayHandler);
+    video.addEventListener('webkitbeginfullscreen',state.safariCatchupFullscreenStartHandler);
+    video.addEventListener('webkitendfullscreen',state.safariCatchupFullscreenEndHandler);
+    document.addEventListener('fullscreenchange',state.safariCatchupFullscreenChangeHandler);
+    document.addEventListener('visibilitychange',state.safariCatchupVisibilityHandler);
+    if(ctx.addEventListener)ctx.addEventListener('statechange',state.safariCatchupContextStateHandler);
     Promise.resolve(decoder.ready).then(() => {
       if (seq !== state.seq || state.webAudioDecoder !== decoder) return;
       state.safariCatchupAudioReady = true;
@@ -1255,7 +1321,16 @@ function stopWebAudio(){
   const catchupVideo=$('video');
   if(state.safariCatchupPauseHandler) catchupVideo.removeEventListener('pause',state.safariCatchupPauseHandler);
   if(state.safariCatchupPlayHandler) catchupVideo.removeEventListener('playing',state.safariCatchupPlayHandler);
+  if(state.safariCatchupFullscreenStartHandler)catchupVideo.removeEventListener('webkitbeginfullscreen',state.safariCatchupFullscreenStartHandler);
+  if(state.safariCatchupFullscreenEndHandler)catchupVideo.removeEventListener('webkitendfullscreen',state.safariCatchupFullscreenEndHandler);
+  if(state.safariCatchupFullscreenChangeHandler)document.removeEventListener('fullscreenchange',state.safariCatchupFullscreenChangeHandler);
+  if(state.safariCatchupVisibilityHandler)document.removeEventListener('visibilitychange',state.safariCatchupVisibilityHandler);
+  if(state.safariCatchupContextStateHandler&&state.webAudioCtx&&state.webAudioCtx.removeEventListener)state.webAudioCtx.removeEventListener('statechange',state.safariCatchupContextStateHandler);
+  if(state.safariCatchupResumeTimer){clearTimeout(state.safariCatchupResumeTimer);state.safariCatchupResumeTimer=0;}
   state.safariCatchupPauseHandler=null; state.safariCatchupPlayHandler=null;
+  state.safariCatchupFullscreenStartHandler=null;state.safariCatchupFullscreenEndHandler=null;
+  state.safariCatchupFullscreenChangeHandler=null;state.safariCatchupVisibilityHandler=null;state.safariCatchupContextStateHandler=null;
+  state.safariCatchupFullscreenWasPlaying=false;state.safariCatchupFullscreenTransition=false;
   state.safariCatchupAudioQueue=[]; state.safariCatchupAudioQueueBytes=0; state.safariCatchupPcmQueue=[]; state.safariCatchupAudioReady=false; state.safariCatchupAudioNextPts=null; state.safariCatchupAudioScheduleCursor=0; state.safariCatchupVideoPtsBase=null;
   try{ if(state.webAudioWorkletNode){ state.webAudioWorkletNode.port.postMessage({type:'stop'}); state.webAudioWorkletNode.disconnect(); state.webAudioWorkletNode.port.close(); } }catch(e){}
   state.webAudioWorkletNode=null;
