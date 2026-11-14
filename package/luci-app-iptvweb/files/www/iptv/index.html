@@ -1089,7 +1089,7 @@ function availableEpgDates(ch){
   const dates=new Set();
   epgPrograms(ch).forEach(p=>{
     let d=bjInput(p.start).date,last=bjInput(p.stop-1).date,guard=0;
-    while(d<=last&&guard++<370){dates.add(d);d=shiftEpgDate(d,1);}
+    while(d<=last&&guard++<3660){dates.add(d);d=shiftEpgDate(d,1);}
   });
   return [...dates].sort();
 }
@@ -1147,7 +1147,7 @@ function renderEpgPanel(ch){
   const previousTimeline=$('epgTimeline');
   const previousScrollLeft=previousTimeline?previousTimeline.scrollLeft:0;
   content.className='';
-  content.innerHTML='<div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">该日期没有节目数据</div>')+'</div></div>'+(isMulticast?'<div class="hint" style="margin-top:8px">组播回看支持最近 7 天。当天节目表以外的日期，可按北京时间手动选择回看时段（最长 4 小时）。</div><div class="epg-toolbar" style="margin-top:7px;flex-wrap:wrap"><input id="manualReplayDate" type="date" min="'+replayFloor+'" max="'+today+'" value="'+state.epgDate+'"><input id="manualReplayStart" type="time" value="'+manualStartTime+'"><span class="small">至</span><input id="manualReplayEnd" type="time" value="'+manualEndTime+'"><button id="manualReplayBtn" type="button">按时间回看</button></div>':'');
+  content.innerHTML='<div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">该日期没有节目数据</div>')+'</div></div>'+(isMulticast?'<div class="hint" style="margin-top:8px">组播回看支持最近 7 天。当天节目表以外的日期，可按北京时间手动选择回看时段（最长 4 小时）。</div><div class="epg-toolbar" style="margin-top:7px;flex-wrap:wrap"><input id="manualReplayDate" type="date" min="'+replayFloor+'" max="'+today+'" value="'+state.epgDate+'"><input id="manualReplayStart" type="time" value="'+manualStartTime+'"><span class="small">至</span><input id="manualReplayEnd" type="time" value="'+manualEndTime+'"><button id="manualReplayBtn" type="button">按时间回看</button></div>':('<div class="hint" style="margin-top:8px">单播节目表覆盖：'+(dates.length?dates[0]+' 至 '+dates[dates.length-1]:'暂无有效日期')+'。回看日期按单播 XMLTV 实际记录开放，不受组播 7 天限制。</div>'));
   if(state.epgLocatePending){
     const focus=(state.epgDate===today?current:null)||selected||dayList[0]||null;
     if(focus){
@@ -1516,6 +1516,7 @@ function startCatchup(){
  if((ch.source||'multicast')==='multicast'&&a<now-7*86400000){setStatus('组播回看仅支持最近 7×24 小时');return;}
  if(z-a>14400000){setStatus('该节目超过4小时，暂不能整段回看');return;}
  const seek=bjCompact(bjInput(a).date,bjInput(a).time)+'-'+bjCompact(bjInput(z).date,bjInput(z).time),seq=++state.seq;
+ log('CATCHUP request source='+(ch.source||'multicast')+' channel='+ch.name+' tvgId='+ch.id+' start='+bjInput(a).date+' '+bjInput(a).time+' end='+bjInput(z).date+' '+bjInput(z).time+' durationMs='+(z-a));
  state.liveFallbackTried=true;state.catchup.rtsp=ch.rtsp;
  startCatchupAttempt(ch,a,z,seek,seq,0);
 }
