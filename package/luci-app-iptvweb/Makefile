@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
 PKG_VERSION:=0.2.2-rc2.4
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=OpenWrt IPTV Web contributors
@@ -23,6 +23,8 @@ define Package/luci-app-iptvweb/preinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 rm -f /tmp/iptvweb-epg-url.upgrade
+# Force LuCI to reload the updated view containing unicast source settings.
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
 if [ -f /etc/config/iptvweb ] && command -v uci >/dev/null 2>&1; then
 	uci -q get iptvweb.main.epg_url > /tmp/iptvweb-epg-url.upgrade
 fi
