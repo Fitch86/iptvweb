@@ -1124,8 +1124,8 @@ function renderEpgPanel(ch){
   if(!state.epgDate)state.epgDate=today;
   const dates=availableEpgDates(ch);
   const dateInput=$('epgDate'),prevBtn=$('epgPrevDay'),nextBtn=$('epgNextDay'),todayBtn=$('epgToday');
-  const replayFloor=shiftEpgDate(today,-6),isMulticast=(ch.source||'multicast')==='multicast';
-  const navDates=isMulticast?Array.from({length:7},(_,i)=>shiftEpgDate(replayFloor,i)):dates;
+  const replayFloor=shiftEpgDate(today,-7),isMulticast=(ch.source||'multicast')==='multicast';
+  const navDates=isMulticast?Array.from({length:8},(_,i)=>shiftEpgDate(replayFloor,i)):dates;
   const prevDate=navDates.filter(d=>d<state.epgDate).pop()||'',nextDate=navDates.find(d=>d>state.epgDate)||'';
   if(dateInput){dateInput.value=state.epgDate;dateInput.min=isMulticast?replayFloor:(dates[0]||today);dateInput.max=isMulticast?today:(dates[dates.length-1]||today);}
   if(prevBtn)prevBtn.disabled=!prevDate;
@@ -1160,7 +1160,7 @@ function renderEpgPanel(ch){
     const wrap=$('epgTimeline');
     if(wrap){wrap.style.scrollBehavior='auto';wrap.scrollLeft=previousScrollLeft;requestAnimationFrame(()=>{wrap.style.scrollBehavior='';});}
   }
-  const manualReplayBtn=$('manualReplayBtn');if(manualReplayBtn)manualReplayBtn.onclick=()=>{const date=$('manualReplayDate').value,start=$('manualReplayStart').value,end=$('manualReplayEnd').value,a=bjEpoch(date,start),z=bjEpoch(date,end),now=Date.now();if(!Number.isFinite(a)||!Number.isFinite(z)||z<=a){setStatus('请检查回看开始和结束时间');return;}if(a<bjEpoch(replayFloor,'00:00')||z>now){setStatus('组播回看仅支持最近 7 天，且结束时间不能晚于当前时间');return;}if(z-a>14400000){setStatus('单次回看最长 4 小时');return;}state.epgDate=date;state.selectedEpg={channelId:String(ch.id),start:a,stop:z,title:'手动时间段',manual:true};renderEpgPanel(ch);};
+  const manualReplayBtn=$('manualReplayBtn');if(manualReplayBtn)manualReplayBtn.onclick=()=>{const date=$('manualReplayDate').value,start=$('manualReplayStart').value,end=$('manualReplayEnd').value,a=bjEpoch(date,start),z=bjEpoch(date,end),now=Date.now();if(!Number.isFinite(a)||!Number.isFinite(z)||z<=a){setStatus('请检查回看开始和结束时间');return;}if(a<now-7*86400000||z>now){setStatus('组播回看仅支持最近 7×24 小时，且结束时间不能晚于当前时间');return;}if(z-a>14400000){setStatus('单次回看最长 4 小时');return;}state.epgDate=date;state.selectedEpg={channelId:String(ch.id),start:a,stop:z,title:'手动时间段',manual:true};renderEpgPanel(ch);};
   content.querySelectorAll('.epg-program:not(:disabled)').forEach(btn=>btn.onclick=()=>{
     const p=dayList.find(x=>x.start===Number(btn.dataset.epgStart)&&x.stop===Number(btn.dataset.epgStop));
     if(!p)return;
@@ -1513,6 +1513,7 @@ function startCatchup(){
  if(!ch||!ch.rtsp||!p)return;
  const now=Date.now(),a=p.start,z=Math.min(p.stop,now);
  if(z<=a){setStatus('该节目尚未开始，不能回看');return;}
+ if((ch.source||'multicast')==='multicast'&&a<now-7*86400000){setStatus('组播回看仅支持最近 7×24 小时');return;}
  if(z-a>14400000){setStatus('该节目超过4小时，暂不能整段回看');return;}
  const seek=bjCompact(bjInput(a).date,bjInput(a).time)+'-'+bjCompact(bjInput(z).date,bjInput(z).time),seq=++state.seq;
  state.liveFallbackTried=true;state.catchup.rtsp=ch.rtsp;
@@ -4243,7 +4244,7 @@ $('stopBtn2').onclick=stopPlayback;
 $('liveBtn').onclick=()=>{if(state.current)play(state.current);};
 $('catchupStartBtn').onclick=startCatchup;
 $('epgRefresh').onclick=()=>loadEpg(true);
-$('epgPrevDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,dates=(ch.source||'multicast')==='multicast'?Array.from({length:7},(_,i)=>shiftEpgDate(shiftEpgDate(today,-6),i)):availableEpgDates(ch);const d=dates.filter(x=>x<state.epgDate).pop();if(d)chooseEpgDate(d);};
+$('epgPrevDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,dates=(ch.source||'multicast')==='multicast'?Array.from({length:8},(_,i)=>shiftEpgDate(shiftEpgDate(today,-7),i)):availableEpgDates(ch);const d=dates.filter(x=>x<state.epgDate).pop();if(d)chooseEpgDate(d);};
 $('epgNextDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,dates=(ch.source||'multicast')==='multicast'?Array.from({length:7},(_,i)=>shiftEpgDate(shiftEpgDate(today,-6),i)):availableEpgDates(ch);const d=dates.find(x=>x>state.epgDate);if(d)chooseEpgDate(d);};
 $('epgToday').onclick=()=>chooseEpgDate(bjInput(Date.now()).date);
 $('epgDate').onchange=e=>chooseEpgDate(e.target.value);
