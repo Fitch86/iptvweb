@@ -39,7 +39,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .epg-panel{margin-top:4px;padding:8px;background:#1b1b1b;border:1px solid #333;border-radius:7px}
 .epg-head{display:none}
 .epg-toolbar-wrap{width:100%;overflow-x:auto;overflow-y:hidden;margin:0 0 8px;padding:1px 0 3px;-webkit-overflow-scrolling:touch;scrollbar-width:thin}
-.epg-toolbar{display:flex;align-items:center;gap:7px;flex-wrap:nowrap;min-width:max-content}
+.epg-toolbar{display:flex;align-items:center;gap:7px;flex-wrap:nowrap;min-width:max-content}.epg-toolbar input[type=date],.epg-toolbar input[type=time]{min-height:40px;background:#090909;color:#eee;border:1px solid #555;border-radius:5px;padding:6px 8px;color-scheme:dark;font-size:13px}
 .epg-date-nav{display:flex;align-items:center;gap:6px;flex:0 0 auto;margin:0}
 .epg-date-nav button,.epg-toolbar-actions button{min-height:40px;padding:7px 10px;font-size:13px;white-space:nowrap;background:#303030;flex:0 0 auto}
 .epg-date-nav button:disabled{opacity:.35;cursor:default}
@@ -1141,10 +1141,13 @@ function renderEpgPanel(ch){
     const label=isCurrent?'正在播出':(ended?'已播出':'即将播出');
     return '<button type="button" class="epg-program '+(isCurrent?'current ':'')+(isSelected?'selected':'')+'" data-epg-start="'+p.start+'" data-epg-stop="'+p.stop+'" '+(p.start>now?'disabled':'')+'><span class="epg-time">'+epgTime(p.start)+' – '+epgTime(p.stop)+'</span><span class="epg-title">'+esc(p.title||'未命名节目')+'</span><span class="epg-state">'+label+'</span></button>';
   }).join('');
+  const manualStartMs=Math.max(bjEpoch(state.epgDate,'00:00'),now-3600000);
+  const manualStartTime=state.epgDate===today?bjInput(manualStartMs).time:'20:00';
+  const manualEndTime=state.epgDate===today?bjInput(now).time:'21:00';
   const previousTimeline=$('epgTimeline');
   const previousScrollLeft=previousTimeline?previousTimeline.scrollLeft:0;
   content.className='';
-  content.innerHTML='<div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">该日期没有节目数据</div>')+'</div></div>'+(isMulticast?'<div class="hint" style="margin-top:8px">组播回看支持最近 7 天。当天节目表以外的日期，可按北京时间手动选择回看时段（最长 4 小时）。</div><div class="epg-toolbar" style="margin-top:7px;flex-wrap:wrap"><input id="manualReplayDate" type="date" min="'+replayFloor+'" max="'+today+'" value="'+state.epgDate+'"><input id="manualReplayStart" type="time" value="20:00"><span class="small">至</span><input id="manualReplayEnd" type="time" value="21:00"><button id="manualReplayBtn" type="button">按时间回看</button></div>':'');
+  content.innerHTML='<div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">该日期没有节目数据</div>')+'</div></div>'+(isMulticast?'<div class="hint" style="margin-top:8px">组播回看支持最近 7 天。当天节目表以外的日期，可按北京时间手动选择回看时段（最长 4 小时）。</div><div class="epg-toolbar" style="margin-top:7px;flex-wrap:wrap"><input id="manualReplayDate" type="date" min="'+replayFloor+'" max="'+today+'" value="'+state.epgDate+'"><input id="manualReplayStart" type="time" value="'+manualStartTime+'"><span class="small">至</span><input id="manualReplayEnd" type="time" value="'+manualEndTime+'"><button id="manualReplayBtn" type="button">按时间回看</button></div>':'');
   if(state.epgLocatePending){
     const focus=(state.epgDate===today?current:null)||selected||dayList[0]||null;
     if(focus){
