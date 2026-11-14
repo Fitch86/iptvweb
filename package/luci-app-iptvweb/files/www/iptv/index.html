@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV RC2.3</title>
+<title>OpenWrt IPTV RC2.4</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -80,7 +80,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 </head>
 <body>
 <header><div class="header-inner">
-  <h1>OpenWrt IPTV <span class="small">RC2.3</span></h1>
+  <h1>OpenWrt IPTV <span class="small">RC2.4</span></h1>
   <button id="diagToggleBtn" type="button">诊断日志</button>
   <span id="channelInfo"><span id="channelName">选择频道开始播放</span><span id="channelHint">直播默认使用组播；支持回看的频道可从节目列表进入回看。</span></span>
   <span id="playStatus" role="status" aria-live="polite">待机</span>
@@ -108,7 +108,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
 <script src="/luci-static/resources/iptvweb/mpg123-decoder.min.js" charset="UTF-8"></script>
 <script>
-const REV='RC2.3';
+const REV='RC2.4';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, unicastMap:[], sourceKind:'multicast', liveFallbackTried:false,
   epgById:Object.create(null), epgBySource:{multicast:Object.create(null),unicast:Object.create(null)}, epgLoaded:false, epgLoadedBySource:{multicast:false,unicast:false}, epgUpdatedAt:0, epgTimer:0, epgStats:null, selectedEpg:null, epgDate:'', epgLocatePending:true,
@@ -1113,11 +1113,11 @@ function renderEpgPanel(ch){
   if(!ch){content.className='epg-empty';content.textContent='选择频道后显示节目时间轴。';updateCatchupToolbar();return;}
   const list=epgPrograms(ch),now=Date.now(),current=currentProgramme(ch,now);
   const today=bjInput(now).date;
-  if(!list.length){
+  if(!list.length&&(ch.source||'multicast')!=='multicast'){
     content.className='epg-empty';
-    content.textContent=state.epgLoaded
-      ?('频道「'+ch.name+'」没有匹配到节目单'+(ch.id?'（tvg-id: '+ch.id+'）':'（缺少 tvg-id）'))
-      :'节目单加载中或暂不可用。';
+    content.textContent=state.epgLoadedBySource.unicast
+      ?('单播频道「'+ch.name+'」没有匹配到节目单（请核对 tvg-id 与 XMLTV channel id）')
+      :'单播节目单加载中或暂不可用。';
     updateCatchupToolbar();
     return;
   }
