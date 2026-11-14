@@ -69,6 +69,31 @@ return view.extend({
             return true;
         };
 
+        o = s.option(form.Value, 'unicast_m3u_url', _('Unicast M3U playlist URL'));
+        o.datatype = 'string';
+        o.default = 'https://myepg.org/api/subscribe/unicast/m3u';
+        o.rmempty = false;
+        o.description = _('Independent RTSP unicast channel list. It is appended after the multicast channels.');
+
+        o = s.option(form.Value, 'unicast_epg_url', _('Unicast EPG XMLTV URL'));
+        o.datatype = 'string';
+        o.default = 'https://myepg.org/EPG/Zhejiang_Unicast.xml.gz';
+        o.rmempty = false;
+        o.description = _('Independent XMLTV source for unicast channels; current provider data covers about 3 days.');
+        o.validate = function(section_id, value) {
+            if (String(value || '').indexOf('https://') !== 0)
+                return _('Enter an HTTPS URL for the XMLTV file.');
+            return true;
+        };
+
+        o = s.option(form.Value, 'unicast_m3u_cache_ttl', _('Unicast M3U cache TTL (seconds)'));
+        o.datatype = 'uinteger';
+        o.default = '21600';
+
+        o = s.option(form.Value, 'unicast_epg_cache_ttl', _('Unicast EPG cache TTL (seconds)'));
+        o.datatype = 'uinteger';
+        o.default = '21600';
+
         o = s.option(form.Value, 'cache_ttl', _('M3U cache TTL (seconds)'));
         o.datatype = 'uinteger';
         o.default = '21600';
