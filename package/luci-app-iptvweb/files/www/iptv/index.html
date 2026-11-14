@@ -1160,7 +1160,7 @@ function renderEpgPanel(ch){
     const wrap=$('epgTimeline');
     if(wrap){wrap.style.scrollBehavior='auto';wrap.scrollLeft=previousScrollLeft;requestAnimationFrame(()=>{wrap.style.scrollBehavior='';});}
   }
-  const manualReplayBtn=$('manualReplayBtn');if(manualReplayBtn)manualReplayBtn.onclick=()=>{const date=$('manualReplayDate').value,start=$('manualReplayStart').value,end=$('manualReplayEnd').value,a=bjEpoch(date,start),z=bjEpoch(date,end),now=Date.now();if(!Number.isFinite(a)||!Number.isFinite(z)||z<=a){setStatus('请检查回看开始和结束时间');return;}if(a<now-7*86400000||z>now){setStatus('组播回看仅支持最近 7×24 小时，且结束时间不能晚于当前时间');return;}if(z-a>14400000){setStatus('单次回看最长 4 小时');return;}state.epgDate=date;state.selectedEpg={channelId:String(ch.id),start:a,stop:z,title:'手动时间段',manual:true};renderEpgPanel(ch);};
+  const manualReplayBtn=$('manualReplayBtn');if(manualReplayBtn)manualReplayBtn.onclick=()=>{const date=$('manualReplayDate').value,start=$('manualReplayStart').value,end=$('manualReplayEnd').value,a=bjEpoch(date,start);let z=bjEpoch(date,end);const now=Date.now();if(Number.isFinite(a)&&Number.isFinite(z)&&z<=a)z+=86400000;if(!Number.isFinite(a)||!Number.isFinite(z)||z<=a){setStatus('请检查回看开始和结束时间');return;}if(a<now-7*86400000||z>now){setStatus('组播回看仅支持最近 7×24 小时，且结束时间不能晚于当前时间');return;}if(z-a>14400000){setStatus('单次回看最长 4 小时');return;}state.epgDate=date;state.selectedEpg={channelId:String(ch.id),start:a,stop:z,title:'手动时间段',manual:true};renderEpgPanel(ch);};
   content.querySelectorAll('.epg-program:not(:disabled)').forEach(btn=>btn.onclick=()=>{
     const p=dayList.find(x=>x.start===Number(btn.dataset.epgStart)&&x.stop===Number(btn.dataset.epgStop));
     if(!p)return;
