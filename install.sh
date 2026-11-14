@@ -53,6 +53,9 @@ if [ ! -s /www/luci-static/resources/iptvweb/mpegts.min.js ] || \
   cp -f "$FILES/www/luci-static/resources/iptvweb/mpegts.min.js" /www/luci-static/resources/iptvweb/mpegts.min.js
 fi
 
+# Refresh LuCI server-side view/module caches so the newly installed unicast settings appear.
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
+
 if command -v uci >/dev/null 2>&1; then
     uci -q set uhttpd.main.script_timeout='86400' || true
     uci -q commit uhttpd || true
@@ -131,4 +134,4 @@ echo
 echo "RC2.4: independent multicast and unicast channel / XMLTV sources; multicast EPG URL and 4023 relay are preserved."
 echo "      Live multicast on port 4022 and the existing catch-up relay on port 4023 are unchanged."
 echo "      Catch-up uses a single cancellable relay stream and is enabled only when a unicast RTSP address is available; live playback continues to use multicast. mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
-echo "Force-refresh the player page (Ctrl+F5) after installing."
+echo "Log out/in to LuCI and hard-refresh the browser (Ctrl+F5) after installing."
