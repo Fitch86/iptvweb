@@ -12,16 +12,16 @@ return view.extend({
         s = m.section(form.NamedSection, 'main', 'iptvweb', _('Player settings'));
         s.anonymous = true;
 
-        o = s.option(form.Value, 'm3u_url', _('M3U playlist URL'));
+        o = s.option(form.Value, 'm3u_url', _('Multicast M3U playlist URL'));
         o.datatype = 'string';
         o.rmempty = false;
-        o.description = _('Example: https://myepg.org/api/subscribe/multicast/m3u?udpxy=192.168.1.1:4022');
+        o.description = _('Multicast playlist. This source remains independent and is shown before the unicast channels.');
 
         o = s.option(form.Value, 'epg_url', _('EPG XMLTV URL'));
         o.datatype = 'string';
         o.default = 'https://epg.zsdc.eu.org/t.xml.gz';
         o.rmempty = false;
-        o.description = _('Multi-day XMLTV program guide. Default: https://epg.zsdc.eu.org/t.xml.gz. Existing custom URLs are preserved.');
+        o.description = _('Multicast XMLTV guide. Default: https://epg.zsdc.eu.org/t.xml.gz. This existing source is kept unchanged.');
         o.validate = function(section_id, value) {
             if (String(value || '').indexOf('https://') !== 0)
                 return _('Enter an HTTPS URL for the XMLTV file.');
