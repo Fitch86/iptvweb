@@ -576,85 +576,21 @@ function startSafariCatchupAudio(seq) {
     state.webAudioDecoder = decoder;
     const video = $('video');
     state.safariCatchupPauseHandler = () => {
-      if (seq === state.seq && state.webAudioCtx === ctx &&
-          !state.safariCatchupFullscreenTransition && ctx.state === 'running') {
-        log('SAFARI_CATCHUP_AUDIO: video pause -> suspend AudioContext');
+      if (seq === state.seq && state.webAudioCtx === ctx && ctx.state === 'running') {
         try { ctx.suspend(); } catch (_) {}
       }
     };
     state.safariCatchupPlayHandler = () => {
-      if (seq === state.seq && state.webAudioCtx === ctx && ctx.state !== 'running') {
-        const p = ctx.resume();
-        if (p && p.catch) p.catch(e => log('SAFARI_CATCHUP_AUDIO: resume failed ' + e.message));
-      }
-      flushSafariCatchupPcm(seq);
-    };
-    const resumeAfterFullscreen = reason => {
-      if (seq !== state.seq || !state.catchup.active || state.webAudioCtx !== ctx) return;
-      if (video.paused || state.userPaused) {
-        log('SAFARI_CATCHUP_AUDIO: '+reason+' no resume; videoPaused='+video.paused+' userPaused='+state.userPaused+' ctx='+ctx.state);
-        return;
-      }
-      const interrupted = ctx.state === 'interrupted';
-      if (interrupted) {
-        (state.audioScheduledSources || []).forEach(source => {
-          try { source.onended=null; source.stop(0); source.disconnect(); } catch (_) {}
-        });
-        state.audioScheduledSources=[];
-        state.safariCatchupAudioScheduleCursor=0;
-        log('SAFARI_CATCHUP_AUDIO: interrupted context; cleared stale scheduled sources');
-      }
-      if (ctx.state !== 'running') {
-        let resumePromise;
-        try { resumePromise=ctx.resume(); } catch(e) {
-          log('SAFARI_CATCHUP_AUDIO: '+reason+' resume threw '+e.name+': '+e.message);
-          return;
-        }
-        Promise.resolve(resumePromise).then(() => {
-          if (seq !== state.seq || state.webAudioCtx !== ctx) return;
-          log('SAFARI_CATCHUP_AUDIO: '+reason+' resumed ctx='+ctx.state+' videoTime='+Number(video.currentTime||0).toFixed(3));
-          flushSafariCatchupPcm(seq);
-        }).catch(e => log('SAFARI_CATCHUP_AUDIO: '+reason+' resume failed '+e.name+': '+e.message));
-      } else {
-        log('SAFARI_CATCHUP_AUDIO: '+reason+' ctx already running; flush');
+      if (seq !== state.seq || state.webAudioCtx !== ctx) return;
+      const resume = ctx.state === 'running' ? Promise.resolve() : ctx.resume();
+      Promise.resolve(resume).then(() => {
+        if (seq !== state.seq || state.webAudioCtx !== ctx) return;
+        flushSafariCatchupAudio(seq);
         flushSafariCatchupPcm(seq);
-      }
-    };
-    state.safariCatchupFullscreenWasPlaying=false;
-    state.safariCatchupFullscreenTransition=false;
-    state.safariCatchupFullscreenStartHandler=() => {
-      state.safariCatchupFullscreenWasPlaying=!video.paused&&!state.userPaused;
-      state.safariCatchupFullscreenTransition=true;
-      log('SAFARI_FULLSCREEN: begin wasPlaying='+state.safariCatchupFullscreenWasPlaying+' ctx='+ctx.state+' videoTime='+Number(video.currentTime||0).toFixed(3));
-    };
-    state.safariCatchupFullscreenEndHandler=() => {
-      const wasPlaying=state.safariCatchupFullscreenWasPlaying;
-      if(state.safariCatchupResumeTimer)clearTimeout(state.safariCatchupResumeTimer);
-      state.safariCatchupResumeTimer=setTimeout(() => {
-        state.safariCatchupResumeTimer=0;
-        state.safariCatchupFullscreenTransition=false;
-        if(seq!==state.seq||state.webAudioCtx!==ctx)return;
-        if(wasPlaying&&!video.paused)state.userPaused=false;
-        log('SAFARI_FULLSCREEN: end wasPlaying='+wasPlaying+' videoPaused='+video.paused+' ctx='+ctx.state);
-        resumeAfterFullscreen('webkitendfullscreen');
-      },180);
-    };
-    state.safariCatchupFullscreenChangeHandler=() => {
-      setTimeout(() => resumeAfterFullscreen('fullscreenchange'),120);
-    };
-    state.safariCatchupVisibilityHandler=() => {
-      if(document.visibilityState==='visible')resumeAfterFullscreen('visibility-visible');
-    };
-    state.safariCatchupContextStateHandler=() => {
-      log('SAFARI_CATCHUP_AUDIO: AudioContext state='+ctx.state+' videoPaused='+video.paused+' videoTime='+Number(video.currentTime||0).toFixed(3));
+      }).catch(e => log('SAFARI_CATCHUP_AUDIO: resume failed ' + e.message));
     };
     video.addEventListener('pause', state.safariCatchupPauseHandler);
     video.addEventListener('playing', state.safariCatchupPlayHandler);
-    video.addEventListener('webkitbeginfullscreen',state.safariCatchupFullscreenStartHandler);
-    video.addEventListener('webkitendfullscreen',state.safariCatchupFullscreenEndHandler);
-    document.addEventListener('fullscreenchange',state.safariCatchupFullscreenChangeHandler);
-    document.addEventListener('visibilitychange',state.safariCatchupVisibilityHandler);
-    if(ctx.addEventListener)ctx.addEventListener('statechange',state.safariCatchupContextStateHandler);
     Promise.resolve(decoder.ready).then(() => {
       if (seq !== state.seq || state.webAudioDecoder !== decoder) return;
       state.safariCatchupAudioReady = true;
@@ -689,8 +625,16 @@ function queueSafariCatchupAudioPes(bytes, pts, pid, seq) {
   const size = bytes.byteLength || bytes.length;
   state.safariCatchupAudioPesCount = (state.safariCatchupAudioPesCount || 0) + 1;
   if (state.safariCatchupAudioPesCount <= 3) log('SAFARI_CATCHUP_AUDIO: first PES#' + state.safariCatchupAudioPesCount + ' PID=' + pid + ' bytes=' + size + ' PTS90k=' + Math.round(pts));
-  if (queue.length >= 128 || (state.safariCatchupAudioQueueBytes || 0) + size > 2 * 1024 * 1024) {
-    log('SAFARI_CATCHUP_AUDIO: input queue limit reached; dropping PES PID=' + pid);
+  const maxQueueBytes = 2 * 1024 * 1024;
+  while (queue.length && (queue.length >= 1024 ||
+      (state.safariCatchupAudioQueueBytes || 0) + size > maxQueueBytes)) {
+    const dropped = queue.shift();
+    state.safariCatchupAudioQueueBytes = Math.max(0,
+      (state.safariCatchupAudioQueueBytes || 0) - (dropped.bytes.byteLength || dropped.bytes.length));
+    state.safariCatchupAudioQueueDrops = (state.safariCatchupAudioQueueDrops || 0) + 1;
+  }
+  if (size > maxQueueBytes) {
+    state.safariCatchupAudioQueueDrops = (state.safariCatchupAudioQueueDrops || 0) + 1;
     return;
   }
   queue.push({bytes, pts, pid});
@@ -699,11 +643,22 @@ function queueSafariCatchupAudioPes(bytes, pts, pid, seq) {
 }
 function flushSafariCatchupAudio(seq) {
   if (seq !== state.seq || !state.safariCatchupAudioReady || state.safariCatchupVideoPtsBase == null) return;
+  const video = $('video'), ctx = state.webAudioCtx;
+  if (!video || video.paused || video.readyState < 2 || !ctx || ctx.state !== 'running') return;
   const queue = state.safariCatchupAudioQueue || [];
   const decoder = state.webAudioDecoder;
   while (queue.length && decoder && seq === state.seq) {
-    const item = queue.shift();
-    state.safariCatchupAudioQueueBytes = Math.max(0, (state.safariCatchupAudioQueueBytes || 0) - item.bytes.byteLength);
+    const item = queue[0];
+    const mediaPts = safariPtsDelta33(item.pts, state.safariCatchupVideoPtsBase);
+    const delta = mediaPts / 90000 - Number(video.currentTime || 0);
+    if (delta > 12.0) break;
+    queue.shift();
+    state.safariCatchupAudioQueueBytes = Math.max(0,
+      (state.safariCatchupAudioQueueBytes || 0) - (item.bytes.byteLength || item.bytes.length));
+    if (delta < -0.25) {
+      state.safariCatchupAudioStalePes = (state.safariCatchupAudioStalePes || 0) + 1;
+      continue;
+    }
     let result;
     try {
       result = decoder.decode(item.bytes);
@@ -727,7 +682,6 @@ function flushSafariCatchupAudio(seq) {
       pcm[i * 2] = left[i] || 0;
       pcm[i * 2 + 1] = right[i] || 0;
     }
-    const mediaPts = safariPtsDelta33(item.pts, state.safariCatchupVideoPtsBase);
     state.safariCatchupAudioNextPts = mediaPts + samples * 90000 / rate;
     state.audioRate = rate;
     state.audioChannels = result.channelData.length;
@@ -735,10 +689,14 @@ function flushSafariCatchupAudio(seq) {
     state.audioDecodedSamples += samples;
     const pcmQueue = state.safariCatchupPcmQueue || (state.safariCatchupPcmQueue = []);
     pcmQueue.push({pcm, samples, rate, mediaPts});
-    if (pcmQueue.length > 160) {
+    if (pcmQueue.length > 600) {
       pcmQueue.shift();
-      log('SAFARI_CATCHUP_AUDIO: PCM queue overrun; oldest block dropped');
+      state.safariCatchupPcmQueueDrops = (state.safariCatchupPcmQueueDrops || 0) + 1;
+      if (state.safariCatchupPcmQueueDrops === 1 || state.safariCatchupPcmQueueDrops % 50 === 0) {
+        log('SAFARI_CATCHUP_AUDIO: PCM queue overrun; dropped=' + state.safariCatchupPcmQueueDrops);
+      }
     }
+    if (pcmQueue.length >= 16) flushSafariCatchupPcm(seq);
     const now = performance.now();
     if (now - (state.safariCatchupAudioLastLog || 0) > 1000) {
       state.safariCatchupAudioLastLog = now;
@@ -758,7 +716,8 @@ function flushSafariCatchupPcm(seq) {
   while (queue.length) {
     const item = queue[0];
     const delta = item.mediaPts / 90000 - Number(video.currentTime || 0);
-    if (delta > 2.0) break;
+    if (delta < -0.25) { queue.shift(); continue; }
+    if (delta > 12.0) break;
     const targetAt = ctx.currentTime + delta;
     const cursor = state.safariCatchupAudioScheduleCursor || 0;
     const earliestAt = ctx.currentTime + 0.015;
@@ -1321,16 +1280,7 @@ function stopWebAudio(){
   const catchupVideo=$('video');
   if(state.safariCatchupPauseHandler) catchupVideo.removeEventListener('pause',state.safariCatchupPauseHandler);
   if(state.safariCatchupPlayHandler) catchupVideo.removeEventListener('playing',state.safariCatchupPlayHandler);
-  if(state.safariCatchupFullscreenStartHandler)catchupVideo.removeEventListener('webkitbeginfullscreen',state.safariCatchupFullscreenStartHandler);
-  if(state.safariCatchupFullscreenEndHandler)catchupVideo.removeEventListener('webkitendfullscreen',state.safariCatchupFullscreenEndHandler);
-  if(state.safariCatchupFullscreenChangeHandler)document.removeEventListener('fullscreenchange',state.safariCatchupFullscreenChangeHandler);
-  if(state.safariCatchupVisibilityHandler)document.removeEventListener('visibilitychange',state.safariCatchupVisibilityHandler);
-  if(state.safariCatchupContextStateHandler&&state.webAudioCtx&&state.webAudioCtx.removeEventListener)state.webAudioCtx.removeEventListener('statechange',state.safariCatchupContextStateHandler);
-  if(state.safariCatchupResumeTimer){clearTimeout(state.safariCatchupResumeTimer);state.safariCatchupResumeTimer=0;}
   state.safariCatchupPauseHandler=null; state.safariCatchupPlayHandler=null;
-  state.safariCatchupFullscreenStartHandler=null;state.safariCatchupFullscreenEndHandler=null;
-  state.safariCatchupFullscreenChangeHandler=null;state.safariCatchupVisibilityHandler=null;state.safariCatchupContextStateHandler=null;
-  state.safariCatchupFullscreenWasPlaying=false;state.safariCatchupFullscreenTransition=false;
   state.safariCatchupAudioQueue=[]; state.safariCatchupAudioQueueBytes=0; state.safariCatchupPcmQueue=[]; state.safariCatchupAudioReady=false; state.safariCatchupAudioNextPts=null; state.safariCatchupAudioScheduleCursor=0; state.safariCatchupVideoPtsBase=null;
   try{ if(state.webAudioWorkletNode){ state.webAudioWorkletNode.port.postMessage({type:'stop'}); state.webAudioWorkletNode.disconnect(); state.webAudioWorkletNode.port.close(); } }catch(e){}
   state.webAudioWorkletNode=null;
