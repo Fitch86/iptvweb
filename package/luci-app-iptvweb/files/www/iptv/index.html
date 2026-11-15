@@ -3960,9 +3960,40 @@ function play(ch){
   log('PLAY source='+(ch.source||'multicast')+' name='+ch.name+' url='+url+' seq='+seq+' ua='+navigator.userAgent);
 
   if(ch.source==='unicast'){
-    state.avMode='av';
     if(!ch.rtsp&&!/^rtsp:\/\//i.test(ch.url||'')){setStatus('单播频道缺少 RTSP 地址');return;}
-    createPlayer(ch,url,seq,'av',{rawFetch:true,isLive:true,diagLabel:'unicast '+ch.name+' seq='+seq,onError:e=>setStatus('单播直播失败：'+(e&&e.message||'连接错误')),onComplete:()=>setStatus('单播直播已断开')});
+
+    if(isIOSSafari()){
+      // Stage 1: reuse the proven multicast Safari video path.
+      // Audio is intentionally disabled here; Stage 2 will extract MP2 PES
+      // from this same RTSP/TS response without opening another session.
+      state.avMode='video';
+      state.safariAudioRoute='unicast-video-only-stage1';
+      log('SAFARI_UNICAST_STAGE1: video-only TS filter + Open GOP handling; audio intentionally disabled');
+      createPlayer(ch,url,seq,'video',{
+        rawFetch:true,
+        safariVideoOnly:true,
+        isLive:true,
+        diagLabel:'unicast-video-only '+ch.name+' seq='+seq,
+        onError:e=>setStatus('单播视频流失败：'+(e&&e.message||'连接错误')),
+        onComplete:()=>setStatus('单播视频流已断开'),
+        onOpenGopBootstrap:function(pid){
+          if(seq!==state.seq)return;
+          log('SAFARI_UNICAST_STAGE1: Open GOP bootstrap detected PID='+pid+', arming recovery mask');
+          if(state.cancelOpenGopConceal){
+            state.cancelOpenGopConceal();
+            state.cancelOpenGopConceal=null;
+          }
+          state.cancelOpenGopConceal=armOpenGopStartupConceal(
+            $('video'),
+            function(msg){diagnosticLog('[单播 '+ch.name+'] '+msg);},
+            1600
+          );
+        }
+      });
+    }else{
+      state.avMode='av';
+      createPlayer(ch,url,seq,'av',{rawFetch:true,isLive:true,diagLabel:'unicast '+ch.name+' seq='+seq,onError:e=>setStatus('单播直播失败：'+(e&&e.message||'连接错误')),onComplete:()=>setStatus('单播直播已断开')});
+    }
     return;
   }
 
