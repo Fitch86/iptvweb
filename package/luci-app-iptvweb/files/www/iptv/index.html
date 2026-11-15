@@ -44,7 +44,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .epg-date-nav button,.epg-toolbar-actions button{min-height:40px;padding:7px 10px;font-size:13px;white-space:nowrap;background:#303030;flex:0 0 auto}
 .epg-date-nav button:disabled{opacity:.35;cursor:default}
 .epg-date-trigger{min-width:142px;border:1px solid #555;border-radius:5px;color:#eee;background:#090909!important}
-.epg-date-picker{position:absolute;z-index:50;top:calc(100% + 6px);left:0;width: min(310px, calc(100vw - 32px));padding:10px;background:#171717;border:1px solid #555;border-radius:9px;box-shadow:0 8px 28px #000b;color:#eee}
+.epg-date-picker{position:fixed;z-index:1000;width:min(310px,calc(100vw - 16px));padding:10px;background:#171717;border:1px solid #555;border-radius:9px;box-shadow:0 8px 28px #000b;color:#eee}
 .epg-date-picker[hidden]{display:none}
 .epg-calendar-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
 .epg-calendar-head strong{font-size:14px}
@@ -4463,9 +4463,9 @@ $('epgRefresh').onclick=()=>loadEpg(true);
 $('epgPrevDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,source=ch.source==='unicast'?'unicast':'multicast',isVirtual=!epgPrograms(ch).length&&state.epgLoadedBySource[source],dates=isVirtual?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):(source==='multicast'?Array.from({length:8},(_,i)=>shiftEpgDate(today,-7+i)):availableEpgDates(ch));const d=dates.filter(x=>x<state.epgDate).pop();if(d)chooseEpgDate(d);};
 $('epgNextDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,source=ch.source==='unicast'?'unicast':'multicast',isVirtual=!epgPrograms(ch).length&&state.epgLoadedBySource[source],dates=isVirtual?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):(source==='multicast'?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):availableEpgDates(ch));const d=dates.find(x=>x>state.epgDate);if(d)chooseEpgDate(d);};
 $('epgToday').onclick=()=>chooseEpgDate(bjInput(Date.now()).date);
-$('epgDateTrigger').onclick=()=>{const picker=$('epgDatePicker'),trigger=$('epgDateTrigger');if(!picker||!trigger)return;const opening=picker.hidden;renderEpgDatePicker(state.current,opening);trigger.setAttribute('aria-expanded',String(opening));};
+$('epgDateTrigger').onclick=()=>{const picker=$('epgDatePicker'),trigger=$('epgDateTrigger');if(!picker||!trigger)return;const opening=picker.hidden;if(opening){if(picker.parentElement!==document.body)document.body.appendChild(picker);const r=trigger.getBoundingClientRect(),w=Math.min(310,window.innerWidth-16),left=Math.max(8,Math.min(r.left,window.innerWidth-w-8));picker.style.left=left+'px';picker.style.top=Math.max(8,r.bottom+6)+'px';}renderEpgDatePicker(state.current,opening);trigger.setAttribute('aria-expanded',String(opening));};
 $('epgDatePicker').onclick=e=>{const day=e.target.closest('[data-epg-date]');if(day&&!day.disabled){chooseEpgDate(day.dataset.epgDate);$('epgDatePicker').hidden=true;$('epgDateTrigger').setAttribute('aria-expanded','false');return;}const move=e.target.closest('[data-epg-month]');if(move){state.epgPickerMonth=move.dataset.epgMonth;renderEpgDatePicker(state.current,true);$('epgDateTrigger').setAttribute('aria-expanded','true');}};
-document.addEventListener('click',e=>{const nav=$('epgDatePicker')&&$('epgDatePicker').parentElement;if(nav&&!nav.contains(e.target)){$('epgDatePicker').hidden=true;$('epgDateTrigger').setAttribute('aria-expanded','false');}});
+document.addEventListener('click',e=>{const picker=$('epgDatePicker'),trigger=$('epgDateTrigger');if(picker&&!picker.hidden&&!picker.contains(e.target)&&!trigger.contains(e.target)){picker.hidden=true;trigger.setAttribute('aria-expanded','false');}});
 $('diagToggleBtn').onclick=()=>{$('diagPanel').hidden=!$('diagPanel').hidden;if(!$('diagPanel').hidden)renderDiagLog();};
 $('diagCloseBtn').onclick=()=>{$('diagPanel').hidden=true;};
 $('diagClearBtn').onclick=()=>{state.log=[];renderDiagLog();};
