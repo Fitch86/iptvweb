@@ -40,23 +40,10 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .epg-head{display:none}
 .epg-toolbar-wrap{width:100%;overflow-x:auto;overflow-y:hidden;margin:0 0 8px;padding:1px 0 3px;-webkit-overflow-scrolling:touch;scrollbar-width:thin}
 .epg-toolbar{display:flex;align-items:center;gap:7px;flex-wrap:nowrap;min-width:max-content}.epg-toolbar input[type=date],.epg-toolbar input[type=time]{min-height:40px;background:#090909;color:#eee;border:1px solid #555;border-radius:5px;padding:6px 8px;color-scheme:dark;font-size:13px}
-.epg-date-nav{display:flex;align-items:center;gap:6px;flex:0 0 auto;margin:0;position:relative}
+.epg-date-nav{display:flex;align-items:center;gap:6px;flex:0 0 auto;margin:0}
 .epg-date-nav button,.epg-toolbar-actions button{min-height:40px;padding:7px 10px;font-size:13px;white-space:nowrap;background:#303030;flex:0 0 auto}
 .epg-date-nav button:disabled{opacity:.35;cursor:default}
-.epg-date-trigger{min-width:142px;border:1px solid #555;border-radius:5px;color:#eee;background:#090909!important}
-.epg-date-picker{position:fixed;z-index:1000;width:min(310px,calc(100vw - 16px));padding:10px;background:#171717;border:1px solid #555;border-radius:9px;box-shadow:0 8px 28px #000b;color:#eee}
-.epg-date-picker[hidden]{display:none}
-.epg-calendar-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
-.epg-calendar-head strong{font-size:14px}
-.epg-calendar-head button{min-height:32px;padding:4px 10px}
-.epg-calendar-grid{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:3px}
-.epg-calendar-weekday,.epg-calendar-day{display:flex;align-items:center;justify-content:center;min-width:0;min-height:34px;padding:0;border-radius:5px;font-size:12px}
-.epg-calendar-weekday{color:#999;min-height:26px}
-.epg-calendar-day{background:#303030;color:#eee}
-.epg-calendar-day:disabled{background:#202020;color:#666;opacity:.42}
-.epg-calendar-day.today{outline:1px solid #8ab4f8}
-.epg-calendar-day.selected{background:#2866b2;color:white;font-weight:700}
-.epg-calendar-day.empty{visibility:hidden}
+.epg-date-nav input{width:142px;min-height:40px;background:#090909;color:#eee;border:1px solid #555;border-radius:5px;padding:6px 8px;color-scheme:dark;font-size:13px}
 .epg-catchup-clock{flex:1 1 auto;min-width:112px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#9db4c9;font-size:12px;text-align:center;padding:0 8px}
 .epg-toolbar-actions{display:flex;align-items:center;gap:6px;flex:0 0 auto}
 .epg-toolbar-actions button:disabled{opacity:.4;cursor:default}.epg-toolbar-actions button[hidden]{display:none}.epg-toolbar-actions #stopBtn2{background:#7a2e2e}
@@ -79,7 +66,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .diag-head button{padding:5px 8px;font-size:12px}
 #diagLog{display:block;width:100%;height:220px;max-height:32dvh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;background:#080b0e;color:#c9e4c5;border:1px solid #303a43;border-radius:4px;padding:7px;font:11px/1.45 ui-monospace,SFMono-Regular,monospace;user-select:text;-webkit-user-select:text}
 @media(max-width:700px){body{overflow:hidden;height:100%;height:100dvh}header{min-height:72px}header .header-inner{min-height:60px}#channelInfo{left:0;right:0;top:36px;transform:none}#playStatus{right:0;top:0;transform:none;width:28%}.layout{height:calc(var(--iptvweb-vh,100dvh) - 108px);min-height:0;flex-direction:column}#sidebar{order:2;width:100%;flex:1 1 0;min-height:0;height:auto;max-height:none;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;border-right:0;border-top:1px solid #292929;padding-bottom:calc(24px + env(safe-area-inset-bottom))}main{order:1;flex:0 0 auto;max-height:55dvh;min-height:0;padding:0 0 8px;overflow:auto;overscroll-behavior:contain}.player{border-radius:0}}
-@media(max-width:700px){.epg-panel{padding:7px}.epg-toolbar{gap:6px}.epg-date-nav{gap:5px}.epg-date-nav button,.epg-toolbar-actions button{min-height:42px;padding:8px 10px;font-size:13px}.epg-date-trigger{min-width:118px}.epg-calendar-day{min-height:38px}.epg-catchup-clock{min-width:100px;font-size:11px}}
+@media(max-width:700px){.epg-panel{padding:7px}.epg-toolbar{gap:6px}.epg-date-nav{gap:5px}.epg-date-nav button,.epg-toolbar-actions button{min-height:42px;padding:8px 10px;font-size:13px}.epg-date-nav input{width:132px;min-height:42px}.epg-catchup-clock{min-width:100px;font-size:11px}}
 @media(min-width:701px) and (max-width:900px) and (orientation:portrait){
  body{height:100dvh}
  .layout{height:calc(var(--iptvweb-vh,100dvh) - 86px);min-height:0;flex-direction:column}
@@ -112,7 +99,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
     <div class="now" id="now">
       <section id="epgPanel" class="epg-panel">
         <div class="epg-toolbar-wrap"><div class="epg-toolbar">
-          <div class="epg-date-nav"><button id="epgPrevDay" type="button">‹ 较早</button><button id="epgDateTrigger" class="epg-date-trigger" type="button" aria-label="选择节目单日期" aria-expanded="false">选择日期</button><button id="epgNextDay" type="button">较新 ›</button><button id="epgToday" type="button">今天</button><div id="epgDatePicker" class="epg-date-picker" hidden></div></div>
+          <div class="epg-date-nav"><button id="epgPrevDay" type="button">‹ 较早</button><input id="epgDate" type="date" aria-label="节目单日期"><button id="epgNextDay" type="button">较新 ›</button><button id="epgToday" type="button">今天</button></div>
           <span id="catchupClock" class="epg-catchup-clock" role="status" aria-live="off">未回看</span>
           <div class="epg-toolbar-actions"><button id="catchupStartBtn" type="button" hidden>回看</button><button id="liveBtn" type="button" disabled>播放</button><button id="stopBtn2" type="button" class="danger" disabled>停止</button><button id="epgRefresh" type="button">刷新</button></div>
         </div></div>
@@ -1132,34 +1119,7 @@ function availableEpgDates(ch){
 }
 function chooseEpgDate(date){
   if(!/^\d{4}-\d{2}-\d{2}$/.test(String(date||'')))return;
-  state.epgDate=date;state.epgPickerMonth=date.slice(0,7);state.selectedEpg=null;state.epgLocatePending=true;renderEpgPanel(state.current);
-}
-function renderEpgDatePicker(ch,open){
-  const panel=$('epgDatePicker'),trigger=$('epgDateTrigger');
-  if(!panel||!ch)return;
-  const dates=availableEpgDates(ch),allowed=new Set(dates),selected=state.epgDate||bjInput(Date.now()).date;
-  if(!dates.length){panel.hidden=true;return;}
-  const min=dates[0],max=dates[dates.length-1];
-  const month=state.epgPickerMonth||selected.slice(0,7);
-  const parts=month.split('-').map(Number),year=parts[0],mon=parts[1];
-  const first=new Date(Date.UTC(year,mon-1,1)),offset=(first.getUTCDay()+6)%7;
-  const days=new Date(Date.UTC(year,mon,0)).getUTCDate();
-  const today=bjInput(Date.now()).date;
-  const monthLabel=year+'年'+String(mon).padStart(2,'0')+'月';
-  const prevMonth=new Date(Date.UTC(year,mon-2,1)).toISOString().slice(0,7);
-  const nextMonth=new Date(Date.UTC(year,mon,1)).toISOString().slice(0,7);
-  const minMonth=min.slice(0,7),maxMonth=max.slice(0,7);
-  let cells='<div class="epg-calendar-grid">'+['一','二','三','四','五','六','日'].map(x=>'<div class="epg-calendar-weekday">'+x+'</div>').join('');
-  for(let i=0;i<offset;i++)cells+='<button class="epg-calendar-day empty" type="button" tabindex="-1" disabled></button>';
-  for(let day=1;day<=days;day++){
-    const date=year+'-'+String(mon).padStart(2,'0')+'-'+String(day).padStart(2,'0');
-    const ok=allowed.has(date),classes='epg-calendar-day'+(date===today?' today':'')+(date===selected?' selected':'');
-    cells+='<button type="button" class="'+classes+'" data-epg-date="'+date+'" '+(ok?'':'disabled')+' aria-label="'+date+'">'+day+'</button>';
-  }
-  cells+='</div>';
-  panel.innerHTML='<div class="epg-calendar-head"><button type="button" data-epg-month="'+prevMonth+'" '+(month<=minMonth?'disabled':'')+'>‹</button><strong>'+monthLabel+'</strong><button type="button" data-epg-month="'+nextMonth+'" '+(month>=maxMonth?'disabled':'')+'>›</button></div>'+cells+'<div class="hint" style="margin-top:7px;font-size:11px">灰色日期没有可用节目表，不能选择。</div>';
-  panel.hidden=!open;
-  if(trigger)trigger.textContent=selected;
+  state.epgDate=date;state.selectedEpg=null;state.epgLocatePending=true;renderEpgPanel(state.current);
 }
 function updateCatchupToolbar(){
   const replayBtn=$('catchupStartBtn'),liveBtn=$('liveBtn'),stopBtn=$('stopBtn2');
@@ -1189,13 +1149,11 @@ function renderEpgPanel(ch){
   }
   if(!state.epgDate)state.epgDate=today;
   const dates=availableEpgDates(ch);
-  const dateTrigger=$('epgDateTrigger'),prevBtn=$('epgPrevDay'),nextBtn=$('epgNextDay'),todayBtn=$('epgToday');
-  if(dateTrigger){dateTrigger.textContent=state.epgDate;dateTrigger.setAttribute('aria-expanded','false');}
-  const datePicker=$('epgDatePicker');if(datePicker)datePicker.hidden=true;
+  const dateInput=$('epgDate'),prevBtn=$('epgPrevDay'),nextBtn=$('epgNextDay'),todayBtn=$('epgToday');
   const replayFloor=shiftEpgDate(today,isVirtual?-6:-7),isMulticast=(ch.source||'multicast')==='multicast';
   const navDates=isVirtual?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):(isMulticast?Array.from({length:8},(_,i)=>shiftEpgDate(replayFloor,i)):dates);
   const prevDate=navDates.filter(d=>d<state.epgDate).pop()||'',nextDate=navDates.find(d=>d>state.epgDate)||'';
-  renderEpgDatePicker(ch,false);
+  if(dateInput){dateInput.value=state.epgDate;dateInput.min=(isVirtual||isMulticast)?replayFloor:(dates[0]||today);dateInput.max=(isVirtual||isMulticast)?today:(dates[dates.length-1]||today);}
   if(prevBtn)prevBtn.disabled=!prevDate;
   if(nextBtn)nextBtn.disabled=!nextDate;
   if(todayBtn)todayBtn.disabled=state.epgDate===today;
@@ -4463,9 +4421,7 @@ $('epgRefresh').onclick=()=>loadEpg(true);
 $('epgPrevDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,source=ch.source==='unicast'?'unicast':'multicast',isVirtual=!epgPrograms(ch).length&&state.epgLoadedBySource[source],dates=isVirtual?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):(source==='multicast'?Array.from({length:8},(_,i)=>shiftEpgDate(today,-7+i)):availableEpgDates(ch));const d=dates.filter(x=>x<state.epgDate).pop();if(d)chooseEpgDate(d);};
 $('epgNextDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,source=ch.source==='unicast'?'unicast':'multicast',isVirtual=!epgPrograms(ch).length&&state.epgLoadedBySource[source],dates=isVirtual?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):(source==='multicast'?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):availableEpgDates(ch));const d=dates.find(x=>x>state.epgDate);if(d)chooseEpgDate(d);};
 $('epgToday').onclick=()=>chooseEpgDate(bjInput(Date.now()).date);
-$('epgDateTrigger').onclick=()=>{const picker=$('epgDatePicker'),trigger=$('epgDateTrigger');if(!picker||!trigger)return;const opening=picker.hidden;if(opening){if(picker.parentElement!==document.body)document.body.appendChild(picker);const r=trigger.getBoundingClientRect(),w=Math.min(310,window.innerWidth-16),left=Math.max(8,Math.min(r.left,window.innerWidth-w-8));picker.style.left=left+'px';picker.style.top=Math.max(8,r.bottom+6)+'px';}renderEpgDatePicker(state.current,opening);trigger.setAttribute('aria-expanded',String(opening));};
-$('epgDatePicker').onclick=e=>{const day=e.target.closest('[data-epg-date]');if(day&&!day.disabled){chooseEpgDate(day.dataset.epgDate);$('epgDatePicker').hidden=true;$('epgDateTrigger').setAttribute('aria-expanded','false');return;}const move=e.target.closest('[data-epg-month]');if(move){state.epgPickerMonth=move.dataset.epgMonth;renderEpgDatePicker(state.current,true);$('epgDateTrigger').setAttribute('aria-expanded','true');}};
-document.addEventListener('click',e=>{const picker=$('epgDatePicker'),trigger=$('epgDateTrigger');if(picker&&!picker.hidden&&!picker.contains(e.target)&&!trigger.contains(e.target)){picker.hidden=true;trigger.setAttribute('aria-expanded','false');}});
+$('epgDate').onchange=e=>chooseEpgDate(e.target.value);
 $('diagToggleBtn').onclick=()=>{$('diagPanel').hidden=!$('diagPanel').hidden;if(!$('diagPanel').hidden)renderDiagLog();};
 $('diagCloseBtn').onclick=()=>{$('diagPanel').hidden=true;};
 $('diagClearBtn').onclick=()=>{state.log=[];renderDiagLog();};
