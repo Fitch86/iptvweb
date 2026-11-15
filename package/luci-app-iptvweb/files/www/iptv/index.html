@@ -3963,22 +3963,23 @@ function play(ch){
     if(!ch.rtsp&&!/^rtsp:\/\//i.test(ch.url||'')){setStatus('单播频道缺少 RTSP 地址');return;}
 
     if(isIOSSafari()){
-      // Stage 1: reuse the proven multicast Safari video path.
-      // Audio is intentionally disabled here; Stage 2 will extract MP2 PES
-      // from this same RTSP/TS response without opening another session.
+      // Stage 2: video and MP2 audio are derived from this one RTSP/TS response.
+      // Keep the proven Safari video-only MSE path; decode extracted audio PES
+      // through the existing mpg123 + PTS-scheduled WebAudio pipeline.
       state.avMode='video';
-      state.safariAudioRoute='unicast-video-only-stage1';
-      log('SAFARI_UNICAST_STAGE1: video-only TS filter + Open GOP handling; audio intentionally disabled');
+      state.safariAudioRoute='unicast-mp2-same-rtsp';
+      log('SAFARI_UNICAST_STAGE2: video-only MSE + MP2 PES from the same RTSP/TS session');
+      startSafariCatchupAudio(seq);
       createPlayer(ch,url,seq,'video',{
         rawFetch:true,
         safariVideoOnly:true,
         isLive:true,
-        diagLabel:'unicast-video-only '+ch.name+' seq='+seq,
+        diagLabel:'unicast-mp2 '+ch.name+' seq='+seq,
         onError:e=>setStatus('单播视频流失败：'+(e&&e.message||'连接错误')),
         onComplete:()=>setStatus('单播视频流已断开'),
         onOpenGopBootstrap:function(pid){
           if(seq!==state.seq)return;
-          log('SAFARI_UNICAST_STAGE1: Open GOP bootstrap detected PID='+pid+', arming recovery mask');
+          log('SAFARI_UNICAST_STAGE2: Open GOP bootstrap detected PID='+pid+', arming recovery mask');
           if(state.cancelOpenGopConceal){
             state.cancelOpenGopConceal();
             state.cancelOpenGopConceal=null;
@@ -3988,6 +3989,19 @@ function play(ch){
             function(msg){diagnosticLog('[单播 '+ch.name+'] '+msg);},
             1600
           );
+        },
+        onVideoPts:function(pts,pid){
+          if(seq!==state.seq || state.safariCatchupVideoPtsBase!=null)return;
+          state.safariCatchupVideoPtsBase=pts;
+          log('SAFARI_UNICAST_MP2: video PTS anchor='+Math.round(pts)+' PID='+pid);
+          flushSafariCatchupAudio(seq);
+        },
+        onAudioPes:function(bytes,pts,pid){
+          if(seq!==state.seq)return;
+          if(state.safariCatchupAudioPesCount===0){
+            log('SAFARI_UNICAST_MP2: audio PES extraction active PID='+pid);
+          }
+          queueSafariCatchupAudioPes(bytes,pts,pid,seq);
         }
       });
     }else{
