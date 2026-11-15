@@ -3684,10 +3684,21 @@ function installMseDiagnostics(){
     const C=window[apiName];
     if(!C || !C.prototype || typeof C.prototype.addSourceBuffer!=='function') return;
     const proto=C.prototype;
+    if(window.URL && typeof URL.revokeObjectURL==='function' && !URL.__iptvwebRevokeWrapped){
+      const nativeRevokeObjectURL=URL.revokeObjectURL;
+      URL.revokeObjectURL=function(url){
+        if(String(url).indexOf('blob:')===0){
+          const video=$('video');
+          log('MSE_REVOKE_OBJECT_URL videoSrcMatch='+(!!video&&video.src===url));
+        }
+        return nativeRevokeObjectURL.apply(this,arguments);
+      };
+      URL.__iptvwebRevokeWrapped=true;
+    }
     if(typeof proto.endOfStream==='function' && !proto.__iptvwebEndOfStreamWrapped){
       const nativeEndOfStream=proto.endOfStream;
       proto.endOfStream=function(){
-        const stack=(new Error().stack||'').split('\\n').slice(1,4).join(' <- ');
+        const stack=(new Error().stack||'').split('\n').slice(1,4).join(' <- ');
         log('MSE_END_OF_STREAM api='+apiName+' readyState='+this.readyState+' stack='+stack);
         return nativeEndOfStream.apply(this,arguments);
       };
