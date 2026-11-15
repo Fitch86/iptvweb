@@ -1084,9 +1084,26 @@ function epgPrograms(ch){
   const map=state.epgBySource[source]||state.epgById;
   return ch&&ch.id?map[String(ch.id)]||[]:[];
 }
+function virtualEpgPrograms(){
+  const today=bjInput(Date.now()).date,first=shiftEpgDate(today,-6),items=[];
+  for(let day=0;day<7;day++){
+    const date=shiftEpgDate(first,day);
+    for(let hour=0;hour<24;hour++){
+      const start=bjEpoch(date,String(hour).padStart(2,'0')+':00');
+      items.push({start,stop:start+3600000,title:'精彩节目',virtual:true});
+    }
+  }
+  return items;
+}
+function epgTimelinePrograms(ch){
+  const actual=epgPrograms(ch);
+  if(actual.length)return actual;
+  const source=ch&&ch.source==='unicast'?'unicast':'multicast';
+  return state.epgLoadedBySource[source]?virtualEpgPrograms():[];
+}
 function currentProgramme(ch,now){
   const t=Number.isFinite(now)?now:Date.now();
-  return epgPrograms(ch).find(p=>p.start<=t&&p.stop>t)||null;
+  return epgTimelinePrograms(ch).find(p=>p.start<=t&&p.stop>t)||null;
 }
 function epgTime(ms){
   return new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',hour:'2-digit',minute:'2-digit',hourCycle:'h23'}).format(new Date(ms));
@@ -1094,7 +1111,7 @@ function epgTime(ms){
 function shiftEpgDate(date,days){const d=new Date(date+'T12:00:00Z');d.setUTCDate(d.getUTCDate()+days);return d.toISOString().slice(0,10);}
 function availableEpgDates(ch){
   const dates=new Set();
-  epgPrograms(ch).forEach(p=>{
+  epgTimelinePrograms(ch).forEach(p=>{
     let d=bjInput(p.start).date,last=bjInput(p.stop-1).date,guard=0;
     while(d<=last&&guard++<3660){dates.add(d);d=shiftEpgDate(d,1);}
   });
@@ -1118,23 +1135,25 @@ function renderEpgPanel(ch){
   const content=$('epgContent');
   if(!content)return;
   if(!ch){content.className='epg-empty';content.textContent='选择频道后显示节目时间轴。';updateCatchupToolbar();return;}
-  const list=epgPrograms(ch),now=Date.now(),current=currentProgramme(ch,now);
-  const today=bjInput(now).date;
-  if(!list.length&&(ch.source||'multicast')!=='multicast'){
+  const actualList=epgPrograms(ch),source=ch.source==='unicast'?'unicast':'multicast';
+  const isVirtual=!actualList.length&&state.epgLoadedBySource[source];
+  const list=actualList.length?actualList:(isVirtual?virtualEpgPrograms():[]);
+  const now=Date.now(),current=currentProgramme(ch,now),today=bjInput(now).date;
+  if(!list.length){
     content.className='epg-empty';
-    content.textContent=state.epgLoadedBySource.unicast
-      ?('单播频道「'+ch.name+'」没有匹配到节目单（请核对 tvg-id 与 XMLTV channel id）')
-      :'单播节目单加载中或暂不可用。';
+    content.textContent=state.epgLoadedBySource[source]
+      ?('频道「'+ch.name+'」暂无可用节目表。')
+      :'节目单加载中或暂不可用。';
     updateCatchupToolbar();
     return;
   }
   if(!state.epgDate)state.epgDate=today;
   const dates=availableEpgDates(ch);
   const dateInput=$('epgDate'),prevBtn=$('epgPrevDay'),nextBtn=$('epgNextDay'),todayBtn=$('epgToday');
-  const replayFloor=shiftEpgDate(today,-7),isMulticast=(ch.source||'multicast')==='multicast';
-  const navDates=isMulticast?Array.from({length:8},(_,i)=>shiftEpgDate(replayFloor,i)):dates;
+  const replayFloor=shiftEpgDate(today,isVirtual?-6:-7),isMulticast=(ch.source||'multicast')==='multicast';
+  const navDates=isVirtual?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):(isMulticast?Array.from({length:8},(_,i)=>shiftEpgDate(replayFloor,i)):dates);
   const prevDate=navDates.filter(d=>d<state.epgDate).pop()||'',nextDate=navDates.find(d=>d>state.epgDate)||'';
-  if(dateInput){dateInput.value=state.epgDate;dateInput.min=isMulticast?replayFloor:(dates[0]||today);dateInput.max=isMulticast?today:(dates[dates.length-1]||today);}
+  if(dateInput){dateInput.value=state.epgDate;dateInput.min=(isVirtual||isMulticast)?replayFloor:(dates[0]||today);dateInput.max=(isVirtual||isMulticast)?today:(dates[dates.length-1]||today);}
   if(prevBtn)prevBtn.disabled=!prevDate;
   if(nextBtn)nextBtn.disabled=!nextDate;
   if(todayBtn)todayBtn.disabled=state.epgDate===today;
@@ -1151,7 +1170,7 @@ function renderEpgPanel(ch){
   const previousTimeline=$('epgTimeline');
   const previousScrollLeft=previousTimeline?previousTimeline.scrollLeft:0;
   content.className='';
-  content.innerHTML='<div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">该日期没有节目数据</div>')+'</div></div>'+(isMulticast?'<div class="hint" style="margin-top:8px">组播回看支持最近 7 天，请从节目时间轴选择节目回看。</div>':('<div class="hint" style="margin-top:8px">单播节目表覆盖：'+(dates.length?dates[0]+' 至 '+dates[dates.length-1]:'暂无有效日期')+'。回看日期按单播 XMLTV 实际记录开放，不受组播 7 天限制。</div>'));
+  content.innerHTML='<div class="epg-timeline-wrap" id="epgTimeline"><div class="epg-timeline">'+(cards||'<div class="epg-empty">该日期没有节目数据</div>')+'</div></div>'+(isVirtual?'<div class="hint" style="margin-top:8px">该频道没有实际节目单，已生成最近 7 天虚拟节目表；每小时为一个「精彩节目」回看时段。</div>':(isMulticast?'<div class="hint" style="margin-top:8px">组播回看支持最近 7 天，请从节目时间轴选择节目回看。</div>':('<div class="hint" style="margin-top:8px">单播节目表覆盖：'+(dates.length?dates[0]+' 至 '+dates[dates.length-1]:'暂无有效日期')+'。回看日期按单播 XMLTV 实际记录开放，不受组播 7 天限制。</div>')));
   if(state.epgLocatePending){
     const focus=(state.epgDate===today?current:null)||selected||dayList[0]||null;
     if(focus){
@@ -4399,8 +4418,8 @@ $('stopBtn2').onclick=stopPlayback;
 $('liveBtn').onclick=()=>{if(state.current)play(state.current);};
 $('catchupStartBtn').onclick=startCatchup;
 $('epgRefresh').onclick=()=>loadEpg(true);
-$('epgPrevDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,dates=(ch.source||'multicast')==='multicast'?Array.from({length:8},(_,i)=>shiftEpgDate(shiftEpgDate(today,-7),i)):availableEpgDates(ch);const d=dates.filter(x=>x<state.epgDate).pop();if(d)chooseEpgDate(d);};
-$('epgNextDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,dates=(ch.source||'multicast')==='multicast'?Array.from({length:7},(_,i)=>shiftEpgDate(shiftEpgDate(today,-6),i)):availableEpgDates(ch);const d=dates.find(x=>x>state.epgDate);if(d)chooseEpgDate(d);};
+$('epgPrevDay').onclick=()=>{const ch=state.current;if(!ch)return;const dates=availableEpgDates(ch);const d=dates.filter(x=>x<state.epgDate).pop();if(d)chooseEpgDate(d);};
+$('epgNextDay').onclick=()=>{const ch=state.current;if(!ch)return;const dates=availableEpgDates(ch);const d=dates.find(x=>x>state.epgDate);if(d)chooseEpgDate(d);};
 $('epgToday').onclick=()=>chooseEpgDate(bjInput(Date.now()).date);
 $('epgDate').onchange=e=>chooseEpgDate(e.target.value);
 $('diagToggleBtn').onclick=()=>{$('diagPanel').hidden=!$('diagPanel').hidden;if(!$('diagPanel').hidden)renderDiagLog();};
