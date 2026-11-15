@@ -12,15 +12,87 @@ return view.extend({
         s = m.section(form.NamedSection, 'main', 'iptvweb', _('Player settings'));
         s.anonymous = true;
 
-        o = s.option(form.Value, 'm3u_url', _('M3U playlist URL'));
+        o = s.option(form.Value, 'm3u_url', _('Multicast M3U playlist URL'));
         o.datatype = 'string';
         o.rmempty = false;
-        o.description = _('Example: https://myepg.org/api/subscribe/multicast/m3u?udpxy=192.168.1.1:4022');
+        o.description = _('Multicast playlist. This source remains independent and is shown before the unicast channels.');
+
+        o = s.option(form.Value, 'epg_url', _('EPG XMLTV URL'));
+        o.datatype = 'string';
+        o.default = 'https://epg.zsdc.eu.org/t.xml.gz';
+        o.rmempty = false;
+        o.description = _('Multicast XMLTV guide. Default: https://epg.zsdc.eu.org/t.xml.gz. This existing source is kept unchanged.');
+        o.validate = function(section_id, value) {
+            if (String(value || '').indexOf('https://') !== 0)
+                return _('Enter an HTTPS URL for the XMLTV file.');
+            return true;
+        };
+
+        o = s.option(form.Value, 'epg_cache_ttl', _('EPG cache TTL (seconds)'));
+        o.datatype = 'uinteger';
+        o.default = '21600';
+        o.description = _('How long the router keeps the downloaded EPG before refreshing it.');
 
         o = s.option(form.Value, 'udpxy', _('udpxy address'));
-        o.datatype = 'host';
+        // LuCI's built-in "host" validator rejects the required :port suffix.
+        // Validate the full host:port value instead.
+        o.datatype = 'string';
         o.rmempty = false;
         o.description = _('Host:port, for example 192.168.1.1:4022. The template {{your_udpxy_address}} in the M3U is replaced with this value.');
+        o.validate = function(section_id, value) {
+            var match = value.match(/^(\[[0-9a-fA-F:.]+\]|[^:\s]+):([0-9]{1,5})$/);
+            if (!match)
+                return _('Enter a valid hostname or IP address followed by :port, e.g. 192.168.1.1:4022.');
+
+            var host = match[1];
+            var port = Number(match[2]);
+            if (port < 1 || port > 65535)
+                return _('Port must be between 1 and 65535.');
+
+            if (host.charAt(0) === '[') {
+                if (host.indexOf(':') < 0)
+                    return _('Enter a valid IPv6 address in brackets.');
+                return true;
+            }
+
+            if (/^[0-9.]+$/.test(host)) {
+                var octets = host.split('.');
+                if (octets.length !== 4 || octets.some(function(part) {
+                    return !/^([0-9]{1,3})$/.test(part) || Number(part) > 255;
+                }))
+                    return _('Enter a valid IPv4 address.');
+                return true;
+            }
+
+            if (host.length > 253 || !/^(?=.{1,253}$)[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$/.test(host))
+                return _('Enter a valid hostname or IP address.');
+            return true;
+        };
+
+        o = s.option(form.Value, 'unicast_m3u_url', _('Unicast M3U playlist URL'));
+        o.datatype = 'string';
+        o.default = 'https://myepg.org/api/subscribe/unicast/m3u';
+        o.rmempty = false;
+        o.description = _('Independent RTSP unicast channel list. It is appended after the multicast channels.');
+
+        o = s.option(form.Value, 'unicast_epg_url', _('Unicast EPG XMLTV URL'));
+        o.datatype = 'string';
+        o.default = 'https://myepg.org/EPG/Zhejiang_Unicast.xml.gz';
+        o.rmempty = false;
+        o.description = _('Independent XMLTV source for unicast channels; current provider data covers about 3 days.');
+        o.validate = function(section_id, value) {
+            if (String(value || '').indexOf('https://') !== 0)
+                return _('Enter an HTTPS URL for the XMLTV file.');
+            return true;
+        };
+
+        o = s.option(form.Value, 'unicast_m3u_cache_ttl', _('Unicast M3U cache TTL (seconds)'));
+        o.datatype = 'uinteger';
+        o.default = '21600';
+
+        o = s.option(form.Value, 'unicast_epg_cache_ttl', _('Unicast EPG cache TTL (seconds)'));
+        o.datatype = 'uinteger';
+        o.default = '21600';
 
         o = s.option(form.Value, 'cache_ttl', _('M3U cache TTL (seconds)'));
         o.datatype = 'uinteger';

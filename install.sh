@@ -31,12 +31,15 @@ mkdir -p /etc/uci-defaults /usr/bin /www/iptv /www/cgi-bin \
 
 cp -f "$FILES/usr/bin/iptvweb-fetch" /usr/bin/iptvweb-fetch
 cp -f "$FILES/www/iptv/index.html" /www/iptv/index.html
+cp -f "$FILES/www/luci-static/resources/iptvweb/unicast-map.json" /www/luci-static/resources/iptvweb/unicast-map.json
 cp -f "$FILES/www/cgi-bin/iptvweb-m3u" /www/cgi-bin/iptvweb-m3u
+cp -f "$FILES/www/cgi-bin/iptvweb-epg" /www/cgi-bin/iptvweb-epg
+cp -f "$FILES/www/cgi-bin/iptvweb-unicast-m3u" /www/cgi-bin/iptvweb-unicast-m3u
+cp -f "$FILES/www/cgi-bin/iptvweb-unicast-epg" /www/cgi-bin/iptvweb-unicast-epg
 cp -f "$FILES/www/cgi-bin/iptvweb-stream" /www/cgi-bin/iptvweb-stream
 cp -f "$FILES/www/cgi-bin/iptvweb-audio" /www/cgi-bin/iptvweb-audio
 cp -f "$FILES/www/cgi-bin/iptvweb-audio-probe" /www/cgi-bin/iptvweb-audio-probe
 cp -f "$FILES/www/cgi-bin/iptvweb-audio-pes" /www/cgi-bin/iptvweb-audio-pes
-cp -f "$FILES/www/cgi-bin/iptvweb-capture" /www/cgi-bin/iptvweb-capture
 cp -f "$FILES/usr/share/luci/menu.d/luci-app-iptvweb.json" /usr/share/luci/menu.d/luci-app-iptvweb.json
 cp -f "$FILES/usr/share/rpcd/acl.d/luci-app-iptvweb.json" /usr/share/rpcd/acl.d/luci-app-iptvweb.json
 cp -f "$FILES/www/luci-static/resources/view/iptvweb.js" /www/luci-static/resources/view/iptvweb.js
@@ -44,11 +47,14 @@ cp -f "$FILES/www/luci-static/resources/iptvweb/mpg123-decoder.min.js" /www/luci
 cp -f "$FILES/www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js" /www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js
 
 # Keep a working local mpegts.js across reinstalls. Only replace with the
-# stub if no real copy exists yet; install then tries to download 1.8.0.
+# stub if no real copy exists yet; install then tries to download 1.8.2.
 if [ ! -s /www/luci-static/resources/iptvweb/mpegts.min.js ] || \
    [ "$(wc -c < /www/luci-static/resources/iptvweb/mpegts.min.js)" -lt 100000 ]; then
   cp -f "$FILES/www/luci-static/resources/iptvweb/mpegts.min.js" /www/luci-static/resources/iptvweb/mpegts.min.js
 fi
+
+# Refresh LuCI server-side view/module caches so the newly installed unicast settings appear.
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
 
 if command -v uci >/dev/null 2>&1; then
     uci -q set uhttpd.main.script_timeout='86400' || true
@@ -107,9 +113,12 @@ else
     fi
 fi
 
-chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-audio /www/cgi-bin/iptvweb-audio-probe /www/cgi-bin/iptvweb-audio-pes /www/cgi-bin/iptvweb-capture
+chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-epg /www/cgi-bin/iptvweb-unicast-m3u /www/cgi-bin/iptvweb-unicast-epg /www/cgi-bin/iptvweb-stream /www/cgi-bin/iptvweb-audio /www/cgi-bin/iptvweb-audio-probe /www/cgi-bin/iptvweb-audio-pes
 [ -x /www/cgi-bin/iptvweb-stream ] || { echo "ERROR: iptvweb-stream was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-m3u ] || { echo "ERROR: iptvweb-m3u was not installed" >&2; exit 1; }
+[ -x /www/cgi-bin/iptvweb-epg ] || { echo "ERROR: iptvweb-epg was not installed" >&2; exit 1; }
+[ -x /www/cgi-bin/iptvweb-unicast-m3u ] || { echo "ERROR: iptvweb-unicast-m3u was not installed" >&2; exit 1; }
+[ -x /www/cgi-bin/iptvweb-unicast-epg ] || { echo "ERROR: iptvweb-unicast-epg was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-audio ] || { echo "ERROR: iptvweb-audio was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-audio-probe ] || { echo "ERROR: iptvweb-audio-probe was not installed" >&2; exit 1; }
 [ -x /www/cgi-bin/iptvweb-audio-pes ] || { echo "ERROR: iptvweb-audio-pes was not installed" >&2; exit 1; }
@@ -118,10 +127,11 @@ chmod 0755 /usr/bin/iptvweb-fetch /www/cgi-bin/iptvweb-m3u /www/cgi-bin/iptvweb-
 /etc/init.d/uhttpd restart 2>/dev/null || true
 
 echo
-echo "Installed 0.2.2-rev4.25."
+echo "Installed 0.2.2-rc2.4."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "rev4.25: Safari MP2PCM audio resampled to the AudioContext rate (fixes slow/low-pitch audio when ctx.sampleRate differs from the stream rate); Safari video chain unchanged; rev4.23.1 history: MPEG Audio PES is decoded locally with mpg123-decoder 1.0.3 (MP2→PCM) and played by an AudioWorklet stereo PCM ring buffer;"
-echo "        mpegts.js 1.8.2 and mpg123-decoder 1.0.3 stay local; long-lived CGI still uses script_timeout=86400."
-echo "Force-refresh the player page (Ctrl+F5) after installing."
+echo "RC2.4: independent multicast and unicast channel / XMLTV sources; multicast EPG URL and 4023 relay are preserved."
+echo "      Live multicast on port 4022 and the existing catch-up relay on port 4023 are unchanged."
+echo "      Catch-up uses a single cancellable relay stream and is enabled only when a unicast RTSP address is available; live playback continues to use multicast. mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
+echo "Log out/in to LuCI and hard-refresh the browser (Ctrl+F5) after installing."

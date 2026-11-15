@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
-PKG_VERSION:=0.2.2-rev4.25
-PKG_RELEASE:=1
+PKG_VERSION:=0.2.2-rc2.4
+PKG_RELEASE:=3
 
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=OpenWrt IPTV Web contributors
@@ -15,8 +15,39 @@ define Package/luci-app-iptvweb
   SUBMENU:=Applications
   TITLE:=IPTV Web Player
   DEPENDS:=+uhttpd +luci-base +lua
+  CONFFILES:=/etc/config/iptvweb
 endef
 
+
+define Package/luci-app-iptvweb/preinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+rm -f /tmp/iptvweb-epg-url.upgrade
+# Force LuCI to reload the updated view containing unicast source settings.
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
+if [ -f /etc/config/iptvweb ] && command -v uci >/dev/null 2>&1; then
+	uci -q get iptvweb.main.epg_url > /tmp/iptvweb-epg-url.upgrade
+fi
+exit 0
+endef
+
+define Package/luci-app-iptvweb/postinst
+#!/bin/sh
+[ -n "$${IPKG_INSTROOT}" ] && exit 0
+if [ -s /tmp/iptvweb-epg-url.upgrade ]; then
+	old_url="$$(cat /tmp/iptvweb-epg-url.upgrade)"
+	if [ -n "$$old_url" ]; then
+		if [ "$$old_url" = "https://myepg.org/EPG/Zhejiang_Multicast.xml.gz" ]; then
+			uci -q set iptvweb.main.epg_url='https://epg.zsdc.eu.org/t.xml.gz'
+		else
+			uci -q set "iptvweb.main.epg_url=$$old_url"
+		fi
+		uci -q commit iptvweb
+	fi
+	rm -f /tmp/iptvweb-epg-url.upgrade
+fi
+exit 0
+endef
 define Package/luci-app-iptvweb/description
 Lightweight LuCI-configured IPTV web player using M3U and udpxy.
 endef
@@ -36,11 +67,13 @@ define Package/luci-app-iptvweb/install
 
 	$(INSTALL_DIR) $(1)/www/cgi-bin
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-m3u $(1)/www/cgi-bin/iptvweb-m3u
+	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-epg $(1)/www/cgi-bin/iptvweb-epg
+	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-unicast-m3u $(1)/www/cgi-bin/iptvweb-unicast-m3u
+	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-unicast-epg $(1)/www/cgi-bin/iptvweb-unicast-epg
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-stream $(1)/www/cgi-bin/iptvweb-stream
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio $(1)/www/cgi-bin/iptvweb-audio
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-probe $(1)/www/cgi-bin/iptvweb-audio-probe
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-pes $(1)/www/cgi-bin/iptvweb-audio-pes
-	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-capture $(1)/www/cgi-bin/iptvweb-capture
 
 	$(INSTALL_DIR) $(1)/www/iptv
 	$(INSTALL_DATA) ./files/www/iptv/index.html $(1)/www/iptv/index.html
@@ -57,6 +90,7 @@ define Package/luci-app-iptvweb/install
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/iptvweb
 	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/mpegts.min.js $(1)/www/luci-static/resources/iptvweb/mpegts.min.js
 	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/mpg123-decoder.min.js $(1)/www/luci-static/resources/iptvweb/mpg123-decoder.min.js
+	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/unicast-map.json $(1)/www/luci-static/resources/iptvweb/unicast-map.json
 	$(INSTALL_DIR) $(1)/www/luci-static/resources/iptvweb/audio-worklet
 	$(INSTALL_DATA) ./files/www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js $(1)/www/luci-static/resources/iptvweb/audio-worklet/pcm-player-worklet.js
 endef
