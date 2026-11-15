@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
-PKG_VERSION:=0.2.2-rc2.3
-PKG_RELEASE:=1
+PKG_VERSION:=0.2.2-rc2.4
+PKG_RELEASE:=3
 
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=OpenWrt IPTV Web contributors
@@ -23,6 +23,8 @@ define Package/luci-app-iptvweb/preinst
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] && exit 0
 rm -f /tmp/iptvweb-epg-url.upgrade
+# Force LuCI to reload the updated view containing unicast source settings.
+rm -f /tmp/luci-indexcache* /tmp/luci-modulecache* /tmp/luci-* 2>/dev/null || true
 if [ -f /etc/config/iptvweb ] && command -v uci >/dev/null 2>&1; then
 	uci -q get iptvweb.main.epg_url > /tmp/iptvweb-epg-url.upgrade
 fi
@@ -66,6 +68,8 @@ define Package/luci-app-iptvweb/install
 	$(INSTALL_DIR) $(1)/www/cgi-bin
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-m3u $(1)/www/cgi-bin/iptvweb-m3u
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-epg $(1)/www/cgi-bin/iptvweb-epg
+	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-unicast-m3u $(1)/www/cgi-bin/iptvweb-unicast-m3u
+	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-unicast-epg $(1)/www/cgi-bin/iptvweb-unicast-epg
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-stream $(1)/www/cgi-bin/iptvweb-stream
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio $(1)/www/cgi-bin/iptvweb-audio
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-probe $(1)/www/cgi-bin/iptvweb-audio-probe
