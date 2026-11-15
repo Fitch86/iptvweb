@@ -4359,6 +4359,38 @@ function reinit(){
 }
 
 let iptvViewportFrame=0,iptvViewportLast='';
+function logIptvViewportDiag(reason){
+  const video=document.getElementById('video');
+  if(!video || video.paused) return;
+  const vv=window.visualViewport,layout=document.querySelector('.layout');
+  const rect=video.getBoundingClientRect();
+  const css=layout?getComputedStyle(layout):null;
+  const portrait=window.matchMedia('(orientation: portrait)').matches;
+  const shortLandscape=window.matchMedia('(max-height:520px) and (orientation:landscape) and (max-width:950px)').matches;
+  const data={
+    reason,
+    screenOrientation:screen.orientation?screen.orientation.type:null,
+    windowOrientation:typeof window.orientation==='number'?window.orientation:null,
+    window:window.innerWidth+'x'+window.innerHeight,
+    document:document.documentElement.clientWidth+'x'+document.documentElement.clientHeight,
+    visualViewport:vv?{size:Math.round(vv.width)+'x'+Math.round(vv.height),scale:vv.scale,offsetTop:Math.round(vv.offsetTop)}:null,
+    media:{portrait,shortLandscape},
+    layout:css?{flexDirection:css.flexDirection,height:css.height}:null,
+    video:{paused:video.paused,readyState:video.readyState,webkitDisplayingFullscreen:!!video.webkitDisplayingFullscreen,rect:[Math.round(rect.x),Math.round(rect.y),Math.round(rect.width),Math.round(rect.height)]},
+    fullscreen:!!document.fullscreenElement
+  };
+  log('VIEWPORT_DIAG '+JSON.stringify(data));
+}
+function scheduleIptvViewportDiag(reason){
+  logIptvViewportDiag(reason);
+  if(reason==='orientationchange'){
+    setTimeout(()=>logIptvViewportDiag('orientationchange+500ms'),500);
+    setTimeout(()=>logIptvViewportDiag('orientationchange+1000ms'),1000);
+  }
+}
+window.addEventListener('resize',()=>scheduleIptvViewportDiag('window.resize'),{passive:true});
+window.addEventListener('orientationchange',()=>scheduleIptvViewportDiag('orientationchange'),{passive:true});
+if(window.visualViewport) window.visualViewport.addEventListener('resize',()=>scheduleIptvViewportDiag('visualViewport.resize'),{passive:true});
 function syncIptvViewport(reason){
   if(iptvViewportFrame) cancelAnimationFrame(iptvViewportFrame);
   iptvViewportFrame=requestAnimationFrame(()=>{
