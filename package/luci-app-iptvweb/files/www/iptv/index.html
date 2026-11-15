@@ -29,7 +29,7 @@ button.danger{background:#7a2e2e}
 main{flex:1;min-width:0;min-height:0;padding:12px;display:flex;flex-direction:column;overflow:auto;overscroll-behavior:contain}
 .player{width:100%;max-width:1200px;margin:0 auto;background:#000;border-radius:8px;overflow:hidden;position:relative;flex:0 0 auto}
 video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;flex:none}
-.player-fullscreen-btn{position:absolute;z-index:5;top:10px;right:10px;min-width:42px;min-height:38px;padding:7px 10px;background:rgba(35,35,35,.88);border:1px solid #777;border-radius:6px;color:#fff;font-size:13px;opacity:.9}
+.player-fullscreen-btn{display:none;position:absolute;z-index:5;top:10px;right:10px;width:42px;height:42px;min-width:42px;min-height:42px;padding:0;align-items:center;justify-content:center;background:rgba(20,20,20,.58);border:1px solid rgba(255,255,255,.42);border-radius:50%;color:#fff;opacity:.9;touch-action:manipulation}.ios-touch-device .player-fullscreen-btn{display:flex}.player-fullscreen-btn svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}.player-fullscreen-btn .icon-exit{display:none}.player-fullscreen-btn.is-fullscreen .icon-enter{display:none}.player-fullscreen-btn.is-fullscreen .icon-exit{display:block}
 .player:fullscreen,.player:-webkit-full-screen{width:100vw;height:100vh;height:100dvh;max-width:none;margin:0;border-radius:0;display:flex;align-items:center;justify-content:center;background:#000}
 .player:fullscreen video,.player:-webkit-full-screen video{width:100%;height:100%;max-width:100vw;max-height:100vh;max-height:100dvh;aspect-ratio:auto;object-fit:contain}
 .player:fullscreen .player-fullscreen-btn,.player:-webkit-full-screen .player-fullscreen-btn{top:max(10px,env(safe-area-inset-top));right:max(10px,env(safe-area-inset-right))}
@@ -99,7 +99,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 <div class="layout">
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
   <main>
-    <div class="player" id="playerContainer"><video id="video" controls playsinline preload="none" webkit-playsinline></video><button id="playerFullscreenBtn" class="player-fullscreen-btn" type="button" aria-label="播放器全屏">网页全屏</button></div>
+    <div class="player" id="playerContainer"><video id="video" controls playsinline preload="none" webkit-playsinline></video><button id="playerFullscreenBtn" class="player-fullscreen-btn" type="button" aria-label="播放器全屏" title="全屏"><svg class="icon-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3M21 16v3a2 2 0 0 1-2 2h-3"/></svg><svg class="icon-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3v5H3M16 3v5h5M3 16h5v5M21 16h-5v5"/></svg></button></div>
     <div class="now" id="now">
       <section id="epgPanel" class="epg-panel">
         <div class="epg-toolbar-wrap"><div class="epg-toolbar">
@@ -1387,8 +1387,9 @@ function updatePlayerFullscreenButton(){
   const btn=$('playerFullscreenBtn');
   if(!btn)return;
   const active=playerFullscreenElement()===$('playerContainer');
-  btn.textContent=active?'退出全屏':'网页全屏';
-  btn.setAttribute('aria-label',active?'退出播放器全屏':'播放器网页全屏');
+  btn.classList.toggle('is-fullscreen',active);
+  btn.setAttribute('aria-label',active?'退出播放器全屏':'播放器全屏');
+  btn.title=active?'退出全屏':'全屏';
 }
 async function togglePlayerFullscreen(){
   const host=$('playerContainer');
@@ -1412,6 +1413,11 @@ async function togglePlayerFullscreen(){
 function installPlayerFullscreen(){
   const btn=$('playerFullscreenBtn'),host=$('playerContainer'),v=$('video');
   if(!btn||!host||!v)return;
+  const ua=navigator.userAgent||'';
+  const appleTouchDevice=/iPhone|iPad|iPod/i.test(ua)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
+  const fullscreenSupported=!!(host.requestFullscreen||host.webkitRequestFullscreen);
+  document.documentElement.classList.toggle('ios-touch-device',appleTouchDevice&&fullscreenSupported);
+  if(!appleTouchDevice||!fullscreenSupported){btn.hidden=true;return;}
   btn.addEventListener('click',togglePlayerFullscreen);
   const onChange=()=>{
     updatePlayerFullscreenButton();
