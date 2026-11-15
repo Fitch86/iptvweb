@@ -12,7 +12,7 @@ header{min-height:50px;padding:6px 14px;background:#181818;border-bottom:1px sol
 button{background:#2b6cb0;border:0;color:#fff;padding:7px 10px;border-radius:5px;cursor:pointer}
 button.danger{background:#7a2e2e}
 .toolbar{width:100%;display:flex;flex-wrap:wrap;gap:8px;align-items:center}
-.layout{display:flex;height:calc(100vh - 86px);min-height:0}
+.layout{display:flex;height:calc(var(--iptvweb-vh,100dvh) - 86px);min-height:0}
 #sidebar{width:290px;flex:0 0 290px;background:#171717;overflow:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;scroll-padding-bottom:24px;border-right:1px solid #292929;padding:8px 8px calc(24px + env(safe-area-inset-bottom));min-height:0}
 .side-title{font-weight:600;padding:5px 8px 9px}
 .source-head{padding:9px 8px 6px;margin:8px 0 3px;border-bottom:1px solid #333;color:#8fc7ff;font-weight:700;font-size:13px}.group{margin-bottom:3px}
@@ -65,8 +65,15 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .diag-head strong{flex:1}
 .diag-head button{padding:5px 8px;font-size:12px}
 #diagLog{display:block;width:100%;height:220px;max-height:32dvh;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;word-break:break-word;background:#080b0e;color:#c9e4c5;border:1px solid #303a43;border-radius:4px;padding:7px;font:11px/1.45 ui-monospace,SFMono-Regular,monospace;user-select:text;-webkit-user-select:text}
-@media(max-width:700px){body{overflow:hidden;height:100%;height:100dvh}header{min-height:72px}header .header-inner{min-height:60px}#channelInfo{left:0;right:0;top:36px;transform:none}#playStatus{right:0;top:0;transform:none;width:28%}.layout{height:calc(100dvh - 108px);min-height:0;flex-direction:column}#sidebar{order:2;width:100%;flex:1 1 0;min-height:0;height:auto;max-height:none;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;border-right:0;border-top:1px solid #292929;padding-bottom:calc(24px + env(safe-area-inset-bottom))}main{order:1;flex:0 0 auto;max-height:55dvh;min-height:0;padding:0 0 8px;overflow:auto;overscroll-behavior:contain}.player{border-radius:0}}
+@media(max-width:700px){body{overflow:hidden;height:100%;height:100dvh}header{min-height:72px}header .header-inner{min-height:60px}#channelInfo{left:0;right:0;top:36px;transform:none}#playStatus{right:0;top:0;transform:none;width:28%}.layout{height:calc(var(--iptvweb-vh,100dvh) - 108px);min-height:0;flex-direction:column}#sidebar{order:2;width:100%;flex:1 1 0;min-height:0;height:auto;max-height:none;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;border-right:0;border-top:1px solid #292929;padding-bottom:calc(24px + env(safe-area-inset-bottom))}main{order:1;flex:0 0 auto;max-height:55dvh;min-height:0;padding:0 0 8px;overflow:auto;overscroll-behavior:contain}.player{border-radius:0}}
 @media(max-width:700px){.epg-panel{padding:7px}.epg-toolbar{gap:6px}.epg-date-nav{gap:5px}.epg-date-nav button,.epg-toolbar-actions button{min-height:42px;padding:8px 10px;font-size:13px}.epg-date-nav input{width:132px;min-height:42px}.epg-catchup-clock{min-width:100px;font-size:11px}}
+@media(min-width:701px) and (max-width:900px) and (orientation:portrait){
+ body{height:100dvh}
+ .layout{height:calc(var(--iptvweb-vh,100dvh) - 86px);min-height:0;flex-direction:column}
+ #sidebar{order:2;width:100%;flex:1 1 0;height:auto;max-height:none;min-height:0;overflow-y:auto;overflow-x:hidden;overscroll-behavior:contain;-webkit-overflow-scrolling:touch;touch-action:pan-y;border-right:0;border-top:1px solid #292929;padding-bottom:calc(24px + env(safe-area-inset-bottom))}
+ main{order:1;flex:0 0 auto;max-height:55dvh;min-height:0;padding:0 0 8px;overflow:auto;overscroll-behavior:contain}
+ .player{border-radius:0}
+}
 @media(max-height:520px) and (orientation:landscape) and (max-width:950px){
  body{overflow:hidden}
  header{min-height:50px}header .header-inner{min-height:36px}#channelInfo{left:calc(302px - max(14px,(100vw - 1200px)/2) + max(0px,(100vw - 1514px)/2));right:calc(28% + 8px);top:50%;transform:translateY(-50%)}
@@ -3648,6 +3655,50 @@ function scheduleSafariMseFallback(ch, url, seq, failedPlayer, details, type){
   state.safariFallbackTimer=setTimeout(()=>safariMseFallbackToVideo(ch,url,seq,failedPlayer),600);
 }
 
+function installMseDiagnostics(){
+  if(window.__iptvwebMseDiagnosticsInstalled) return;
+  window.__iptvwebMseDiagnosticsInstalled=true;
+  const seen=new WeakSet();
+  ['MediaSource','ManagedMediaSource'].forEach(apiName=>{
+    const C=window[apiName];
+    if(!C || !C.prototype || typeof C.prototype.addSourceBuffer!=='function') return;
+    const proto=C.prototype;
+    const originalAdd=proto.addSourceBuffer;
+    proto.addSourceBuffer=function(mime){
+      const ms=this;
+      const sb=originalAdd.call(ms,mime);
+      const kind=String(mime||'').split(';')[0];
+      if(!seen.has(ms)){
+        seen.add(ms);
+        ['sourceopen','sourceended','sourceclose'].forEach(eventName=>{
+          ms.addEventListener(eventName,()=>log('MSE_STATE api='+apiName+' event='+eventName+' readyState='+ms.readyState));
+        });
+        log('MSE_CREATE api='+apiName+' readyState='+ms.readyState+' streaming='+(typeof ms.streaming==='boolean'?ms.streaming:'n/a'));
+      }
+      const nativeAppend=sb.appendBuffer;
+      if(typeof nativeAppend==='function'){
+        sb.appendBuffer=function(data){
+          try{
+            return nativeAppend.call(sb,data);
+          }catch(e){
+            const v=$('video');
+            let count=-1;
+            try{count=ms.sourceBuffers.length;}catch(_){}
+            log('MSE_APPEND_THROW api='+apiName+' type='+kind+' readyState='+ms.readyState+' updating='+sb.updating+' sourceBuffers='+count+' videoError='+(v&&v.error?v.error.code+':'+v.error.message:'none')+' bytes='+(data&&data.byteLength||0)+' exception='+e.name+': '+e.message);
+            throw e;
+          }
+        };
+      }
+      sb.addEventListener('error',()=>{
+        const v=$('video');
+        log('MSE_SOURCEBUFFER_ERROR api='+apiName+' type='+kind+' readyState='+ms.readyState+' updating='+sb.updating+' videoError='+(v&&v.error?v.error.code+':'+v.error.message:'none'));
+      });
+      return sb;
+    };
+  });
+}
+installMseDiagnostics();
+
 function createPlayer(ch, url, seq, mode, extraOpts){
   extraOpts = extraOpts || {};
   if(seq!==state.seq) return;
@@ -3674,7 +3725,7 @@ function createPlayer(ch, url, seq, mode, extraOpts){
   } 
   log('CONFIG '+JSON.stringify(config));
   log('MediaDataSource '+JSON.stringify(ds));
-  if(iosSafari) log('iOS Safari path: ManagedMediaSource + isLive=true');
+  if(iosSafari) log('iOS Safari path: isLive=true; MSE API preference='+ (typeof window.MediaSource==='function'?'MediaSource':(typeof window.ManagedMediaSource==='function'?'ManagedMediaSource':'unavailable'))+'; mpegts.js 1.8.2 selects ManagedMediaSource only when MediaSource is unavailable');
   try{
     if(window.MediaSource){
       log('isTypeSupported video/mp4;codecs="avc1.640029"='+MediaSource.isTypeSupported('video/mp4; codecs="avc1.640029"'));
@@ -4201,6 +4252,27 @@ function reinit(){
   log('REINIT: '+state.current.name);
   play(state.current);
 }
+
+let iptvViewportFrame=0,iptvViewportLast='';
+function syncIptvViewport(reason){
+  if(iptvViewportFrame) cancelAnimationFrame(iptvViewportFrame);
+  iptvViewportFrame=requestAnimationFrame(()=>{
+    iptvViewportFrame=0;
+    const vv=window.visualViewport;
+    const height=Math.max(1,Math.round(vv&&vv.height?vv.height:window.innerHeight));
+    const width=Math.max(1,Math.round(vv&&vv.width?vv.width:window.innerWidth));
+    document.documentElement.style.setProperty('--iptvweb-vh',height+'px');
+    const signature=width+'x'+height;
+    if(reason==='orientationchange' || (iptvViewportLast && Math.abs(parseInt(iptvViewportLast.split('x')[1],10)-height)>120)){
+      log('VIEWPORT_LAYOUT reason='+reason+' size='+signature+' orientation='+(width>height?'landscape':'portrait')+'; player session preserved');
+    }
+    iptvViewportLast=signature;
+  });
+}
+window.addEventListener('resize',()=>syncIptvViewport('resize'),{passive:true});
+window.addEventListener('orientationchange',()=>syncIptvViewport('orientationchange'),{passive:true});
+if(window.visualViewport) window.visualViewport.addEventListener('resize',()=>syncIptvViewport('visualViewport.resize'),{passive:true});
+syncIptvViewport('initial');
 
 async function load(){
   state.current=null; state.active='';
