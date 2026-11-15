@@ -1229,7 +1229,24 @@ function renderGroups(){
   return '<div class="source-head">'+title+'（'+sourceItems.length+'）</div>'+sections;
  }).join('');
  $('groups').innerHTML=markup;
- document.querySelectorAll('.group-head').forEach(h=>h.onclick=()=>{const g=h.parentElement.dataset.g;state.active=state.active===g?'':g;renderGroups();});
+ document.querySelectorAll('.group-head').forEach(h=>h.onclick=()=>{
+  const g=h.parentElement.dataset.g;
+  const opening=state.active!==g;
+  state.active=opening?g:'';
+  renderGroups();
+  if(opening){
+    requestAnimationFrame(()=>{
+      const sidebar=$('sidebar');
+      const target=Array.from(document.querySelectorAll('.group')).find(el=>el.dataset.g===g);
+      if(!sidebar||!target)return;
+      const head=target.querySelector('.group-head');
+      if(!head)return;
+      const sidebarRect=sidebar.getBoundingClientRect();
+      const headRect=head.getBoundingClientRect();
+      sidebar.scrollTop+=headRect.top-sidebarRect.top-sidebar.clientTop-8;
+    });
+  }
+});
  document.querySelectorAll('.channel').forEach(x=>x.onclick=()=>play(state.items[+x.dataset.i]));
 }
 function rel(){return state.playStarted?((performance.now()-state.playStarted)/1000).toFixed(3):'0.000'}
