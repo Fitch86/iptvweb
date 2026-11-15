@@ -1476,22 +1476,26 @@ function makeRelayFetchLoader(options){
   constructor(seekHandler,config){super('IPTVRelayFetchLoader');this._status=0;this._closed=false;this._controller=null;this._reader=null;this._bytes=0;this._timedOut=false;this._timer=0;}
   open(dataSource,range){
    this._status=1;this._closed=false;this._timedOut=false;this._controller=new AbortController();
-   const armTimeout=()=>{if(this._timer)clearTimeout(this._timer);this._timer=setTimeout(()=>{this._timedOut=true;try{this._controller.abort();}catch(e){}},20000);};
+   const tag=options&&options.diagLabel?' '+options.diagLabel:'';
+   log('RELAY_FETCH open'+tag+' url='+dataSource.url);
+   const armTimeout=()=>{if(this._timer)clearTimeout(this._timer);this._timer=setTimeout(()=>{this._timedOut=true;log('RELAY_FETCH idle-timeout'+tag+' bytes='+this._bytes);try{this._controller.abort();}catch(e){}},20000);};
    // 20 秒仅限制连接建立；收到响应后改为无数据空闲超时，不能限制回看总时长。
    armTimeout();
    fetch(dataSource.url,{cache:'no-store',signal:this._controller.signal}).then(async response=>{
     if(this._timer)clearTimeout(this._timer);this._timer=0;
+    log('RELAY_FETCH response'+tag+' status='+response.status+' ok='+response.ok+' type='+response.headers.get('content-type')+' redirected='+response.redirected);
     if(!response.ok)throw new Error('HTTP '+response.status);if(!response.body)throw new Error('ReadableStream unavailable');
-    this._status=2;this._reader=response.body.getReader();let pos=0;armTimeout();
-    while(!this._closed){const item=await this._reader.read();if(item.done)break;armTimeout();if(!item.value||!item.value.byteLength)continue;
-     const chunk=item.value,ab=chunk.buffer.slice(chunk.byteOffset,chunk.byteOffset+chunk.byteLength);this._bytes+=chunk.byteLength;
+    this._status=2;this._reader=response.body.getReader();let pos=0,chunks=0;armTimeout();
+    while(!this._closed){const item=await this._reader.read();if(item.done){log('RELAY_FETCH reader.done'+tag+' bytes='+this._bytes+' chunks='+chunks);break;}armTimeout();if(!item.value||!item.value.byteLength)continue;
+     const chunk=item.value,ab=chunk.buffer.slice(chunk.byteOffset,chunk.byteOffset+chunk.byteLength);this._bytes+=chunk.byteLength;chunks++;
+     if(chunks<=4)log('RELAY_FETCH chunk'+tag+' n='+chunks+' bytes='+chunk.byteLength+' total='+this._bytes);
      if(options&&options.onBytes)options.onBytes(chunk.byteLength);if(this.onDataArrival)this.onDataArrival(ab,pos,this._bytes);pos+=chunk.byteLength;
     }
-    if(this._closed)return;clearTimeout(this._timer);this._timer=0;this._status=4;if(this.onComplete)this.onComplete(0,pos-1);
-   }).catch(error=>{if(this._closed)return;clearTimeout(this._timer);this._timer=0;this._status=3;if(this.onError)this.onError('Exception',{code:-1,msg:this._timedOut?'中继流读取空闲超时':String(error&&error.message||error)});});
+    if(this._closed){log('RELAY_FETCH completed-after-close'+tag+' bytes='+this._bytes);return;}clearTimeout(this._timer);this._timer=0;this._status=4;log('RELAY_FETCH onComplete'+tag+' bytes='+this._bytes+' pos='+pos);if(this.onComplete)this.onComplete(0,pos-1);
+   }).catch(error=>{if(this._closed){log('RELAY_FETCH catch-after-close'+tag+' error='+String(error&&error.name||error));return;}clearTimeout(this._timer);this._timer=0;this._status=3;log('RELAY_FETCH error'+tag+' name='+String(error&&error.name||'')+' message='+String(error&&error.message||error)+' bytes='+this._bytes+' timeout='+this._timedOut);if(this.onError)this.onError('Exception',{code:-1,msg:this._timedOut?'中继流读取空闲超时':String(error&&error.message||error)});});
   }
-  abort(){try{if(this._controller)this._controller.abort();}catch(e){}try{if(this._reader)this._reader.cancel();}catch(e){}this._status=0;}
-  destroy(){this._closed=true;this.abort();if(this._timer)clearTimeout(this._timer);this._timer=0;}
+  abort(){const tag=options&&options.diagLabel?' '+options.diagLabel:'';log('RELAY_FETCH abort'+tag+' status='+this._status+' bytes='+this._bytes);try{if(this._controller)this._controller.abort();}catch(e){}try{if(this._reader)this._reader.cancel();}catch(e){}this._status=0;}
+  destroy(){const tag=options&&options.diagLabel?' '+options.diagLabel:'';log('RELAY_FETCH destroy'+tag+' status='+this._status+' bytes='+this._bytes);this._closed=true;this.abort();if(this._timer)clearTimeout(this._timer);this._timer=0;}
   isWorking(){return this._status===1||this._status===2;}get status(){return this._status;}get needStashBuffer(){return false;}
  };
 }
@@ -3680,6 +3684,15 @@ function installMseDiagnostics(){
     const C=window[apiName];
     if(!C || !C.prototype || typeof C.prototype.addSourceBuffer!=='function') return;
     const proto=C.prototype;
+    if(typeof proto.endOfStream==='function' && !proto.__iptvwebEndOfStreamWrapped){
+      const nativeEndOfStream=proto.endOfStream;
+      proto.endOfStream=function(){
+        const stack=(new Error().stack||'').split('\\n').slice(1,4).join(' <- ');
+        log('MSE_END_OF_STREAM api='+apiName+' readyState='+this.readyState+' stack='+stack);
+        return nativeEndOfStream.apply(this,arguments);
+      };
+      proto.__iptvwebEndOfStreamWrapped=true;
+    }
     const originalAdd=proto.addSourceBuffer;
     proto.addSourceBuffer=function(mime){
       const ms=this;
@@ -3938,7 +3951,7 @@ function play(ch){
   if(ch.source==='unicast'){
     state.avMode='av';
     if(!ch.rtsp&&!/^rtsp:\/\//i.test(ch.url||'')){setStatus('单播频道缺少 RTSP 地址');return;}
-    createPlayer(ch,url,seq,'av',{rawFetch:true,isLive:true,onError:e=>setStatus('单播直播失败：'+(e&&e.message||'连接错误')),onComplete:()=>setStatus('单播直播已断开')});
+    createPlayer(ch,url,seq,'av',{rawFetch:true,isLive:true,diagLabel:'unicast '+ch.name+' seq='+seq,onError:e=>setStatus('单播直播失败：'+(e&&e.message||'连接错误')),onComplete:()=>setStatus('单播直播已断开')});
     return;
   }
 
