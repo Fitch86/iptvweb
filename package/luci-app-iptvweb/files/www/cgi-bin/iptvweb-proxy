@@ -2,13 +2,14 @@
 # IPTVWeb 0.3.0 - LAN-only HTTP(S) proxy for M3U, MPEG-TS and HLS.
 # Uses only Python standard-library modules; TLS certificate verification stays enabled.
 import ipaddress
+import http.client
 import os
 import re
 import socket
 import sys
 from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit
 from urllib.request import (
-    HTTPRedirectHandler, Request, build_opener, HTTPSHandler, HTTPHandler,
+    HTTPRedirectHandler, Request, build_opener, HTTPSHandler, HTTPHandler, ProxyHandler,
 )
 import ssl
 
@@ -16,6 +17,31 @@ MAX_PLAYLIST = 2 * 1024 * 1024
 TIMEOUT = 8
 CHUNK = 64 * 1024
 ENDPOINT = "/cgi-bin/iptvweb-proxy"
+_PINNED = {}
+
+class PinnedHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        ip = _PINNED.get((self.host.lower(), self.port or 80))
+        if not ip:
+            raise OSError("Destination was not DNS-validated")
+        self.sock = socket.create_connection((ip, self.port or 80), self.timeout, self.source_address)
+
+class PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        ip = _PINNED.get((self.host.lower(), self.port or 443))
+        if not ip:
+            raise OSError("Destination was not DNS-validated")
+        sock = socket.create_connection((ip, self.port or 443), self.timeout, self.source_address)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+class PinnedHTTPHandler(HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(PinnedHTTPConnection, req)
+
+class PinnedHTTPSHandler(HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(PinnedHTTPSConnection, req, context=self._context,
+                            check_hostname=self._check_hostname)
 
 def emit(status, content_type, extra=None):
     print("Status: %s" % status)
@@ -80,6 +106,8 @@ def validate_url(url):
         if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
                 or ip.is_reserved or ip.is_unspecified):
             raise ValueError("Private, local or reserved destination is blocked")
+    port = p.port or (443 if p.scheme.lower() == "https" else 80)
+    _PINNED[(host, port)] = str(addresses[0])
     return url
 
 class SafeRedirect(HTTPRedirectHandler):
@@ -132,13 +160,17 @@ def main():
         fail("400 Bad Request", str(exc))
         return
 
-    headers = {"User-Agent": "IPTVWeb-Proxy/0.3.0", "Accept": "*/*"}
+    user_agent = params.get("ua", ["IPTVWeb-Proxy/0.3.0"])[0]
+    if len(user_agent) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in user_agent):
+        fail("400 Bad Request", "Invalid User-Agent")
+        return
+    headers = {"User-Agent": user_agent, "Accept": "*/*"}
     range_value = os.environ.get("HTTP_RANGE", "")
     if range_value and len(range_value) < 256 and re.match(r"^bytes=\d*-\d*(,\d*-\d*)*$", range_value):
         headers["Range"] = range_value
     request = Request(target, headers=headers, method=method)
     context = ssl.create_default_context()
-    opener = build_opener(SafeRedirect(), HTTPSHandler(context=context), HTTPHandler())
+    opener = build_opener(ProxyHandler({}), SafeRedirect(), PinnedHTTPSHandler(context=context), PinnedHTTPHandler())
     try:
         response = opener.open(request, timeout=TIMEOUT)
     except Exception as exc:
