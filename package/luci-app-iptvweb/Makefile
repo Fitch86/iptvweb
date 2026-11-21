@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
-PKG_VERSION:=0.2.2-rc2.4
-PKG_RELEASE:=3
+PKG_VERSION:=0.3.0
+PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=OpenWrt IPTV Web contributors
@@ -14,7 +14,7 @@ define Package/luci-app-iptvweb
   CATEGORY:=LuCI
   SUBMENU:=Applications
   TITLE:=IPTV Web Player
-  DEPENDS:=+uhttpd +luci-base +lua
+  DEPENDS:=+uhttpd +luci-base +lua +python3-light +python3-urllib
   CONFFILES:=/etc/config/iptvweb
 endef
 
@@ -71,6 +71,7 @@ define Package/luci-app-iptvweb/install
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-unicast-m3u $(1)/www/cgi-bin/iptvweb-unicast-m3u
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-unicast-epg $(1)/www/cgi-bin/iptvweb-unicast-epg
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-stream $(1)/www/cgi-bin/iptvweb-stream
+	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-proxy $(1)/www/cgi-bin/iptvweb-proxy
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio $(1)/www/cgi-bin/iptvweb-audio
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-probe $(1)/www/cgi-bin/iptvweb-audio-probe
 	$(INSTALL_BIN) ./files/www/cgi-bin/iptvweb-audio-pes $(1)/www/cgi-bin/iptvweb-audio-pes
