@@ -14,7 +14,7 @@ define Package/luci-app-iptvweb
   CATEGORY:=LuCI
   SUBMENU:=Applications
   TITLE:=IPTV Web Player
-  DEPENDS:=+uhttpd +luci-base +lua +python3-light +python3-urllib
+  DEPENDS:=+uhttpd +luci-base +lua +python3-light +python3-urllib +python3-ssl
   CONFFILES:=/etc/config/iptvweb
 endef
 
