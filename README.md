@@ -1,5 +1,7 @@
 # IPTV Web for OpenWrt — RC2.4
 
+[![DeepWiki Index](https://deepwiki.com/badge.svg)](https://deepwiki.com/Fitch86/iptvweb)
+
 轻量级 OpenWrt LuCI IPTV 网页播放器。通过 M3U 频道列表和路由器上的 udpxy 接收组播 MPEG-TS，并在浏览器中播放。
 
 > **版本：RC2.4（包版本 `0.2.2-rc2.4`）**  
