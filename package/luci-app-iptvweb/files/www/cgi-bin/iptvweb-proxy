@@ -1,0 +1,193 @@
+#!/usr/bin/python3
+# IPTVWeb 0.3.0 - LAN-only HTTP(S) proxy for M3U, MPEG-TS and HLS.
+# Uses only Python standard-library modules; TLS certificate verification stays enabled.
+import ipaddress
+import os
+import re
+import socket
+import sys
+from urllib.parse import parse_qs, quote, urlencode, urljoin, urlsplit
+from urllib.request import (
+    HTTPRedirectHandler, Request, build_opener, HTTPSHandler, HTTPHandler,
+)
+import ssl
+
+MAX_PLAYLIST = 2 * 1024 * 1024
+TIMEOUT = 8
+CHUNK = 64 * 1024
+ENDPOINT = "/cgi-bin/iptvweb-proxy"
+
+def emit(status, content_type, extra=None):
+    print("Status: %s" % status)
+    print("Content-Type: %s" % content_type)
+    print("Cache-Control: no-store")
+    print("X-Content-Type-Options: nosniff")
+    print("Access-Control-Allow-Origin: *")
+    print("Access-Control-Allow-Methods: GET, HEAD, OPTIONS")
+    print("Access-Control-Allow-Headers: Range, Accept")
+    print("Access-Control-Expose-Headers: Content-Length, Content-Range, Accept-Ranges")
+    if extra:
+        for key, value in extra.items():
+            if value is not None and "\r" not in str(value) and "\n" not in str(value):
+                print("%s: %s" % (key, value))
+    print()
+
+def fail(status, message):
+    body = (message + "\n").encode("utf-8", "replace")
+    emit(status, "text/plain; charset=utf-8", {"Content-Length": str(len(body))})
+    if os.environ.get("REQUEST_METHOD", "GET") != "HEAD":
+        sys.stdout.buffer.write(body)
+
+def client_is_lan():
+    raw = os.environ.get("REMOTE_ADDR", "")
+    try:
+        ip = ipaddress.ip_address(raw)
+        return ip.is_private or ip.is_loopback
+    except ValueError:
+        return False
+
+def validate_url(url):
+    if not isinstance(url, str) or len(url) > 4096:
+        raise ValueError("Invalid or overlong URL")
+    p = urlsplit(url)
+    if p.scheme.lower() not in ("http", "https") or not p.hostname:
+        raise ValueError("Only HTTP and HTTPS URLs are allowed")
+    if p.username is not None or p.password is not None:
+        raise ValueError("Credentials in URLs are not allowed")
+    if p.port is not None and not (1 <= p.port <= 65535):
+        raise ValueError("Invalid port")
+    host = p.hostname.rstrip(".").lower()
+    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
+        raise ValueError("Local hostnames are not allowed")
+    try:
+        literal = ipaddress.ip_address(host)
+        addresses = [literal]
+    except ValueError:
+        try:
+            infos = socket.getaddrinfo(host, p.port or (443 if p.scheme == "https" else 80),
+                                       type=socket.SOCK_STREAM)
+        except OSError:
+            raise ValueError("DNS lookup failed")
+        addresses = []
+        for info in infos:
+            try:
+                addresses.append(ipaddress.ip_address(info[4][0]))
+            except ValueError:
+                pass
+    if not addresses:
+        raise ValueError("Host has no usable address")
+    for ip in addresses:
+        if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_multicast
+                or ip.is_reserved or ip.is_unspecified):
+            raise ValueError("Private, local or reserved destination is blocked")
+    return url
+
+class SafeRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_url(newurl)
+        if getattr(req, "_redirect_count", 0) >= 5:
+            raise ValueError("Too many redirects")
+        redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if redirected is not None:
+            redirected._redirect_count = getattr(req, "_redirect_count", 0) + 1
+        return redirected
+
+def proxy_url(target):
+    return ENDPOINT + "?" + urlencode({"url": target})
+
+def rewrite_playlist(data, base_url, is_hls):
+    text = data.decode("utf-8-sig", "replace")
+    out = []
+    uri_attr = re.compile(r'URI="([^"]+)"')
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            out.append(line)
+            continue
+        if stripped.startswith("#"):
+            if is_hls and "URI=" in line:
+                line = uri_attr.sub(lambda m: 'URI="%s"' % proxy_url(urljoin(base_url, m.group(1))), line)
+            out.append(line)
+        else:
+            out.append(proxy_url(urljoin(base_url, stripped)))
+    ending = "\r\n" if "\r\n" in text else "\n"
+    return (ending.join(out) + ending).encode("utf-8")
+
+def main():
+    method = os.environ.get("REQUEST_METHOD", "GET").upper()
+    if method == "OPTIONS":
+        emit("204 No Content", "text/plain")
+        return
+    if method not in ("GET", "HEAD"):
+        fail("405 Method Not Allowed", "GET and HEAD are supported")
+        return
+    if not client_is_lan():
+        fail("403 Forbidden", "LAN clients only")
+        return
+    params = parse_qs(os.environ.get("QUERY_STRING", ""), keep_blank_values=True)
+    target = params.get("url", [""])[0]
+    try:
+        validate_url(target)
+    except ValueError as exc:
+        fail("400 Bad Request", str(exc))
+        return
+
+    headers = {"User-Agent": "IPTVWeb-Proxy/0.3.0", "Accept": "*/*"}
+    range_value = os.environ.get("HTTP_RANGE", "")
+    if range_value and len(range_value) < 256 and re.match(r"^bytes=\d*-\d*(,\d*-\d*)*$", range_value):
+        headers["Range"] = range_value
+    request = Request(target, headers=headers, method=method)
+    context = ssl.create_default_context()
+    opener = build_opener(SafeRedirect(), HTTPSHandler(context=context), HTTPHandler())
+    try:
+        response = opener.open(request, timeout=TIMEOUT)
+    except Exception as exc:
+        fail("502 Bad Gateway", "Upstream request failed: %s" % str(exc)[:240])
+        return
+
+    code = getattr(response, "status", response.getcode())
+    content_type = response.headers.get("Content-Type", "application/octet-stream").split(";", 1)[0].strip()
+    extra = {}
+    for name in ("Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified", "ETag"):
+        value = response.headers.get(name)
+        if value:
+            extra[name] = value
+    final_url = response.geturl()
+    try:
+        validate_url(final_url)
+        path = urlsplit(final_url).path.lower()
+        is_hls = path.endswith(".m3u8") or "mpegurl" in content_type.lower()
+        is_m3u = path.endswith(".m3u") or "mpegurl" in content_type.lower()
+        if is_hls or is_m3u:
+            data = response.read(MAX_PLAYLIST + 1)
+            if len(data) > MAX_PLAYLIST:
+                fail("502 Bad Gateway", "Playlist exceeds 2 MiB limit")
+                return
+            rewritten = rewrite_playlist(data, final_url, is_hls)
+            emit("%d %s" % (code, "Partial Content" if code == 206 else "OK"),
+                 "application/vnd.apple.mpegurl" if is_hls else "audio/x-mpegurl",
+                 {"Content-Length": str(len(rewritten))})
+            if method != "HEAD":
+                sys.stdout.buffer.write(rewritten)
+            return
+
+        emit("%d %s" % (code, "Partial Content" if code == 206 else "OK"),
+             content_type or "application/octet-stream", extra)
+        if method == "HEAD":
+            return
+        while True:
+            chunk = response.read(CHUNK)
+            if not chunk:
+                break
+            sys.stdout.buffer.write(chunk)
+            sys.stdout.buffer.flush()
+    except (BrokenPipeError, ConnectionResetError):
+        pass
+    except Exception:
+        # Headers may already have been sent; terminate the stream cleanly.
+        pass
+    finally:
+        response.close()
+
+if __name__ == "__main__":
+    main()
