@@ -21,18 +21,20 @@ _PINNED = {}
 
 class PinnedHTTPConnection(http.client.HTTPConnection):
     def connect(self):
-        ip = _PINNED.get((self.host.lower(), self.port or 80))
+        host = self.host.rstrip(".").encode("idna").decode("ascii").lower()
+        ip = _PINNED.get((host, self.port or 80))
         if not ip:
             raise OSError("Destination was not DNS-validated")
         self.sock = socket.create_connection((ip, self.port or 80), self.timeout, self.source_address)
 
 class PinnedHTTPSConnection(http.client.HTTPSConnection):
     def connect(self):
-        ip = _PINNED.get((self.host.lower(), self.port or 443))
+        host = self.host.rstrip(".").encode("idna").decode("ascii").lower()
+        ip = _PINNED.get((host, self.port or 443))
         if not ip:
             raise OSError("Destination was not DNS-validated")
         sock = socket.create_connection((ip, self.port or 443), self.timeout, self.source_address)
-        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+        self.sock = self._context.wrap_socket(sock, server_hostname=host)
 
 class PinnedHTTPHandler(HTTPHandler):
     def http_open(self, req):
@@ -82,7 +84,7 @@ def validate_url(url):
         raise ValueError("Credentials in URLs are not allowed")
     if p.port is not None and not (1 <= p.port <= 65535):
         raise ValueError("Invalid port")
-    host = p.hostname.rstrip(".").lower()
+    host = p.hostname.rstrip(".").encode("idna").decode("ascii").lower()
     if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
         raise ValueError("Local hostnames are not allowed")
     try:
