@@ -1139,7 +1139,7 @@ function chooseEpgDate(date){
 }
 function updateCatchupToolbar(){
   const replayBtn=$('catchupStartBtn'),liveBtn=$('liveBtn'),stopBtn=$('stopBtn2');
-  const inCatchup=state.sourceKind==='catchup',p=state.selectedEpg,ch=state.current,now=Date.now();
+  const inCatchup=state.catchup.active,p=state.selectedEpg,ch=state.current,now=Date.now();
   const end=p?Math.min(p.stop,now):0,duration=p?end-p.start:0;
   const canReplay=!!p&&!!ch&&!!ch.rtsp&&end>p.start&&duration<=14400000;
   if(replayBtn){replayBtn.hidden=inCatchup||!canReplay;replayBtn.textContent='回看';}
