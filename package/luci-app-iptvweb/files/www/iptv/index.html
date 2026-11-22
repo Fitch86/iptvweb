@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>OpenWrt IPTV RC2.4</title>
+<title>OpenWrt IPTV RC2.5</title>
 <style>
 :root{color-scheme:dark}*{box-sizing:border-box}html,body{height:100%}
 body{margin:0;background:#111;color:#eee;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -33,6 +33,13 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 .player:fullscreen,.player:-webkit-full-screen{width:100vw;height:100vh;height:100dvh;max-width:none;margin:0;border-radius:0;display:flex;align-items:center;justify-content:center;background:#000}
 .player:fullscreen video,.player:-webkit-full-screen video{width:100%;height:100%;max-width:100vw;max-height:100vh;max-height:100dvh;aspect-ratio:auto;object-fit:contain}
 .player:fullscreen .player-fullscreen-btn,.player:-webkit-full-screen .player-fullscreen-btn{top:max(10px,env(safe-area-inset-top));right:max(10px,env(safe-area-inset-right))}
+.catchup-seekbar{width:100%;max-width:1200px;margin:8px auto 2px;padding:7px 10px;background:#191919;border:1px solid #333;border-radius:6px}
+.catchup-seekbar[hidden]{display:none}
+.catchup-seekbar .seek-head{display:flex;align-items:center;gap:8px;font-size:12px;color:#aaa}
+.catchup-seekbar .seek-head strong{color:#ddd;font-weight:600}
+.catchup-seekbar input[type=range]{display:block;width:100%;margin:8px 0 4px;accent-color:#55aaff;touch-action:pan-y}
+.catchup-seekbar input[type=range]:disabled{opacity:.5}
+.catchup-seekbar .seek-foot{display:flex;justify-content:space-between;gap:10px;color:#999;font-size:11px;font-variant-numeric:tabular-nums}
 .now{width:100%;max-width:1200px;margin:4px auto 0;padding:2px 2px;font-size:15px}
 .channel{position:relative}
 .channel .name{flex:1}
@@ -91,7 +98,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 </head>
 <body>
 <header><div class="header-inner">
-  <h1>OpenWrt IPTV <span class="small">RC2.4</span></h1>
+  <h1>OpenWrt IPTV <span class="small">RC2.5</span></h1>
   <button id="diagToggleBtn" type="button">诊断日志</button>
   <span id="channelInfo"><span id="channelName">选择频道开始播放</span><span id="channelHint">直播默认使用组播；支持回看的频道可从节目列表进入回看。</span></span>
   <span id="playStatus" role="status" aria-live="polite">待机</span>
@@ -100,6 +107,11 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
   <aside id="sidebar"><div class="side-title">频道</div><div id="groups"></div></aside>
   <main>
     <div class="player" id="playerContainer"><video id="video" controls playsinline preload="none" webkit-playsinline></video><button id="playerFullscreenBtn" class="player-fullscreen-btn" type="button" aria-label="播放器全屏" title="全屏"><svg class="icon-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3M21 16v3a2 2 0 0 1-2 2h-3"/></svg><svg class="icon-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3v5H3M16 3v5h5M3 16h5v5M21 16h-5v5"/></svg></button></div>
+    <div id="catchupSeekbar" class="catchup-seekbar" hidden>
+      <div class="seek-head"><strong>回看时移</strong><span id="catchupSeekLabel">--:--:--</span><span id="catchupSeekState" style="margin-left:auto">拖动后松开跳转</span></div>
+      <input id="catchupSeekRange" type="range" min="0" max="1" step="1" value="0" aria-label="回看时移进度">
+      <div class="seek-foot"><span id="catchupSeekStart">--:--:--</span><span id="catchupSeekEnd">--:--:--</span></div>
+    </div>
     <div class="now" id="now">
       <section id="epgPanel" class="epg-panel">
         <div class="epg-toolbar-wrap"><div class="epg-toolbar">
@@ -119,11 +131,11 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
 <script src="/luci-static/resources/iptvweb/mpegts.min.js"></script>
 <script src="/luci-static/resources/iptvweb/mpg123-decoder.min.js" charset="UTF-8"></script>
 <script>
-const REV='RC2.4';
+const REV='RC2.5';
 const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, unicastMap:[], sourceKind:'multicast', liveFallbackTried:false,
   epgById:Object.create(null), epgBySource:{multicast:Object.create(null),unicast:Object.create(null)}, epgLoaded:false, epgLoadedBySource:{multicast:false,unicast:false}, epgUpdatedAt:0, epgTimer:0, epgStats:null, selectedEpg:null, epgDate:'', epgLocatePending:true,
-  catchup:{active:false,startMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:''}, diagEnabled:true, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
+  catchup:{active:false,startMs:0,originStartMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:'',seeking:false,dragging:false}, diagEnabled:true, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
@@ -1589,18 +1601,67 @@ function bjCompact(date,time){return String(date).replace(/-/g,'')+String(time).
 function setCatchupDefault(minutes){const end=Date.now(),start=end-(minutes||10)*60000,a=bjInput(start),b=bjInput(end);$('catchupDate').value=a.date;$('catchupStart').value=a.time;$('catchupEnd').value=b.time;}
 function openCatchup(ch){if(!ch.rtsp)return;state.current=ch;state.active=(ch.source||'multicast')+'::'+ch.group;renderGroups();renderEpgPanel(ch);}
 function stopCatchupTicker(){if(state.catchup.timer){clearInterval(state.catchup.timer);state.catchup.timer=0;}}
-function updateCatchupClock(){if(!state.catchup.active)return;const v=$('video'),ms=state.catchup.startMs+Math.max(0,Number(v.currentTime)||0)*1000;const p=new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(ms));const clock=$('catchupClock');if(clock)clock.textContent='回看时间 · '+p;}
-function finishCatchup(message){if(!state.catchup.active)return;state.catchup.active=false;stopCatchupTicker();stopPlayer();setStatus(message);updateCatchupToolbar();}
+function catchupDateTime(ms){
+  return new Intl.DateTimeFormat('zh-CN',{timeZone:'Asia/Shanghai',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).format(new Date(ms));
+}
+function bjCompactSecond(ms){
+  const p=new Intl.DateTimeFormat('en-CA',{timeZone:'Asia/Shanghai',year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit',hourCycle:'h23'}).formatToParts(new Date(ms)),v={};
+  p.forEach(x=>v[x.type]=x.value);
+  return v.year+v.month+v.day+v.hour+v.minute+v.second;
+}
+function updateCatchupSeekbar(previewOffset){
+  const wrap=$('catchupSeekbar'),range=$('catchupSeekRange');
+  if(!wrap||!range)return;
+  if(!state.catchup.active){wrap.hidden=true;return;}
+  wrap.hidden=false;
+  const total=Math.max(1,Math.floor((state.catchup.endMs-state.catchup.originStartMs)/1000));
+  const video=$('video');
+  const actual=Math.max(0,Math.floor((state.catchup.startMs-state.catchup.originStartMs)/1000+(Number(video.currentTime)||0)));
+  const offset=Number.isFinite(previewOffset)?Math.max(0,Math.min(total,Math.floor(previewOffset))):actual;
+  range.max=String(total);
+  if(!state.catchup.dragging)range.value=String(Math.min(total,actual));
+  range.disabled=state.catchup.seeking||total<=1;
+  const label=$('catchupSeekLabel'),start=$('catchupSeekStart'),end=$('catchupSeekEnd'),status=$('catchupSeekState');
+  if(label)label.textContent=catchupDateTime(state.catchup.originStartMs+offset*1000);
+  if(start)start.textContent=catchupDateTime(state.catchup.originStartMs);
+  if(end)end.textContent=catchupDateTime(state.catchup.endMs);
+  if(status)status.textContent=state.catchup.seeking?'正在切换时移位置…':'拖动后松开跳转';
+}
+function updateCatchupClock(){
+  if(!state.catchup.active)return;
+  const v=$('video'),ms=state.catchup.startMs+Math.max(0,Number(v.currentTime)||0)*1000;
+  const p=catchupDateTime(ms),clock=$('catchupClock');
+  if(clock)clock.textContent='回看时间 · '+p;
+  updateCatchupSeekbar();
+}
+function seekCatchupToOffset(offset){
+  if(!state.catchup.active||state.catchup.seeking)return;
+  const total=Math.floor((state.catchup.endMs-state.catchup.originStartMs)/1000);
+  const seconds=Math.max(0,Math.min(Math.max(0,total-1),Math.floor(Number(offset)||0)));
+  const targetStartMs=state.catchup.originStartMs+seconds*1000;
+  if(Math.abs(targetStartMs-state.catchup.startMs-Math.max(0,Number($('video').currentTime)||0)*1000)<3000)return;
+  const ch=state.current,endMs=state.catchup.endMs;
+  if(!ch||!ch.rtsp||targetStartMs>=endMs)return;
+  const seek=bjCompactSecond(targetStartMs)+'-'+bjCompactSecond(endMs);
+  const seq=++state.seq;
+  stopCatchupTicker();
+  state.catchup.seeking=true;
+  state.catchup.dragging=false;
+  log('CATCHUP seek target='+catchupDateTime(targetStartMs)+' end='+catchupDateTime(endMs)+' seek='+seek+' seq='+seq);
+  updateCatchupSeekbar(seconds);
+  startCatchupAttempt(ch,targetStartMs,endMs,seek,seq,0);
+}
+function finishCatchup(message){if(!state.catchup.active)return;state.catchup.active=false;state.catchup.seeking=false;state.catchup.dragging=false;stopCatchupTicker();stopPlayer();updateCatchupSeekbar();setStatus(message);updateCatchupToolbar();}
 function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
- if(seq!==state.seq)return;stopPlayer();state.playIssuedAt=0;state.userPaused=false;state.catchup.active=true;state.catchup.startMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';setStatus('正在连接回看 · '+ch.name);updateCatchupToolbar();const clock=$('catchupClock');if(clock)clock.textContent='正在连接回看…';
+ if(seq!==state.seq)return;stopCatchupTicker();stopPlayer();state.playIssuedAt=0;state.userPaused=false;state.catchup.active=true;state.catchup.startMs=startMs;if(!state.catchup.originStartMs)state.catchup.originStartMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';updateCatchupSeekbar();setStatus('正在连接回看 · '+ch.name);updateCatchupToolbar();const clock=$('catchupClock');if(clock)clock.textContent='正在连接回看…';
  const url=relayStreamUrl(ch.rtsp,seek);let settled=false;
  log('CATCHUP begin channel='+ch.name+' seq='+seq+' seek='+seek+' iosSafari='+isIOSSafari()+' rtspHost='+(()=>{try{return new URL(ch.rtsp).host;}catch(e){return 'unknown';}})());
- const failed=reason=>{if(settled||seq!==state.seq)return;log('CATCHUP failed reason='+reason+' bytes='+state.catchup.bytes+' elapsedMs='+(Date.now()-state.catchup.startedAt));videoSnapshot('catchup-failed');settled=true;if(retry<1){setStatus('回看连接中断，正在重试…');setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
+ const failed=reason=>{if(settled||seq!==state.seq)return;state.catchup.seeking=false;updateCatchupSeekbar();log('CATCHUP failed reason='+reason+' bytes='+state.catchup.bytes+' elapsedMs='+(Date.now()-state.catchup.startedAt));videoSnapshot('catchup-failed');settled=true;if(retry<1){setStatus('回看连接中断，正在重试…');setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
  const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;log('CATCHUP complete bytes='+bytes+' elapsedMs='+elapsed);videoSnapshot('catchup-complete');if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
  const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}
  const safariVideoOnly=isIOSSafari();
   if(safariVideoOnly) { state.avMode='video-catchup'; startSafariCatchupAudio(seq); }
-  createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onVideoPts:(pts,pid)=>{if(seq===state.seq && state.safariCatchupVideoPtsBase==null){state.safariCatchupVideoPtsBase=pts;log('SAFARI_CATCHUP_SYNC: video PTS anchor='+Math.round(pts)+' PID='+pid);flushSafariCatchupAudio(seq);}},onAudioPes:(bytes,pts,pid)=>queueSafariCatchupAudioPes(bytes,pts,pid,seq),onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
+  createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onVideoPts:(pts,pid)=>{if(seq===state.seq && state.safariCatchupVideoPtsBase==null){state.safariCatchupVideoPtsBase=pts;log('SAFARI_CATCHUP_SYNC: video PTS anchor='+Math.round(pts)+' PID='+pid);flushSafariCatchupAudio(seq);}},onAudioPes:(bytes,pts,pid)=>queueSafariCatchupAudioPes(bytes,pts,pid,seq),onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.seeking){state.catchup.seeking=false;updateCatchupSeekbar();}if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
  state.diagTimer=setInterval(()=>{if(seq!==state.seq||!state.catchup.active)return;log('CATCHUP heartbeat bytes='+state.catchup.bytes+' mode='+state.avMode+' fallback='+state.safariFallbackTried);videoSnapshot('catchup-heartbeat');},2000);
  video.onended=complete;video.ontimeupdate=()=>{if(seq!==state.seq||!state.catchup.active)return;updateCatchupClock();if(video.currentTime>=Math.max(0,(endMs-startMs)/1000-1.5))complete();};
  state.catchup.timer=setInterval(updateCatchupClock,1000);
@@ -1612,13 +1673,14 @@ function startCatchup(){
  if(z<=a){setStatus('该节目尚未开始，不能回看');return;}
  if((ch.source||'multicast')==='multicast'&&a<now-7*86400000){setStatus('组播回看仅支持最近 7×24 小时');return;}
  if(z-a>14400000){setStatus('该节目超过4小时，暂不能整段回看');return;}
- const seek=bjCompact(bjInput(a).date,bjInput(a).time)+'-'+bjCompact(bjInput(z).date,bjInput(z).time),seq=++state.seq;
- log('CATCHUP request source='+(ch.source||'multicast')+' channel='+ch.name+' tvgId='+ch.id+' start='+bjInput(a).date+' '+bjInput(a).time+' end='+bjInput(z).date+' '+bjInput(z).time+' durationMs='+(z-a));
+ const seek=bjCompactSecond(a)+'-'+bjCompactSecond(z),seq=++state.seq;
+ state.catchup.originStartMs=a;state.catchup.seeking=false;state.catchup.dragging=false;
+  log('CATCHUP request source='+(ch.source||'multicast')+' channel='+ch.name+' tvgId='+ch.id+' start='+bjInput(a).date+' '+bjInput(a).time+' end='+bjInput(z).date+' '+bjInput(z).time+' durationMs='+(z-a));
  state.liveFallbackTried=true;state.catchup.rtsp=ch.rtsp;
  startCatchupAttempt(ch,a,z,seek,seq,0);
 }
 
-function exitCatchup(){const ch=state.current;stopCatchupTicker();state.catchup.active=false;state.sourceKind='multicast';state.selectedEpg=null;state.epgDate=bjInput(Date.now()).date;state.epgLocatePending=true;if(ch)play(ch);else renderEpgPanel(null);}
+function exitCatchup(){const ch=state.current;stopCatchupTicker();state.catchup.active=false;state.catchup.seeking=false;state.catchup.dragging=false;updateCatchupSeekbar();state.sourceKind='multicast';state.selectedEpg=null;state.epgDate=bjInput(Date.now()).date;state.epgLocatePending=true;if(ch)play(ch);else renderEpgPanel(null);}
 function startLiveRelayFallback(ch,seq){
  if(seq!==state.seq||state.liveFallbackTried)return;if(!ch.rtsp){setChannelInfo(ch.name+' · 组播失败，且无单播地址');return;}state.liveFallbackTried=true;
  setTimeout(()=>{if(seq!==state.seq)return;stopPlayer();state.sourceKind='relay-live';createPlayer(ch,relayStreamUrl(ch.rtsp,''),seq,'av',{rawFetch:true,isLive:true,onError:e=>{setChannelInfo(ch.name+' · 单播兜底失败：'+(e&&e.message||'连接错误'));},onComplete:()=>{setChannelInfo(ch.name+' · 单播直播已断开');}});},0);
@@ -4520,6 +4582,16 @@ installPlayerFullscreen();
 $('stopBtn2').onclick=stopPlayback;
 $('liveBtn').onclick=()=>{if(state.current)play(state.current);};
 $('catchupStartBtn').onclick=startCatchup;
+$('catchupSeekRange').addEventListener('input',e=>{
+  state.catchup.dragging=true;
+  updateCatchupSeekbar(Number(e.target.value));
+});
+$('catchupSeekRange').addEventListener('change',e=>{
+  const offset=Number(e.target.value);
+  state.catchup.dragging=false;
+  seekCatchupToOffset(offset);
+  updateCatchupSeekbar();
+});
 $('epgRefresh').onclick=()=>loadEpg(true);
 $('epgPrevDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,source=ch.source==='unicast'?'unicast':'multicast',isVirtual=!epgPrograms(ch).length&&state.epgLoadedBySource[source],dates=isVirtual?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):(source==='multicast'?Array.from({length:8},(_,i)=>shiftEpgDate(today,-7+i)):availableEpgDates(ch));const d=dates.filter(x=>x<state.epgDate).pop();if(d)chooseEpgDate(d);};
 $('epgNextDay').onclick=()=>{const ch=state.current;if(!ch)return;const today=bjInput(Date.now()).date,source=ch.source==='unicast'?'unicast':'multicast',isVirtual=!epgPrograms(ch).length&&state.epgLoadedBySource[source],dates=isVirtual?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):(source==='multicast'?Array.from({length:7},(_,i)=>shiftEpgDate(today,-6+i)):availableEpgDates(ch));const d=dates.find(x=>x>state.epgDate);if(d)chooseEpgDate(d);};
