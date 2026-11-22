@@ -131,7 +131,7 @@ echo "Installed 0.2.2-rc2.5."
 echo "LuCI: Services -> IPTV Web"
 echo "Player: http://192.168.1.1/iptv/"
 echo
-echo "RC2.4: independent multicast and unicast channel / XMLTV sources; multicast EPG URL and 4023 relay are preserved."
+echo "RC2.5: catch-up seekbar recreates playseek RTSP sessions through the existing 4023 relay; relay service, live playback, Safari audio path and fullscreen behavior are unchanged."
 echo "      Live multicast on port 4022 and the existing catch-up relay on port 4023 are unchanged."
 echo "      Catch-up uses a single cancellable relay stream and is enabled only when a unicast RTSP address is available; live playback continues to use multicast. mpegts.js 1.8.2 and mpg123-decoder 1.0.3 are installed locally."
 echo "Log out/in to LuCI and hard-refresh the browser (Ctrl+F5) after installing."
