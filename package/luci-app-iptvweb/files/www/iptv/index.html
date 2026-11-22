@@ -1617,9 +1617,9 @@ function updateCatchupSeekbar(previewOffset){
   const total=Math.max(1,Math.floor((state.catchup.endMs-state.catchup.originStartMs)/1000));
   const video=$('video');
   const actual=Math.max(0,Math.floor((state.catchup.startMs-state.catchup.originStartMs)/1000+(Number(video.currentTime)||0)));
-  const offset=Number.isFinite(previewOffset)?Math.max(0,Math.min(total,Math.floor(previewOffset))):actual;
+  const offset=Number.isFinite(previewOffset)?Math.max(0,Math.min(total,Math.floor(previewOffset))):(state.catchup.dragging?Math.max(0,Math.min(total,Number(range.value)||0)):actual);
   range.max=String(total);
-  if(!state.catchup.dragging)range.value=String(Math.min(total,actual));
+  if(!state.catchup.dragging)range.value=String(Math.min(total,state.catchup.seeking?offset:actual));
   range.disabled=state.catchup.seeking||total<=1;
   const label=$('catchupSeekLabel'),start=$('catchupSeekStart'),end=$('catchupSeekEnd'),status=$('catchupSeekState');
   if(label)label.textContent=catchupDateTime(state.catchup.originStartMs+offset*1000);
