@@ -1,8 +1,8 @@
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-iptvweb
-PKG_VERSION:=0.2.2-rc2.4
-PKG_RELEASE:=3
+PKG_VERSION:=0.2.2-rc2.5
+PKG_RELEASE:=1
 
 PKG_LICENSE:=MIT
 PKG_MAINTAINER:=OpenWrt IPTV Web contributors
