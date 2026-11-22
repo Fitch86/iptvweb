@@ -1653,12 +1653,12 @@ function seekCatchupToOffset(offset){
 }
 function finishCatchup(message){if(!state.catchup.active)return;state.catchup.active=false;state.catchup.seeking=false;state.catchup.dragging=false;stopCatchupTicker();stopPlayer();updateCatchupSeekbar();setStatus(message);updateCatchupToolbar();}
 function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
- if(seq!==state.seq)return;stopCatchupTicker();stopPlayer();state.playIssuedAt=0;state.userPaused=false;state.catchup.active=true;state.catchup.startMs=startMs;if(!state.catchup.originStartMs)state.catchup.originStartMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';updateCatchupSeekbar();setStatus('正在连接回看 · '+ch.name);updateCatchupToolbar();const clock=$('catchupClock');if(clock)clock.textContent='正在连接回看…';
+ if(seq!==state.seq)return;stopCatchupTicker();stopPlayer();state.playIssuedAt=0;state.userPaused=false;state.catchup.active=true;state.catchup.startMs=startMs;if(!state.catchup.originStartMs)state.catchup.originStartMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';setStatus('正在连接回看 · '+ch.name);updateCatchupToolbar();const clock=$('catchupClock');if(clock)clock.textContent='正在连接回看…';
  const url=relayStreamUrl(ch.rtsp,seek);let settled=false;
  log('CATCHUP begin channel='+ch.name+' seq='+seq+' seek='+seek+' iosSafari='+isIOSSafari()+' rtspHost='+(()=>{try{return new URL(ch.rtsp).host;}catch(e){return 'unknown';}})());
  const failed=reason=>{if(settled||seq!==state.seq)return;state.catchup.seeking=false;updateCatchupSeekbar();log('CATCHUP failed reason='+reason+' bytes='+state.catchup.bytes+' elapsedMs='+(Date.now()-state.catchup.startedAt));videoSnapshot('catchup-failed');settled=true;if(retry<1){setStatus('回看连接中断，正在重试…');setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
  const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;log('CATCHUP complete bytes='+bytes+' elapsedMs='+elapsed);videoSnapshot('catchup-complete');if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
- const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}
+ const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}updateCatchupSeekbar();
  const safariVideoOnly=isIOSSafari();
   if(safariVideoOnly) { state.avMode='video-catchup'; startSafariCatchupAudio(seq); }
   createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onVideoPts:(pts,pid)=>{if(seq===state.seq && state.safariCatchupVideoPtsBase==null){state.safariCatchupVideoPtsBase=pts;log('SAFARI_CATCHUP_SYNC: video PTS anchor='+Math.round(pts)+' PID='+pid);flushSafariCatchupAudio(seq);}},onAudioPes:(bytes,pts,pid)=>queueSafariCatchupAudioPes(bytes,pts,pid,seq),onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.seeking){state.catchup.seeking=false;updateCatchupSeekbar();}if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
@@ -4069,7 +4069,7 @@ function resetPlayState(){
 }
 
 function play(ch){
-  stopCatchupTicker();state.catchup.active=false;
+  stopCatchupTicker();state.catchup.active=false;updateCatchupSeekbar();
   const seq=++state.seq;state.sourceKind=ch.source==='unicast'?'unicast':'multicast';updateCatchupToolbar();state.liveFallbackTried=false;
   state.safariAudioOnly=false;
   state.current=ch; state.active=(ch.source||'multicast')+'::'+ch.group; state.selectedEpg=null; state.epgDate=bjInput(Date.now()).date; state.epgLocatePending=true; renderGroups();
@@ -4227,7 +4227,7 @@ function play(ch){
 }
 
 function stopPlayback(){
-  state.seq++;stopCatchupTicker();state.catchup.active=false;state.sourceKind='stopped';
+  state.seq++;stopCatchupTicker();state.catchup.active=false;updateCatchupSeekbar();state.sourceKind='stopped';
   state.stopping=true;
   stopWebAudio(); state.userPaused=false;
   log('STOP: 用户请求停止并断开流');
