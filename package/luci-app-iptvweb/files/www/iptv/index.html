@@ -136,6 +136,7 @@ const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, unicastMap:[], sourceKind:'multicast', liveFallbackTried:false,
   epgById:Object.create(null), epgBySource:{multicast:Object.create(null),unicast:Object.create(null)}, epgLoaded:false, epgLoadedBySource:{multicast:false,unicast:false}, epgUpdatedAt:0, epgTimer:0, epgStats:null, selectedEpg:null, epgDate:'', epgLocatePending:true,
   catchup:{active:false,startMs:0,originStartMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:'',seeking:false,dragging:false}, diagEnabled:true, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
+  safariCatchupContextStateHandler:null, safariCatchupDiagFirstDecode:false, safariCatchupDiagFirstSchedule:false, safariCatchupNoPtsLogged:false,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
@@ -564,6 +565,10 @@ function safariPtsDelta33(value, base) {
   else if (d < -half) d += wrap;
   return d;
 }
+function logSafariCatchupAudioState(tag) {
+  const ctx=state.webAudioCtx, video=$('video');
+  log('SAFARI_CATCHUP_DIAG '+tag+' ctx='+(ctx?ctx.state:'none')+' rate='+(ctx?ctx.sampleRate:'-')+' videoPaused='+(video?video.paused:'-')+' readyState='+(video?video.readyState:'-')+' currentTime='+(video?Number(video.currentTime||0).toFixed(3):'-')+' decoderReady='+!!state.safariCatchupAudioReady+' videoPtsBase='+(state.safariCatchupVideoPtsBase==null?'none':Math.round(state.safariCatchupVideoPtsBase))+' pes='+Number(state.safariCatchupAudioPesCount||0)+' pesQueue='+(state.safariCatchupAudioQueue||[]).length+' pcmQueue='+(state.safariCatchupPcmQueue||[]).length+' decoded='+Number(state.audioChunks||0)+' scheduled='+(state.audioScheduledSources||[]).length);
+}
 function startSafariCatchupAudio(seq) {
   if (seq !== state.seq || !isIOSSafari()) return;
   const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -595,6 +600,10 @@ function startSafariCatchupAudio(seq) {
     state.safariCatchupVideoPtsBase = null;
     state.safariCatchupAudioLastLog = 0;
     state.safariCatchupAudioPesCount = 0;
+    state.safariCatchupDiagFirstDecode = false; state.safariCatchupDiagFirstSchedule = false; state.safariCatchupNoPtsLogged = false;
+    state.safariCatchupContextStateHandler = () => { if(seq===state.seq && state.webAudioCtx===ctx) logSafariCatchupAudioState('context-statechange'); };
+    ctx.addEventListener('statechange',state.safariCatchupContextStateHandler);
+    logSafariCatchupAudioState('created');
     const decoder = new decNS.MPEGDecoder({enableGapless:false});
     state.webAudioDecoder = decoder;
     const video = $('video');
@@ -608,6 +617,7 @@ function startSafariCatchupAudio(seq) {
       const resume = ctx.state === 'running' ? Promise.resolve() : ctx.resume();
       Promise.resolve(resume).then(() => {
         if (seq !== state.seq || state.webAudioCtx !== ctx) return;
+        logSafariCatchupAudioState('playing-resume-resolved');
         flushSafariCatchupAudio(seq);
         flushSafariCatchupPcm(seq);
       }).catch(e => log('SAFARI_CATCHUP_AUDIO: resume failed ' + e.message));
@@ -619,6 +629,7 @@ function startSafariCatchupAudio(seq) {
       state.safariCatchupAudioReady = true;
       state.webAudioState = 'streaming';
       log('SAFARI_CATCHUP_AUDIO: MPEG decoder ready; source=single-RTSP-TS backend=PTS-buffer-source');
+      logSafariCatchupAudioState('decoder-ready');
       flushSafariCatchupAudio(seq);
     }).catch(e => {
       if (seq !== state.seq) return;
@@ -641,13 +652,14 @@ function startSafariCatchupAudio(seq) {
 function queueSafariCatchupAudioPes(bytes, pts, pid, seq) {
   if (seq !== state.seq || !bytes || !bytes.length) return;
   if (pts == null) {
-    log('SAFARI_CATCHUP_AUDIO: PES without PTS dropped PID=' + pid);
+    state.safariCatchupAudioPesNoPts=(state.safariCatchupAudioPesNoPts||0)+1;
+    if(!state.safariCatchupNoPtsLogged){state.safariCatchupNoPtsLogged=true;log('SAFARI_CATCHUP_AUDIO: PES without PTS; further occurrences suppressed PID=' + pid);}
     return;
   }
   const queue = state.safariCatchupAudioQueue || (state.safariCatchupAudioQueue = []);
   const size = bytes.byteLength || bytes.length;
   state.safariCatchupAudioPesCount = (state.safariCatchupAudioPesCount || 0) + 1;
-  if (state.safariCatchupAudioPesCount <= 3) log('SAFARI_CATCHUP_AUDIO: first PES#' + state.safariCatchupAudioPesCount + ' PID=' + pid + ' bytes=' + size + ' PTS90k=' + Math.round(pts));
+  if (state.safariCatchupAudioPesCount === 1) log('SAFARI_CATCHUP_AUDIO: first PES PID=' + pid + ' bytes=' + size + ' PTS90k=' + Math.round(pts));
   const maxQueueBytes = 2 * 1024 * 1024;
   while (queue.length && (queue.length >= 1024 ||
       (state.safariCatchupAudioQueueBytes || 0) + size > maxQueueBytes)) {
@@ -710,6 +722,7 @@ function flushSafariCatchupAudio(seq) {
     state.audioChannels = result.channelData.length;
     state.audioChunks++;
     state.audioDecodedSamples += samples;
+    if(!state.safariCatchupDiagFirstDecode){state.safariCatchupDiagFirstDecode=true;logSafariCatchupAudioState('first-decode samples='+samples+' rate='+rate+' channels='+result.channelData.length+' ptsDelta='+(mediaPts/90000).toFixed(3));}
     const pcmQueue = state.safariCatchupPcmQueue || (state.safariCatchupPcmQueue = []);
     pcmQueue.push({pcm, samples, rate, mediaPts});
     if (pcmQueue.length > 600) {
@@ -720,13 +733,7 @@ function flushSafariCatchupAudio(seq) {
       }
     }
     if (pcmQueue.length >= 16) flushSafariCatchupPcm(seq);
-    const now = performance.now();
-    if (now - (state.safariCatchupAudioLastLog || 0) > 1000) {
-      state.safariCatchupAudioLastLog = now;
-      log('SAFARI_CATCHUP_AUDIO: decoded=' + state.audioChunks +
-        ' samples=' + state.audioDecodedSamples + ' rate=' + rate +
-        ' PID=' + item.pid + ' PTSdelta=' + (mediaPts / 90000).toFixed(3) + 's');
-    }
+
   }
   flushSafariCatchupPcm(seq);
 }
@@ -777,6 +784,7 @@ function flushSafariCatchupPcm(seq) {
     }
     const sources = state.audioScheduledSources || (state.audioScheduledSources = []);
     sources.push(source);
+    if(!state.safariCatchupDiagFirstSchedule){state.safariCatchupDiagFirstSchedule=true;logSafariCatchupAudioState('first-schedule frames='+frames+' startAt='+startAt.toFixed(3)+' delta='+delta.toFixed(3));}
     state.safariCatchupAudioScheduleCursor = startAt + frames / item.rate;
     source.onended = () => {
       try { source.disconnect(); } catch (_) {}
@@ -1350,6 +1358,8 @@ function stopWebAudio(){
   if(state.safariCatchupPauseHandler) catchupVideo.removeEventListener('pause',state.safariCatchupPauseHandler);
   if(state.safariCatchupPlayHandler) catchupVideo.removeEventListener('playing',state.safariCatchupPlayHandler);
   state.safariCatchupPauseHandler=null; state.safariCatchupPlayHandler=null;
+   try{if(state.webAudioCtx && state.safariCatchupContextStateHandler)state.webAudioCtx.removeEventListener('statechange',state.safariCatchupContextStateHandler);}catch(e){}
+   state.safariCatchupContextStateHandler=null;
   state.safariCatchupAudioQueue=[]; state.safariCatchupAudioQueueBytes=0; state.safariCatchupPcmQueue=[]; state.safariCatchupAudioReady=false; state.safariCatchupAudioNextPts=null; state.safariCatchupAudioScheduleCursor=0; state.safariCatchupVideoPtsBase=null;
   try{ if(state.webAudioWorkletNode){ state.webAudioWorkletNode.port.postMessage({type:'stop'}); state.webAudioWorkletNode.disconnect(); state.webAudioWorkletNode.port.close(); } }catch(e){}
   state.webAudioWorkletNode=null;
@@ -1514,9 +1524,9 @@ function toggleVideoPlayback(){
 function attachVideoDiagnostics(v, seq){
   v.autoplay=false; v.removeAttribute('autoplay');
   log('VIDEO_DIAG attach seq='+seq+' ua='+navigator.userAgent+' MediaSource='+(!!window.MediaSource)+' ManagedMediaSource='+(!!window.ManagedMediaSource));
-  if(state.diagEnabled) videoSnapshot('attachVideoDiagnostics');
+  if(state.diagEnabled && state.sourceKind!=='catchup') videoSnapshot('attachVideoDiagnostics');
   ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','seeking','seeked','ended','emptied','abort','durationchange','resize','error'].forEach(name=>{
-    v.addEventListener(name,()=>{if(seq===state.seq && state.diagEnabled) videoSnapshot('event='+name);});
+    v.addEventListener(name,()=>{if(seq===state.seq && state.diagEnabled && (state.sourceKind!=='catchup' || ['loadedmetadata','canplay','playing','pause','waiting','stalled','ended','error'].includes(name))) videoSnapshot('event='+name);});
   });
   v.addEventListener('pause', ()=>{
     if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
@@ -1544,7 +1554,7 @@ function attachVideoDiagnostics(v, seq){
         scheduleWebAudioAfterVideo(seq);
       }
       const frameWall=performance.now();
-      if(state.diagEnabled && (!state.diagLastFrameLog || frameWall-state.diagLastFrameLog>5000)){
+      if(state.diagEnabled && state.sourceKind!=='catchup' && (!state.diagLastFrameLog || frameWall-state.diagLastFrameLog>5000)){
         state.diagLastFrameLog=frameWall;
         log('VIDEO frame mediaTime='+Number(meta.mediaTime).toFixed(3)+' presentedFrames='+Number(meta.presentedFrames||0)+' size='+v.videoWidth+'x'+v.videoHeight+' readyState='+v.readyState);
       }
@@ -1661,8 +1671,8 @@ function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
  const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}updateCatchupSeekbar();
  const safariVideoOnly=isIOSSafari();
   if(safariVideoOnly) { state.avMode='video-catchup'; startSafariCatchupAudio(seq); }
-  createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onVideoPts:(pts,pid)=>{if(seq===state.seq && state.safariCatchupVideoPtsBase==null){state.safariCatchupVideoPtsBase=pts;log('SAFARI_CATCHUP_SYNC: video PTS anchor='+Math.round(pts)+' PID='+pid);flushSafariCatchupAudio(seq);}},onAudioPes:(bytes,pts,pid)=>queueSafariCatchupAudioPes(bytes,pts,pid,seq),onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.seeking){state.catchup.seeking=false;updateCatchupSeekbar();}if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
- state.diagTimer=setInterval(()=>{if(seq!==state.seq||!state.catchup.active)return;log('CATCHUP heartbeat bytes='+state.catchup.bytes+' mode='+state.avMode+' fallback='+state.safariFallbackTried);videoSnapshot('catchup-heartbeat');},2000);
+  createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onVideoPts:(pts,pid)=>{if(seq===state.seq && state.safariCatchupVideoPtsBase==null){state.safariCatchupVideoPtsBase=pts;log('SAFARI_CATCHUP_SYNC: video PTS anchor='+Math.round(pts)+' PID='+pid);logSafariCatchupAudioState('video-pts-anchor');flushSafariCatchupAudio(seq);}},onAudioPes:(bytes,pts,pid)=>queueSafariCatchupAudioPes(bytes,pts,pid,seq),onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.seeking){state.catchup.seeking=false;updateCatchupSeekbar();}if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
+ if(!safariVideoOnly)state.diagTimer=setInterval(()=>{if(seq!==state.seq||!state.catchup.active)return;log('CATCHUP heartbeat bytes='+state.catchup.bytes+' mode='+state.avMode+' fallback='+state.safariFallbackTried);videoSnapshot('catchup-heartbeat');},2000);
  video.onended=complete;video.ontimeupdate=()=>{if(seq!==state.seq||!state.catchup.active)return;updateCatchupClock();if(video.currentTime>=Math.max(0,(endMs-startMs)/1000-1.5))complete();};
  state.catchup.timer=setInterval(updateCatchupClock,1000);
 }
