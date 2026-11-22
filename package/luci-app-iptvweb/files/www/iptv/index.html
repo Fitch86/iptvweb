@@ -600,7 +600,7 @@ function startSafariCatchupAudio(seq) {
     state.safariCatchupVideoPtsBase = null;
     state.safariCatchupAudioLastLog = 0;
     state.safariCatchupAudioPesCount = 0;
-    state.safariCatchupDiagFirstDecode = false; state.safariCatchupDiagFirstSchedule = false; state.safariCatchupNoPtsLogged = false;
+    state.safariCatchupDiagFirstDecode = false; state.safariCatchupDiagFirstSchedule = false; state.safariCatchupNoPtsLogged = false; state.safariCatchupDiagFlushBlocked = false;
     state.safariCatchupContextStateHandler = () => { if(seq===state.seq && state.webAudioCtx===ctx) logSafariCatchupAudioState('context-statechange'); };
     ctx.addEventListener('statechange',state.safariCatchupContextStateHandler);
     logSafariCatchupAudioState('created');
@@ -613,14 +613,32 @@ function startSafariCatchupAudio(seq) {
       }
     };
     state.safariCatchupPlayHandler = () => {
-      if (seq !== state.seq || state.webAudioCtx !== ctx) return;
-      const resume = ctx.state === 'running' ? Promise.resolve() : ctx.resume();
+      log('SAFARI_CATCHUP_DIAG playing-event seq=' + seq + ' currentSeq=' + state.seq +
+        ' sameContext=' + (state.webAudioCtx === ctx) + ' sameVideo=' + ($('video') === video) +
+        ' videoConnected=' + !!video.isConnected + ' paused=' + video.paused +
+        ' readyState=' + video.readyState + ' ctx=' + ctx.state);
+      if (seq !== state.seq || state.webAudioCtx !== ctx) {
+        log('SAFARI_CATCHUP_DIAG playing-event ignored seq=' + seq + ' currentSeq=' + state.seq +
+          ' sameContext=' + (state.webAudioCtx === ctx));
+        return;
+      }
+      let resume;
+      try {
+        log('SAFARI_CATCHUP_DIAG resume-call ctx=' + ctx.state);
+        resume = ctx.state === 'running' ? Promise.resolve() : ctx.resume();
+      } catch (e) {
+        log('SAFARI_CATCHUP_DIAG resume-throw ' + e.name + ': ' + e.message + ' ctx=' + ctx.state);
+        return;
+      }
       Promise.resolve(resume).then(() => {
+        log('SAFARI_CATCHUP_DIAG resume-promise-fulfilled ctx=' + ctx.state +
+          ' currentSeq=' + state.seq + ' sameContext=' + (state.webAudioCtx === ctx));
         if (seq !== state.seq || state.webAudioCtx !== ctx) return;
         logSafariCatchupAudioState('playing-resume-resolved');
         flushSafariCatchupAudio(seq);
         flushSafariCatchupPcm(seq);
-      }).catch(e => log('SAFARI_CATCHUP_AUDIO: resume failed ' + e.message));
+      }).catch(e => log('SAFARI_CATCHUP_DIAG resume-promise-rejected ' +
+        e.name + ': ' + e.message + ' ctx=' + ctx.state));
     };
     video.addEventListener('pause', state.safariCatchupPauseHandler);
     video.addEventListener('playing', state.safariCatchupPlayHandler);
@@ -679,7 +697,29 @@ function queueSafariCatchupAudioPes(bytes, pts, pid, seq) {
 function flushSafariCatchupAudio(seq) {
   if (seq !== state.seq || !state.safariCatchupAudioReady || state.safariCatchupVideoPtsBase == null) return;
   const video = $('video'), ctx = state.webAudioCtx;
-  if (!video || video.paused || video.readyState < 2 || !ctx || ctx.state !== 'running') return;
+  if (!video || video.paused || video.readyState < 2 || !ctx || ctx.state !== 'running') {
+    if (!state.safariCatchupDiagFlushBlocked) {
+      state.safariCatchupDiagFlushBlocked = true;
+      const reasons = [];
+      if (!video) reasons.push('video-missing');
+      else {
+        if (video.paused) reasons.push('video-paused');
+        if (video.readyState < 2) reasons.push('video-readyState<2');
+      }
+      if (!ctx) reasons.push('context-missing');
+      else if (ctx.state !== 'running') reasons.push('context-' + ctx.state);
+      log('SAFARI_CATCHUP_DIAG flush-blocked reasons=' + reasons.join(',') +
+        ' seq=' + seq + ' currentSeq=' + state.seq +
+        ' decoderReady=' + !!state.safariCatchupAudioReady +
+        ' videoPtsBase=' + (state.safariCatchupVideoPtsBase == null ? 'none' : Math.round(state.safariCatchupVideoPtsBase)) +
+        ' pesQueue=' + ((state.safariCatchupAudioQueue || []).length) +
+        ' pcmQueue=' + ((state.safariCatchupPcmQueue || []).length) +
+        ' ctx=' + (ctx ? ctx.state : 'none') +
+        ' videoPaused=' + (video ? video.paused : 'none') +
+        ' readyState=' + (video ? video.readyState : 'none'));
+    }
+    return;
+  }
   const queue = state.safariCatchupAudioQueue || [];
   const decoder = state.webAudioDecoder;
   while (queue.length && decoder && seq === state.seq) {
