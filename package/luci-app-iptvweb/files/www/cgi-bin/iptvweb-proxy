@@ -43,7 +43,7 @@ class PinnedHTTPHandler(HTTPHandler):
 class PinnedHTTPSHandler(HTTPSHandler):
     def https_open(self, req):
         return self.do_open(PinnedHTTPSConnection, req, context=self._context,
-                            check_hostname=self._check_hostname)
+                            check_hostname=self._context.check_hostname)
 
 def emit(status, content_type, extra=None):
     print("Status: %s" % status)
@@ -59,12 +59,14 @@ def emit(status, content_type, extra=None):
             if value is not None and "\r" not in str(value) and "\n" not in str(value):
                 print("%s: %s" % (key, value))
     print()
+    sys.stdout.flush()
 
 def fail(status, message):
     body = (message + "\n").encode("utf-8", "replace")
     emit(status, "text/plain; charset=utf-8", {"Content-Length": str(len(body))})
     if os.environ.get("REQUEST_METHOD", "GET") != "HEAD":
         sys.stdout.buffer.write(body)
+        sys.stdout.buffer.flush()
 
 def client_is_lan():
     raw = os.environ.get("REMOTE_ADDR", "")
@@ -203,6 +205,7 @@ def main():
                  {"Content-Length": str(len(rewritten))})
             if method != "HEAD":
                 sys.stdout.buffer.write(rewritten)
+                sys.stdout.buffer.flush()
             return
 
         emit("%d %s" % (code, "Partial Content" if code == 206 else "OK"),
