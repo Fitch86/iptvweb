@@ -812,7 +812,7 @@ function flushSafariCatchupPcm(seq) {
     }
     const sources = state.audioScheduledSources || (state.audioScheduledSources = []);
     sources.push(source);
-    if(!state.safariCatchupDiagFirstSchedule){state.safariCatchupDiagFirstSchedule=true;log('SAFARI_CATCHUP_DIAG first-schedule frames='+frames+' startAt='+startAt.toFixed(3)+' delta='+delta.toFixed(3);}
+    if(!state.safariCatchupDiagFirstSchedule){state.safariCatchupDiagFirstSchedule=true;log('SAFARI_CATCHUP_DIAG first-schedule frames='+frames+' startAt='+startAt.toFixed(3)+' delta='+delta.toFixed(3));}
     state.safariCatchupAudioScheduleCursor = startAt + frames / item.rate;
     source.onended = () => {
       try { source.disconnect(); } catch (_) {}
