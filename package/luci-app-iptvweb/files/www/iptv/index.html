@@ -1371,7 +1371,7 @@ function stopDiagTimers(){
   if(state.diagTimer){ clearInterval(state.diagTimer); state.diagTimer=0; }
   if(state.stableTimer){ clearTimeout(state.stableTimer); state.stableTimer=0; }
 }
-function stopWebAudio(){
+function stopWebAudio(preserveContext=false){
   if(state.audioStartTimer){ clearTimeout(state.audioStartTimer); state.audioStartTimer=0; }
   if(state.audioSyncTimer){ clearInterval(state.audioSyncTimer); state.audioSyncTimer=0; }
   try{ if(state.audioAbortController) state.audioAbortController.abort(); }catch(e){}
@@ -1402,8 +1402,10 @@ function stopWebAudio(){
   state.webAudioSource=null;
   try{ if(state.webAudioDecoder){ state.webAudioDecoder.free(); } }catch(e){}
   state.webAudioDecoder=null;
-  try{ if(state.webAudioCtx){ state.webAudioCtx.close(); } }catch(e){}
-  state.webAudioCtx=null;
+  if(!preserveContext){
+    try{ if(state.webAudioCtx){ state.webAudioCtx.close(); } }catch(e){}
+    state.webAudioCtx=null;
+  }
   state.webAudioBuffer=null;
   state.audioPcmQueue=[]; state.audioPcmOffset=0; state.audioQueuedSeconds=0; state.audioNextTime=0; state.audioScheduledDuration=0;
   state.audioPlayedEstimate=0; state.audioVideoAnchor=0; state.audioStartContextTime=0; state.audioLastResetAt=0; state.audioStarted=false; state.audioStreamDone=false;
@@ -1412,8 +1414,8 @@ function stopWebAudio(){
   state.webAudioState='off'; state.webAudioError=''; state.audioPlaying=false; state.audioPendingStart=false; state.audioScheduledAt=0;
 }
 
-function stopPlayer(){
-  stopWebAudio();
+function stopPlayer(preserveAudioContext=false){
+  stopWebAudio(!!preserveAudioContext);
   if(state.startTimer){ clearTimeout(state.startTimer); state.startTimer=0; }
   if(state.safariFallbackTimer){ clearTimeout(state.safariFallbackTimer); state.safariFallbackTimer=0; }
   stopDiagTimers();
@@ -1691,7 +1693,7 @@ function seekCatchupToOffset(offset){
 }
 function finishCatchup(message){if(!state.catchup.active)return;state.catchup.active=false;state.catchup.seeking=false;state.catchup.dragging=false;stopCatchupTicker();stopPlayer();updateCatchupSeekbar();setStatus(message);updateCatchupToolbar();}
 function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
- if(seq!==state.seq)return;stopCatchupTicker();stopPlayer();state.playIssuedAt=0;state.userPaused=false;state.catchup.active=true;state.catchup.startMs=startMs;if(!state.catchup.originStartMs)state.catchup.originStartMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';setStatus('正在连接回看 · '+ch.name);updateCatchupToolbar();const clock=$('catchupClock');if(clock)clock.textContent='正在连接回看…';
+ if(seq!==state.seq)return;stopCatchupTicker();stopPlayer(true);state.playIssuedAt=0;state.userPaused=false;state.catchup.active=true;state.catchup.startMs=startMs;if(!state.catchup.originStartMs)state.catchup.originStartMs=startMs;state.catchup.endMs=endMs;state.catchup.retry=retry;state.catchup.bytes=0;state.catchup.startedAt=Date.now();state.sourceKind='catchup';setStatus('正在连接回看 · '+ch.name);updateCatchupToolbar();const clock=$('catchupClock');if(clock)clock.textContent='正在连接回看…';
  const url=relayStreamUrl(ch.rtsp,seek);let settled=false;
  log('CATCHUP begin channel='+ch.name+' seq='+seq+' seek='+seek+' iosSafari='+isIOSSafari()+' rtspHost='+(()=>{try{return new URL(ch.rtsp).host;}catch(e){return 'unknown';}})());
  const failed=reason=>{if(settled||seq!==state.seq)return;state.catchup.seeking=false;updateCatchupSeekbar();log('CATCHUP failed reason='+reason+' bytes='+state.catchup.bytes+' elapsedMs='+(Date.now()-state.catchup.startedAt));videoSnapshot('catchup-failed');settled=true;if(retry<1){setStatus('回看连接中断，正在重试…');setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
