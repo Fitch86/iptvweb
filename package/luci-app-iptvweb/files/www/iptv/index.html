@@ -601,7 +601,7 @@ function startSafariCatchupAudio(seq) {
     state.webAudioDecoder = decoder;
     const video = $('video');
     state.safariCatchupPauseHandler = () => {
-      if (seq === state.seq && state.webAudioCtx === ctx && ctx.state === 'running') {
+      if (seq === state.seq && state.webAudioCtx === ctx && ctx.state === 'running' && !state.catchup.active) {
         try { ctx.suspend(); } catch (_) {}
       }
     };
