@@ -565,10 +565,6 @@ function safariPtsDelta33(value, base) {
   else if (d < -half) d += wrap;
   return d;
 }
-function logSafariCatchupAudioState(tag) {
-  const ctx=state.webAudioCtx, video=$('video');
-  log('SAFARI_CATCHUP_DIAG '+tag+' ctx='+(ctx?ctx.state:'none')+' rate='+(ctx?ctx.sampleRate:'-')+' videoPaused='+(video?video.paused:'-')+' readyState='+(video?video.readyState:'-')+' currentTime='+(video?Number(video.currentTime||0).toFixed(3):'-')+' decoderReady='+!!state.safariCatchupAudioReady+' videoPtsBase='+(state.safariCatchupVideoPtsBase==null?'none':Math.round(state.safariCatchupVideoPtsBase))+' pes='+Number(state.safariCatchupAudioPesCount||0)+' pesQueue='+(state.safariCatchupAudioQueue||[]).length+' pcmQueue='+(state.safariCatchupPcmQueue||[]).length+' decoded='+Number(state.audioChunks||0)+' scheduled='+(state.audioScheduledSources||[]).length);
-}
 function startSafariCatchupAudio(seq) {
   if (seq !== state.seq || !isIOSSafari()) return;
   const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -601,9 +597,6 @@ function startSafariCatchupAudio(seq) {
     state.safariCatchupAudioLastLog = 0;
     state.safariCatchupAudioPesCount = 0;
     state.safariCatchupDiagFirstDecode = false; state.safariCatchupDiagFirstSchedule = false; state.safariCatchupNoPtsLogged = false; state.safariCatchupDiagFlushBlocked = false;
-    state.safariCatchupContextStateHandler = () => { if(seq===state.seq && state.webAudioCtx===ctx) logSafariCatchupAudioState('context-statechange'); };
-    ctx.addEventListener('statechange',state.safariCatchupContextStateHandler);
-    logSafariCatchupAudioState('created');
     const decoder = new decNS.MPEGDecoder({enableGapless:false});
     state.webAudioDecoder = decoder;
     const video = $('video');
@@ -618,13 +611,10 @@ function startSafariCatchupAudio(seq) {
         ' videoConnected=' + !!video.isConnected + ' paused=' + video.paused +
         ' readyState=' + video.readyState + ' ctx=' + ctx.state);
       if (seq !== state.seq || state.webAudioCtx !== ctx) {
-        log('SAFARI_CATCHUP_DIAG playing-event ignored seq=' + seq + ' currentSeq=' + state.seq +
-          ' sameContext=' + (state.webAudioCtx === ctx));
         return;
       }
       let resume;
       try {
-        log('SAFARI_CATCHUP_DIAG resume-call ctx=' + ctx.state);
         resume = ctx.state === 'running' ? Promise.resolve() : ctx.resume();
       } catch (e) {
         log('SAFARI_CATCHUP_DIAG resume-throw ' + e.name + ': ' + e.message + ' ctx=' + ctx.state);
@@ -634,7 +624,6 @@ function startSafariCatchupAudio(seq) {
         log('SAFARI_CATCHUP_DIAG resume-promise-fulfilled ctx=' + ctx.state +
           ' currentSeq=' + state.seq + ' sameContext=' + (state.webAudioCtx === ctx));
         if (seq !== state.seq || state.webAudioCtx !== ctx) return;
-        logSafariCatchupAudioState('playing-resume-resolved');
         flushSafariCatchupAudio(seq);
         flushSafariCatchupPcm(seq);
       }).catch(e => log('SAFARI_CATCHUP_DIAG resume-promise-rejected ' +
@@ -647,7 +636,6 @@ function startSafariCatchupAudio(seq) {
       state.safariCatchupAudioReady = true;
       state.webAudioState = 'streaming';
       log('SAFARI_CATCHUP_AUDIO: MPEG decoder ready; source=single-RTSP-TS backend=PTS-buffer-source');
-      logSafariCatchupAudioState('decoder-ready');
       flushSafariCatchupAudio(seq);
     }).catch(e => {
       if (seq !== state.seq) return;
@@ -762,7 +750,7 @@ function flushSafariCatchupAudio(seq) {
     state.audioChannels = result.channelData.length;
     state.audioChunks++;
     state.audioDecodedSamples += samples;
-    if(!state.safariCatchupDiagFirstDecode){state.safariCatchupDiagFirstDecode=true;logSafariCatchupAudioState('first-decode samples='+samples+' rate='+rate+' channels='+result.channelData.length+' ptsDelta='+(mediaPts/90000).toFixed(3));}
+    if(!state.safariCatchupDiagFirstDecode){state.safariCatchupDiagFirstDecode=true;log('SAFARI_CATCHUP_DIAG first-decode samples='+samples+' rate='+rate+' channels='+result.channelData.length+' ptsDelta='+(mediaPts/90000).toFixed(3));}
     const pcmQueue = state.safariCatchupPcmQueue || (state.safariCatchupPcmQueue = []);
     pcmQueue.push({pcm, samples, rate, mediaPts});
     if (pcmQueue.length > 600) {
@@ -824,7 +812,7 @@ function flushSafariCatchupPcm(seq) {
     }
     const sources = state.audioScheduledSources || (state.audioScheduledSources = []);
     sources.push(source);
-    if(!state.safariCatchupDiagFirstSchedule){state.safariCatchupDiagFirstSchedule=true;logSafariCatchupAudioState('first-schedule frames='+frames+' startAt='+startAt.toFixed(3)+' delta='+delta.toFixed(3));}
+    if(!state.safariCatchupDiagFirstSchedule){state.safariCatchupDiagFirstSchedule=true;log('SAFARI_CATCHUP_DIAG first-schedule frames='+frames+' startAt='+startAt.toFixed(3)+' delta='+delta.toFixed(3);}
     state.safariCatchupAudioScheduleCursor = startAt + frames / item.rate;
     source.onended = () => {
       try { source.disconnect(); } catch (_) {}
@@ -1711,7 +1699,7 @@ function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
  const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}updateCatchupSeekbar();
  const safariVideoOnly=isIOSSafari();
   if(safariVideoOnly) { state.avMode='video-catchup'; startSafariCatchupAudio(seq); }
-  createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onVideoPts:(pts,pid)=>{if(seq===state.seq && state.safariCatchupVideoPtsBase==null){state.safariCatchupVideoPtsBase=pts;log('SAFARI_CATCHUP_SYNC: video PTS anchor='+Math.round(pts)+' PID='+pid);logSafariCatchupAudioState('video-pts-anchor');flushSafariCatchupAudio(seq);}},onAudioPes:(bytes,pts,pid)=>queueSafariCatchupAudioPes(bytes,pts,pid,seq),onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.seeking){state.catchup.seeking=false;updateCatchupSeekbar();}if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
+  createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onVideoPts:(pts,pid)=>{if(seq===state.seq && state.safariCatchupVideoPtsBase==null){state.safariCatchupVideoPtsBase=pts;log('SAFARI_CATCHUP_SYNC: video PTS anchor='+Math.round(pts)+' PID='+pid);flushSafariCatchupAudio(seq);}},onAudioPes:(bytes,pts,pid)=>queueSafariCatchupAudioPes(bytes,pts,pid,seq),onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.seeking){state.catchup.seeking=false;updateCatchupSeekbar();}if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
  if(!safariVideoOnly)state.diagTimer=setInterval(()=>{if(seq!==state.seq||!state.catchup.active)return;log('CATCHUP heartbeat bytes='+state.catchup.bytes+' mode='+state.avMode+' fallback='+state.safariFallbackTried);videoSnapshot('catchup-heartbeat');},2000);
  video.onended=complete;video.ontimeupdate=()=>{if(seq!==state.seq||!state.catchup.active)return;updateCatchupClock();if(video.currentTime>=Math.max(0,(endMs-startMs)/1000-1.5))complete();};
  state.catchup.timer=setInterval(updateCatchupClock,1000);
