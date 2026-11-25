@@ -589,6 +589,7 @@ function startSafariCatchupAudio(seq) {
     state.audioScheduledSources = [];
     state.safariCatchupAudioQueue = [];
     state.safariCatchupAudioQueueBytes = 0;
+    state.safariCatchupPcmStaleDrops=0;state.safariCatchupHealthLastWall=0;state.safariCatchupHealthLastMedia=0;
     state.safariCatchupPcmQueue = [];
     state.safariCatchupAudioReady = false;
     state.safariCatchupAudioNextPts = null;
@@ -682,7 +683,24 @@ function queueSafariCatchupAudioPes(bytes, pts, pid, seq) {
   state.safariCatchupAudioQueueBytes = (state.safariCatchupAudioQueueBytes || 0) + size;
   if (state.safariCatchupAudioReady && state.safariCatchupVideoPtsBase != null) flushSafariCatchupAudio(seq);
 }
-function flushSafariCatchupAudio(seq) {
+function logSafariCatchupHealth(seq){
+  if(seq!==state.seq||!state.catchup.active)return;
+  const now=performance.now();
+  if(state.safariCatchupHealthLastWall&&now-state.safariCatchupHealthLastWall<5000)return;
+  const video=$('video'),ctx=state.webAudioCtx;
+  const current=video?Number(video.currentTime||0):0;
+  const elapsed=state.safariCatchupHealthLastWall?(now-state.safariCatchupHealthLastWall)/1000:0;
+  const mediaRate=elapsed>0?(current-(state.safariCatchupHealthLastMedia||0))/elapsed:0;
+  const pes=state.safariCatchupAudioQueue||[],pcm=state.safariCatchupPcmQueue||[];
+  const base=state.safariCatchupVideoPtsBase;
+  const pesDelta=pes.length&&base!=null?safariPtsDelta33(pes[0].pts,base)/90000-current:null;
+  const pcmDelta=pcm.length?pcm[0].mediaPts/90000-current:null;
+  const cursor=Number(state.safariCatchupAudioScheduleCursor||0);
+  const ahead=ctx?cursor-ctx.currentTime:0;
+  log('SAFARI_CATCHUP_HEALTH t='+current.toFixed(2)+' mediaRate='+mediaRate.toFixed(2)+'x rate='+Number(video&&video.playbackRate||1).toFixed(2)+' ready='+ (video?video.readyState:'none')+' paused='+(video?video.paused:'none')+' ctx='+(ctx?ctx.state:'none')+' pesQ='+pes.length+' pcmQ='+pcm.length+' pesHeadDelta='+(pesDelta==null?'na':pesDelta.toFixed(2))+' pcmHeadDelta='+(pcmDelta==null?'na':pcmDelta.toFixed(2))+' stalePes='+(state.safariCatchupAudioStalePes||0)+' stalePcm='+(state.safariCatchupPcmStaleDrops||0)+' pcmDrop='+(state.safariCatchupPcmQueueDrops||0)+' pesDrop='+(state.safariCatchupAudioQueueDrops||0)+' decodeErr='+(state.audioDecodeErrors||0)+' decoded='+ (state.audioDecodeCalls||0)+' scheduled='+((state.audioScheduledSources||[]).length)+' scheduleAhead='+ahead.toFixed(2)+'s');
+  state.safariCatchupHealthLastWall=now;state.safariCatchupHealthLastMedia=current;
+}
+function flushSafariCatchupAudio(seq){
   if (seq !== state.seq || !state.safariCatchupAudioReady || state.safariCatchupVideoPtsBase == null) return;
   const video = $('video'), ctx = state.webAudioCtx;
   if (!video || video.paused || video.readyState < 2 || !ctx || ctx.state !== 'running') {
@@ -770,11 +788,12 @@ function flushSafariCatchupPcm(seq) {
       !state.webAudioCtx || state.webAudioCtx.state !== 'running') return;
   const video = $('video'), ctx = state.webAudioCtx;
   if (!video || video.paused || video.readyState < 2) return;
+  logSafariCatchupHealth(seq);
   const queue = state.safariCatchupPcmQueue || [];
   while (queue.length) {
     const item = queue[0];
     const delta = item.mediaPts / 90000 - Number(video.currentTime || 0);
-    if (delta < -0.25) { queue.shift(); continue; }
+    if (delta < -0.25) { state.safariCatchupPcmStaleDrops=(state.safariCatchupPcmStaleDrops||0)+1;queue.shift(); continue; }
     if (delta > 12.0) break;
     const targetAt = ctx.currentTime + delta;
     const cursor = state.safariCatchupAudioScheduleCursor || 0;
@@ -1555,9 +1574,10 @@ function attachVideoDiagnostics(v, seq){
   v.autoplay=false; v.removeAttribute('autoplay');
   log('VIDEO_DIAG attach seq='+seq+' ua='+navigator.userAgent+' MediaSource='+(!!window.MediaSource)+' ManagedMediaSource='+(!!window.ManagedMediaSource));
   if(state.diagEnabled && state.sourceKind!=='catchup') videoSnapshot('attachVideoDiagnostics');
-  ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','seeking','seeked','ended','emptied','abort','durationchange','resize','error'].forEach(name=>{
+  ['loadstart','loadedmetadata','loadeddata','canplay','canplaythrough','play','playing','pause','waiting','stalled','seeking','seeked','ended','emptied','abort','durationchange','resize','error','ratechange'].forEach(name=>{
     v.addEventListener(name,()=>{if(seq===state.seq && state.diagEnabled && (state.sourceKind!=='catchup' || ['loadedmetadata','canplay','playing','pause','waiting','stalled','ended','error'].includes(name))) videoSnapshot('event='+name);});
   });
+  v.addEventListener('ratechange',()=>{if(seq===state.seq&&state.sourceKind==='catchup')log('SAFARI_CATCHUP_DIAG ratechange rate='+Number(v.playbackRate||1)+' currentTime='+Number(v.currentTime||0).toFixed(3)+' readyState='+v.readyState+' paused='+v.paused);});
   v.addEventListener('pause', ()=>{
     if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
     state.userPaused=true;
