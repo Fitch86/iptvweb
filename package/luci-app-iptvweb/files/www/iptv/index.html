@@ -108,7 +108,7 @@ video{display:block;width:100%;height:auto;aspect-ratio:16/9;background:#000;fle
   <main>
     <div class="player" id="playerContainer"><video id="video" controls playsinline preload="none" webkit-playsinline></video><button id="playerFullscreenBtn" class="player-fullscreen-btn" type="button" aria-label="播放器全屏" title="全屏"><svg class="icon-enter" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3M21 16v3a2 2 0 0 1-2 2h-3"/></svg><svg class="icon-exit" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 3v5H3M16 3v5h5M3 16h5v5M21 16h-5v5"/></svg></button></div>
     <div id="catchupSeekbar" class="catchup-seekbar" hidden>
-      <div class="seek-head"><strong>回看时移</strong><span id="catchupSeekLabel">--:--:--</span><span id="catchupSeekState" style="margin-left:auto">拖动后松开跳转</span></div>
+      <div class="seek-head"><strong>回看时移</strong><span id="catchupSeekLabel">--:--:--</span><span id="catchupSeekState" style="margin-left:auto">拖动后松开跳转</span><button id="catchupRateBtn" type="button" hidden style="padding:5px 9px;font-size:12px;background:#3a3a3a">1×</button></div>
       <input id="catchupSeekRange" type="range" min="0" max="1" step="1" value="0" aria-label="回看时移进度">
       <div class="seek-foot"><span id="catchupSeekStart">--:--:--</span><span id="catchupSeekEnd">--:--:--</span></div>
     </div>
@@ -136,7 +136,7 @@ const state={
   items:[], groups:[], active:'', current:null, player:null, seq:0, unicastMap:[], sourceKind:'multicast', liveFallbackTried:false,
   epgById:Object.create(null), epgBySource:{multicast:Object.create(null),unicast:Object.create(null)}, epgLoaded:false, epgLoadedBySource:{multicast:false,unicast:false}, epgUpdatedAt:0, epgTimer:0, epgStats:null, selectedEpg:null, epgDate:'', epgLocatePending:true,
   catchup:{active:false,startMs:0,originStartMs:0,endMs:0,timer:0,retry:0,bytes:0,startedAt:0,rtsp:'',seeking:false,dragging:false}, diagEnabled:true, diagConsoleHooked:false, diagLastSurfaceToggleAt:0,
-  safariCatchupContextStateHandler:null, safariCatchupDiagFirstDecode:false, safariCatchupDiagFirstSchedule:false, safariCatchupNoPtsLogged:false,
+  safariCatchupContextStateHandler:null, safariCatchupDiagFirstDecode:false, safariCatchupDiagFirstSchedule:false, safariCatchupNoPtsLogged:false, safariCatchupVideoRate:1,
   playStarted:0, firstFrameAt:0, firstPlayingAt:0, last:{t:0,wall:0}, stats:{},
   log:[], waitingStart:0, stallStart:0, waitingCount:0, stallCount:0,
   playIssuedAt:0, startTimer:0, userGestureCount:0, recoveries:0,
@@ -1669,11 +1669,28 @@ function bjCompactSecond(ms){
   p.forEach(x=>v[x.type]=x.value);
   return v.year+v.month+v.day+v.hour+v.minute+v.second;
 }
+function setSafariCatchupVideoRate(rate){
+  if(!state.catchup.active||!isIOSSafari())return;
+  const next=rate===1.25?1.25:1;
+  state.safariCatchupVideoRate=next;
+  const video=$('video');
+  try{if(video)video.playbackRate=next;}catch(e){log('SAFARI_CATCHUP_RATE set failed '+(e&&e.message||e));}
+  const button=$('catchupRateBtn');
+  if(button){button.textContent=next===1.25?'1.25×':'1×';button.setAttribute('aria-pressed',next===1.25?'true':'false');}
+  log('SAFARI_CATCHUP_RATE video-only rate='+next+' audioPipeline=unchanged');
+}
+function updateCatchupRateButton(){
+  const button=$('catchupRateBtn');
+  if(!button)return;
+  const visible=!!state.catchup.active&&isIOSSafari();
+  button.hidden=!visible;
+  if(visible){button.textContent=state.safariCatchupVideoRate===1.25?'1.25×':'1×';button.setAttribute('aria-pressed',state.safariCatchupVideoRate===1.25?'true':'false');}
+}
 function updateCatchupSeekbar(previewOffset){
   const wrap=$('catchupSeekbar'),range=$('catchupSeekRange');
   if(!wrap||!range)return;
-  if(!state.catchup.active){wrap.hidden=true;return;}
-  wrap.hidden=false;
+  if(!state.catchup.active){wrap.hidden=true;updateCatchupRateButton();return;}
+  wrap.hidden=false;updateCatchupRateButton();
   const total=Math.max(1,Math.floor((state.catchup.endMs-state.catchup.originStartMs)/1000));
   const video=$('video');
   const actual=Math.max(0,Math.floor((state.catchup.startMs-state.catchup.originStartMs)/1000+(Number(video.currentTime)||0)));
@@ -1718,7 +1735,7 @@ function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
  log('CATCHUP begin channel='+ch.name+' seq='+seq+' seek='+seek+' iosSafari='+isIOSSafari()+' rtspHost='+(()=>{try{return new URL(ch.rtsp).host;}catch(e){return 'unknown';}})());
  const failed=reason=>{if(settled||seq!==state.seq)return;state.catchup.seeking=false;updateCatchupSeekbar();log('CATCHUP failed reason='+reason+' bytes='+state.catchup.bytes+' elapsedMs='+(Date.now()-state.catchup.startedAt));videoSnapshot('catchup-failed');settled=true;if(retry<1){setStatus('回看连接中断，正在重试…');setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
  const complete=()=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt;log('CATCHUP complete bytes='+bytes+' elapsedMs='+elapsed);videoSnapshot('catchup-complete');if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
- const video=$('video');try{video.pause();video.removeAttribute('src');video.load();}catch(e){}updateCatchupSeekbar();
+ const video=$('video');try{video.pause();video.removeAttribute('src');video.load();video.playbackRate=state.safariCatchupVideoRate;}catch(e){}updateCatchupSeekbar();
  const safariVideoOnly=isIOSSafari();
   if(safariVideoOnly) { state.avMode='video-catchup'; startSafariCatchupAudio(seq); }
   createPlayer(ch,url,seq,safariVideoOnly?'video':'av',{rawFetch:true,safariVideoOnly,isLive:false,onVideoPts:(pts,pid)=>{if(seq===state.seq && state.safariCatchupVideoPtsBase==null){state.safariCatchupVideoPtsBase=pts;log('SAFARI_CATCHUP_SYNC: video PTS anchor='+Math.round(pts)+' PID='+pid);flushSafariCatchupAudio(seq);}},onAudioPes:(bytes,pts,pid)=>queueSafariCatchupAudioPes(bytes,pts,pid,seq),onBytes:n=>{if(seq===state.seq){state.catchup.bytes+=n;if(state.catchup.seeking){state.catchup.seeking=false;updateCatchupSeekbar();}if(state.catchup.bytes<=65536||state.catchup.bytes%1048576<n)log('CATCHUP bytes='+state.catchup.bytes);}},onError:e=>failed(e&&e.message||'中继读取失败'),onComplete:complete});
@@ -1734,6 +1751,7 @@ function startCatchup(){
  if((ch.source||'multicast')==='multicast'&&a<now-7*86400000){setStatus('组播回看仅支持最近 7×24 小时');return;}
  if(z-a>14400000){setStatus('该节目超过4小时，暂不能整段回看');return;}
  const seek=bjCompactSecond(a)+'-'+bjCompactSecond(z),seq=++state.seq;
+ state.safariCatchupVideoRate=1;
  state.catchup.originStartMs=a;state.catchup.seeking=false;state.catchup.dragging=false;
   log('CATCHUP request source='+(ch.source||'multicast')+' channel='+ch.name+' tvgId='+ch.id+' start='+bjInput(a).date+' '+bjInput(a).time+' end='+bjInput(z).date+' '+bjInput(z).time+' durationMs='+(z-a));
  state.liveFallbackTried=true;state.catchup.rtsp=ch.rtsp;
@@ -4642,6 +4660,7 @@ installPlayerFullscreen();
 $('stopBtn2').onclick=stopPlayback;
 $('liveBtn').onclick=()=>{if(state.current)play(state.current);};
 $('catchupStartBtn').onclick=startCatchup;
+$('catchupRateBtn').onclick=()=>setSafariCatchupVideoRate(state.safariCatchupVideoRate===1?1.25:1);
 $('catchupSeekRange').addEventListener('input',e=>{
   state.catchup.dragging=true;
   updateCatchupSeekbar(Number(e.target.value));
