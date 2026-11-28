@@ -595,6 +595,7 @@ function startSafariCatchupAudio(seq) {
     state.safariCatchupAudioNextPts = null;
     state.safariCatchupAudioScheduleCursor = 0;
     state.safariCatchupAudioClockAnchor = null;
+    state.safariCatchupAutoPausePending = false;
     state.safariCatchupAudioRate = Number(state.safariCatchupVideoRate || 1);
     state.safariCatchupVideoPtsBase = null;
     state.safariCatchupAudioLastLog = 0;
@@ -604,7 +605,17 @@ function startSafariCatchupAudio(seq) {
     state.webAudioDecoder = decoder;
     const video = $('video');
     state.safariCatchupPauseHandler = () => {
-      if (seq === state.seq && state.webAudioCtx === ctx && ctx.state === 'running' && !state.catchup.active) {
+      if (seq !== state.seq || state.webAudioCtx !== ctx) return;
+      // Safari can pause the video at a temporary MSE timeline end while the
+      // independent WebAudio clock keeps advancing. Re-anchor only after that
+      // automatic pause is followed by playback; explicit UI pauses are excluded.
+      if (state.catchup.active && !state.userPaused && Number(video.currentTime || 0) > 0.1) {
+        state.safariCatchupAutoPausePending = true;
+        log('SAFARI_CATCHUP_CLOCK auto-pause pending media=' +
+          Number(video.currentTime || 0).toFixed(3) + ' ctx=' + ctx.state);
+        return;
+      }
+      if (ctx.state === 'running' && !state.catchup.active) {
         try { ctx.suspend(); } catch (_) {}
       }
     };
@@ -627,6 +638,22 @@ function startSafariCatchupAudio(seq) {
         log('SAFARI_CATCHUP_DIAG resume-promise-fulfilled ctx=' + ctx.state +
           ' currentSeq=' + state.seq + ' sameContext=' + (state.webAudioCtx === ctx));
         if (seq !== state.seq || state.webAudioCtx !== ctx) return;
+        if (state.catchup.active && state.safariCatchupAutoPausePending) {
+          const sources = state.audioScheduledSources || [];
+          sources.slice().forEach(source => { try { source.stop(); } catch (_) {} });
+          sources.length = 0;
+          state.safariCatchupAudioScheduleCursor = 0;
+          state.safariCatchupAudioClockAnchor = {
+            mediaTime: Number(video.currentTime || 0),
+            contextTime: ctx.currentTime + 0.025
+          };
+          state.safariCatchupAutoPausePending = false;
+          log('SAFARI_CATCHUP_CLOCK reanchor-after-auto-pause media=' +
+            state.safariCatchupAudioClockAnchor.mediaTime.toFixed(3) +
+            ' ctx=' + state.safariCatchupAudioClockAnchor.contextTime.toFixed(3) +
+            ' rate=' + Number(state.safariCatchupAudioRate || 1).toFixed(2) +
+            ' clearedSources=' + sources.length);
+        }
         flushSafariCatchupAudio(seq);
         flushSafariCatchupPcm(seq);
       }).catch(e => log('SAFARI_CATCHUP_DIAG resume-promise-rejected ' +
