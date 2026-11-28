@@ -1785,7 +1785,7 @@ function startCatchupAttempt(ch,startMs,endMs,seek,seq,retry){
  const url=relayStreamUrl(ch.rtsp,seek);let settled=false;
  log('CATCHUP begin channel='+ch.name+' seq='+seq+' seek='+seek+' iosSafari='+isIOSSafari()+' rtspHost='+(()=>{try{return new URL(ch.rtsp).host;}catch(e){return 'unknown';}})());
  const failed=reason=>{if(settled||seq!==state.seq)return;state.catchup.seeking=false;updateCatchupSeekbar();log('CATCHUP failed reason='+reason+' bytes='+state.catchup.bytes+' elapsedMs='+(Date.now()-state.catchup.startedAt));videoSnapshot('catchup-failed');settled=true;if(retry<1){setStatus('回看连接中断，正在重试…');setTimeout(()=>{if(seq===state.seq)startCatchupAttempt(ch,startMs,endMs,seek,seq,retry+1);},900);}else finishCatchup('回看不可用：'+reason+'。该频道可能不支持此时段回看，请换时间或返回直播。');};
- const complete=(cause)=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt,v=$('video');log('CATCHUP_FLOW_END cause='+(cause||'unspecified')+' bytes='+bytes+' elapsedMs='+elapsed+' mediaTime='+Number(v.currentTime||0).toFixed(3)+' duration='+(Number.isFinite(v.duration)?v.duration.toFixed(3):'n/a')+' playbackRate='+Number(v.playbackRate||1).toFixed(2)+' bufferAhead='+bufferAhead(v).toFixed(3)+' readyState='+v.readyState+' ended='+v.ended);log('CATCHUP complete bytes='+bytes+' elapsedMs='+elapsed);videoSnapshot('catchup-complete');if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
+ const complete=(cause)=>{if(settled||seq!==state.seq)return;const bytes=state.catchup.bytes,elapsed=Date.now()-state.catchup.startedAt,v=$('video'),td=state.catchup.transportDiag||{};log('CATCHUP_FLOW_END cause='+(cause||'unspecified')+' bytes='+bytes+' elapsedMs='+elapsed+' mediaTime='+Number(v.currentTime||0).toFixed(3)+' duration='+(Number.isFinite(v.duration)?v.duration.toFixed(3):'n/a')+' playbackRate='+Number(v.playbackRate||1).toFixed(2)+' bufferAhead='+bufferAhead(v).toFixed(3)+' readyState='+v.readyState+' ended='+v.ended+' transport='+JSON.stringify(td));log('CATCHUP complete bytes='+bytes+' elapsedMs='+elapsed);videoSnapshot('catchup-complete');if(bytes<65536&&elapsed<10000&&retry<1){failed('流过早结束');return;}settled=true;finishCatchup('该时段结束。可重新选择时间，或退出回看返回直播。');};
  const video=$('video');try{video.pause();video.removeAttribute('src');video.load();video.playbackRate=state.safariCatchupVideoRate;}catch(e){}updateCatchupSeekbar();
  const safariVideoOnly=isIOSSafari();
   if(safariVideoOnly) { state.avMode='video-catchup'; startSafariCatchupAudio(seq); }
@@ -2982,7 +2982,7 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap, onBytes, onAudioPes, onVi
       this._buffer=new Uint8Array(0); this._byteStart=0; this._outBytes=0;
       this._patPid=null; this._pmtPid=null; this._videoPid=null; this._videoPids=new Set(); this._audioPids=new Set(); this._audioPesState=new Map(); this._pcrPid=null;
       this._sectionBuf=new Map(); this._sectionNeed=new Map(); this._sectionType=new Map();
-      this._started=false; this._closed=false; this._diagLastStats=0; this._diagInBytes=0; this._diagOutPackets=0; this._diagVideoPackets=new Set();
+      this._started=false; this._closed=false; this._diagFetchState='idle'; this._diagFetchBytes=0; this._diagFetchStartedAt=0; this._diagReaderDone=false; this._diagLastStats=0; this._diagInBytes=0; this._diagOutPackets=0; this._diagVideoPackets=new Set();
 	  this._videoStartedPids = new Set();
 	  this._diagSkippedVideoUntilPusi = 0;
 	  this._h264TailByPid = new Map();
@@ -3022,9 +3022,11 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap, onBytes, onAudioPes, onVi
         const to=range.to==null?'':range.to;
         headers.set('Range','bytes='+from+'-'+to);
       }
-      this._aborter=new AbortController();
+      this._aborter=new AbortController();this._diagFetchState='fetching';this._diagFetchStartedAt=Date.now();this._diagFetchBytes=0;this._diagReaderDone=false;
+      if(state.sourceKind==='catchup')state.catchup.transportDiag={state:this._diagFetchState,bytes:0,readerDone:false};
       fetch(url,{headers,signal:this._aborter.signal,cache:'no-store'}).then(async r=>{
         if(!r.ok && r.status!==206) throw new Error('HTTP '+r.status);
+        this._diagFetchState='reading';if(state.sourceKind==='catchup')state.catchup.transportDiag={state:this._diagFetchState,status:r.status,contentLength:r.headers.get('content-length'),contentRange:r.headers.get('content-range'),bytes:0,readerDone:false};log('SAFARI_FETCH response status='+r.status+' redirected='+r.redirected+' contentLength='+(r.headers.get('content-length')||'na')+' contentRange='+(r.headers.get('content-range')||'na'));
         this._status=2;
         if(!r.body) throw new Error('ReadableStream unavailable');
         const reader=r.body.getReader();
@@ -3047,10 +3049,10 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap, onBytes, onAudioPes, onVi
 
         while (!this._closed) {
           const q = await reader.read();
-          if (q.done) break;
+          if (q.done) {this._diagReaderDone=true;this._diagFetchState='reader-done';if(state.sourceKind==='catchup')state.catchup.transportDiag={state:this._diagFetchState,bytes:this._diagFetchBytes,readerDone:true,elapsedMs:Date.now()-this._diagFetchStartedAt};log('SAFARI_FETCH reader.done bytes='+this._diagFetchBytes+' elapsedMs='+(Date.now()-this._diagFetchStartedAt));break;}
           if (!q.value || !q.value.length) continue;
 
-          this._diagInBytes += q.value.byteLength;
+          this._diagInBytes += q.value.byteLength;this._diagFetchBytes+=q.value.byteLength;if(state.sourceKind==='catchup'&&state.catchup.transportDiag){state.catchup.transportDiag.bytes=this._diagFetchBytes;state.catchup.transportDiag.state='reading';}
           if (this._onBytes) { try { this._onBytes(q.value.byteLength); } catch(e) {} }
           const out = this._filterChunk(q.value);
 
@@ -3116,16 +3118,17 @@ function makeSafariVideoOnlyLoader(onOpenGopBootstrap, onBytes, onAudioPes, onVi
           emitFiltered(staged);
         }
 		
-        this._status=4;
+        this._status=4;this._diagFetchState='complete';if(state.sourceKind==='catchup')state.catchup.transportDiag={...(state.catchup.transportDiag||{}),state:this._diagFetchState,bytes:this._diagFetchBytes,readerDone:this._diagReaderDone,elapsedMs:Date.now()-this._diagFetchStartedAt};log('SAFARI_FETCH onComplete bytes='+this._diagFetchBytes+' readerDone='+this._diagReaderDone+' elapsedMs='+(Date.now()-this._diagFetchStartedAt));
         if(this.onComplete) this.onComplete((range&&range.from!=null)?range.from:0,pos-1);
       }).catch(e=>{
+        this._diagFetchState=(e&&e.name==='AbortError')?'aborted':'error';if(state.sourceKind==='catchup')state.catchup.transportDiag={...(state.catchup.transportDiag||{}),state:this._diagFetchState,bytes:this._diagFetchBytes,readerDone:this._diagReaderDone,error:String(e&&e.name||e),elapsedMs:Date.now()-this._diagFetchStartedAt};log('SAFARI_FETCH catch state='+this._diagFetchState+' bytes='+this._diagFetchBytes+' closed='+this._closed+' error='+String(e&&e.name||e));
         if(this._closed || (e&&e.name==='AbortError')) return;
         this._status=3;
         if(this.onError) this.onError('Exception',{code:-1,msg:String(e&&e.message||e)});
       });
     }
-    abort(){ try{ if(this._aborter) this._aborter.abort(); }catch(e){} this._status=0; }
-    destroy(){ this._closed=true; this.abort(); this._buffer=new Uint8Array(0); this._startupHoldParts.length = 0; this._startupHoldBytes = 0;}
+    abort(){if(state.sourceKind==='catchup')log('SAFARI_FETCH abort state='+this._diagFetchState+' bytes='+this._diagFetchBytes+' readerDone='+this._diagReaderDone);try{ if(this._aborter) this._aborter.abort(); }catch(e){} this._status=0; }
+    destroy(){if(state.sourceKind==='catchup')log('SAFARI_FETCH destroy state='+this._diagFetchState+' bytes='+this._diagFetchBytes+' readerDone='+this._diagReaderDone);this._closed=true; this.abort(); this._buffer=new Uint8Array(0); this._startupHoldParts.length = 0; this._startupHoldBytes = 0;}
     isWorking(){ return this._status===1 || this._status===2; }
     get status(){ return this._status; }
     get needStashBuffer(){ return this._needStash; }
