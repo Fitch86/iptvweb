@@ -1706,7 +1706,7 @@ function bjCompactSecond(ms){
 }
 function setSafariCatchupVideoRate(rate){
   if(!state.catchup.active||!isIOSSafari())return;
-  const next=rate===1.5?1.5:1;
+  const next=rate===1.25?1.25:1;
   const video=$('video'),ctx=state.webAudioCtx;
   state.safariCatchupVideoRate=next;
   state.safariCatchupAudioRate=next;
@@ -1727,7 +1727,7 @@ function setSafariCatchupVideoRate(rate){
     flushSafariCatchupPcm(state.seq);
   }
   const button=$('catchupRateBtn');
-  if(button){button.textContent=next===1.5?'1.5×':'1×';button.setAttribute('aria-pressed',next===1.5?'true':'false');}
+  if(button){button.textContent=next===1.25?'1.25×':'1×';button.setAttribute('aria-pressed',next===1.25?'true':'false');}
   log('SAFARI_CATCHUP_RATE video+PCM rate='+next+' audioClock=independent');
 }
 function updateCatchupRateButton(){
@@ -1735,7 +1735,7 @@ function updateCatchupRateButton(){
   if(!button)return;
   const visible=!!state.catchup.active&&isIOSSafari();
   button.hidden=!visible;
-  if(visible){button.textContent=state.safariCatchupVideoRate===1.5?'1.5×':'1×';button.setAttribute('aria-pressed',state.safariCatchupVideoRate===1.5?'true':'false');}
+  if(visible){button.textContent=state.safariCatchupVideoRate===1.25?'1.25×':'1×';button.setAttribute('aria-pressed',state.safariCatchupVideoRate===1.25?'true':'false');}
 }
 function updateCatchupSeekbar(previewOffset){
   const wrap=$('catchupSeekbar'),range=$('catchupSeekRange');
@@ -4711,7 +4711,7 @@ installPlayerFullscreen();
 $('stopBtn2').onclick=stopPlayback;
 $('liveBtn').onclick=()=>{if(state.current)play(state.current);};
 $('catchupStartBtn').onclick=startCatchup;
-$('catchupRateBtn').onclick=()=>setSafariCatchupVideoRate(state.safariCatchupVideoRate===1?1.5:1);
+$('catchupRateBtn').onclick=()=>setSafariCatchupVideoRate(state.safariCatchupVideoRate===1?1.25:1);
 $('catchupSeekRange').addEventListener('input',e=>{
   state.catchup.dragging=true;
   updateCatchupSeekbar(Number(e.target.value));
