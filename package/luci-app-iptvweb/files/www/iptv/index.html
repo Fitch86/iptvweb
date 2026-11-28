@@ -1616,9 +1616,15 @@ function attachVideoDiagnostics(v, seq){
   });
   v.addEventListener('ratechange',()=>{if(seq===state.seq&&state.sourceKind==='catchup')log('SAFARI_CATCHUP_DIAG ratechange rate='+Number(v.playbackRate||1)+' currentTime='+Number(v.currentTime||0).toFixed(3)+' readyState='+v.readyState+' paused='+v.paused);});
   v.addEventListener('pause', ()=>{
-    if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
-    state.userPaused=true;
-  });
+     if(seq!==state.seq || !state.playIssuedAt || state.stopping) return;
+     // iOS Safari catch-up may pause automatically at a temporary MSE timeline end.
+     // Explicit UI pauses are marked by toggleVideoPlayback() before this event.
+     if(state.sourceKind==='catchup' && isIOSSafari()){
+       log('SAFARI_CATCHUP_DIAG pause-event userPaused='+state.userPaused+' ended='+v.ended+' currentTime='+Number(v.currentTime||0).toFixed(3));
+       return;
+     }
+     state.userPaused=true;
+   });
   v.addEventListener('play', ()=>{
     if(seq!==state.seq) return;
     state.userPaused=false;
